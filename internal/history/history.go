@@ -23,10 +23,23 @@ const (
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]|\x1b[>=<]|\x1b\[[\?]?[0-9;]*[hlJKHfG]`)
 
 type PaneState struct {
-	History       []string `json:"history"`
-	Footer        []string `json:"footer"`
-	StaleRefusals int      `json:"stale_refusals"`
-	LastHash      string   `json:"last_hash"`
+	History         []string `json:"history"`
+	Footer          []string `json:"footer"`
+	StaleRefusals   int      `json:"stale_refusals"`
+	LastHash        string   `json:"last_hash"`
+	SnapshotVersion int      `json:"snapshot_version,omitempty"`
+	TerminalID      string   `json:"terminal_id,omitempty"`
+	ReadSource      string   `json:"read_source,omitempty"`
+	GeometryEpoch   uint64   `json:"geometry_epoch,omitempty"`
+	LeaseRevision   uint64   `json:"lease_revision,omitempty"`
+	Columns         int      `json:"columns,omitempty"`
+	Rows            int      `json:"rows,omitempty"`
+	SegmentStart    int      `json:"segment_start,omitempty"`
+	LiveStart       int      `json:"live_start,omitempty"`
+
+	loaded          bool
+	dirty           bool
+	mutationVersion uint64
 }
 
 type Manager struct {
@@ -58,43 +71,7 @@ func (m *Manager) MergeLimited(paneID string, rawContent string, limit int) (str
 }
 
 func (m *Manager) merge(paneID string, rawContent string, limit int) (string, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	state := m.loadState(paneID)
-
-	body, footer := splitSnapshot(rawContent)
-	if len(body) == 0 {
-		return joinContent(state, limit)
-	}
-
-	hash := hashLines(body)
-	if hash == state.LastHash && state.StaleRefusals == 0 {
-		return joinContent(state, limit)
-	}
-	state.LastHash = hash
-	state.Footer = footer
-
-	normalized := normalizeLines(body)
-	histNorm := normalizeLines(state.History)
-
-	if overlap := tailOverlap(histNorm, normalized); overlap > 0 {
-		historyStart := len(state.History) - overlap
-		copy(state.History[historyStart:], body[:overlap])
-		state.History = append(state.History, body[overlap:]...)
-	} else if match := sequenceMatch(histNorm, normalized); match.Size >= 2 {
-		m.applyMatch(state, body, match)
-	} else {
-		state.History = append(state.History, body...)
-		state.StaleRefusals = 0
-	}
-
-	if len(state.History) > MaxLines {
-		state.History = state.History[len(state.History)-MaxLines:]
-	}
-
-	m.maybeSave(paneID, state)
-	return joinContent(state, limit)
+	return m.MergeSnapshotLimited(paneID, rawContent, SnapshotContext{ReadSource: SourceLegacy}, limit)
 }
 
 func (m *Manager) Content(paneID string, limit int) string {
@@ -189,7 +166,13 @@ func (m *Manager) loadState(paneID string) *PaneState {
 	s := &PaneState{}
 	data, err := os.ReadFile(m.stateFile(paneID))
 	if err == nil {
-		json.Unmarshal(data, s)
+		if json.Unmarshal(data, s) != nil {
+			*s = PaneState{}
+		} else {
+			s.loaded = true
+			validateSnapshotState(s)
+			trimSnapshotState(s)
+		}
 	}
 	m.states[paneID] = s
 	return s

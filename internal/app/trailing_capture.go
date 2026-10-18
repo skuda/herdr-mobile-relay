@@ -31,13 +31,13 @@ func (s *Server) enqueueHistoryTransition(event coordinator.StatusTransition) {
 	if event.Revision <= s.historyStatusRevision[event.PaneID] {
 		return
 	}
-	if active, ok := s.historyActive[event.PaneID]; ok && (active.terminalID != event.TerminalID || event.Generation < active.generation) {
+	if active, ok := s.historyActive[event.PaneID]; ok && (event.Generation < active.generation || event.Generation == active.generation && active.terminalID != event.TerminalID) {
 		return
 	}
-	s.historyStatusRevision[event.PaneID] = event.Revision
 	if event.OldStatus != "working" && event.OldStatus != "blocked" || event.NewStatus == "working" || event.NewStatus == "blocked" {
 		return
 	}
+	s.historyStatusRevision[event.PaneID] = event.Revision
 	if existing := s.historyPending[event.PaneID]; existing != nil && existing.identity.terminalID == event.TerminalID {
 		s.historyRequestSequence++
 		existing.sequence = s.historyRequestSequence

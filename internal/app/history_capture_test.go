@@ -245,6 +245,33 @@ func TestTrailingCaptureUsesPaneWideSourceAndSurvivesRestoreBoundary(t *testing.
 	}
 }
 
+func TestReplacementDepartureBeforeReconciliationIsRetained(t *testing.T) {
+	s, _, _ := captureServer(t, false)
+	s.state.SetOnStatusTransition(s.enqueueHistoryTransition)
+	agent, _ := s.state.Agent("pane-1")
+	agent.TerminalID = "replacement"
+	agent.Status = "working"
+	s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+	s.state.CommitEvent("pane-1", "idle", 1)
+	pending := s.historyPending["pane-1"]
+	if pending == nil || pending.identity.terminalID != "replacement" {
+		t.Fatalf("new terminal departure lost: %+v", pending)
+	}
+	s.syncHistoryPanes(s.state.Snapshot())
+	if s.historyPending["pane-1"] == nil {
+		t.Fatal("reconciliation removed newer terminal request")
+	}
+}
+
+func TestReversedStatusDeliveryRetainsEarlierDeparture(t *testing.T) {
+	s, _, _ := captureServer(t, false)
+	s.enqueueHistoryTransition(coordinator.StatusTransition{PaneID: "pane-1", TerminalID: "terminal-1", OldStatus: "idle", NewStatus: "working", Revision: 11})
+	pendingDeparture(s, 10)
+	if s.historyPending["pane-1"] == nil {
+		t.Fatal("later non-departure delivery invalidated pending departure")
+	}
+}
+
 func TestTrailingCaptureBoundsAttemptsAndRequestLifetime(t *testing.T) {
 	for _, expire := range []string{"attempts", "lifetime"} {
 		s, _, _ := captureServer(t, false)

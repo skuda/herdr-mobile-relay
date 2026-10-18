@@ -206,8 +206,9 @@ func (s *Server) pollPaneWatch(watch *paneWatch) {
 func (s *Server) readPaneWatchFrame(watch *paneWatch) (map[string]any, *paneWatchFrame) {
 	message := watchMessage(watch)
 	s.applyPaneReadLease(watch.client.ID(), message)
-	response := s.preparePaneResponse(message, s.dispatcher.HandleReadPane(watch.ctx, message))
+	response := s.readPaneResponse(watch.ctx, message)
 	response["target"] = watch.target
+	response = fitPaneContentResponse(response)
 	content, ok := successfulPaneContent(response)
 	if !ok {
 		return response, nil
@@ -323,11 +324,11 @@ func paneWatchUpdate(
 		segments := []panedelta.Segment{{
 			CopyLines: strings.Count(current.content, "\n") + 1,
 		}}
-		return paneDeltaResponse(response, acknowledged.contentFingerprint, segments)
+		return fittedPaneDelta(response, acknowledged.contentFingerprint, segments)
 	}
 	segments := panedelta.Build(acknowledged.content, current.content)
 	if panedelta.Efficient(segments, current.content) {
-		return paneDeltaResponse(response, acknowledged.contentFingerprint, segments)
+		return fittedPaneDelta(response, acknowledged.contentFingerprint, segments)
 	}
 	response["ack_required"] = true
 	return response

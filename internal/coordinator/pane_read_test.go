@@ -5,11 +5,187 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
+
+func TestPhysicalFlightSharedAcrossReaderLimits(t *testing.T) {
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{{PaneID: "p", TerminalID: "terminal", Agent: "claude", Status: "idle"}}, 0)
+	d := NewDispatcher(nil, state, nil, testLogger())
+	entered, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	opts := PaneReadOptions{Physical: true, SourceRevision: 1,
+		Execute: func(ctx context.Context, request PaneReadRequest, _ func(context.Context, PaneReadRequest) (herdr.PaneRead, error)) (PaneReadResult, error) {
+			if request.Lines != 1000 || !request.Physical {
+				t.Errorf("capture shape = %+v", request)
+			}
+			calls.Add(1)
+			close(entered)
+			<-release
+			return PaneReadResult{Read: herdr.PaneRead{Content: []byte(strings.Repeat("row\n", 119) + "row")},
+				Response: map[string]any{"content": strings.Repeat("row\n", 119) + "row"}, Capture: PaneReadCapture{Sequence: 7, Admitted: true}}, nil
+		}}
+	type result struct {
+		response map[string]any
+		capture  PaneReadCapture
+	}
+	done := make(chan result, 3)
+	read := func(lines int) {
+		response, capture := d.HandleReadPaneWithOptions(context.Background(), map[string]any{"pane_id": "p", "lines": lines, "format": "ansi"}, opts)
+		done <- result{response, capture}
+	}
+	go read(100)
+	<-entered
+	go read(500)
+	go read(1000)
+	deadline := time.Now().Add(time.Second)
+	for {
+		d.readMu.Lock()
+		followers := 0
+		for _, call := range d.reads {
+			followers += call.followers
+		}
+		d.readMu.Unlock()
+		if followers == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatal("followers did not join physical flight")
+		}
+		runtime.Gosched()
+	}
+	close(release)
+	lengths := map[int]int{}
+	for range 3 {
+		r := <-done
+		if r.capture.Sequence != 7 || !r.capture.Admitted {
+			t.Fatalf("shared capture = %+v", r.capture)
+		}
+		lengths[strings.Count(r.response["content"].(string), "\n")+1]++
+		r.response["private"] = true
+	}
+	if calls.Load() != 1 || lengths[100] != 1 || lengths[120] != 2 {
+		t.Fatalf("calls=%d lengths=%v", calls.Load(), lengths)
+	}
+}
+
+func TestSingleFlightFollowerCannotRelabelOlderSnapshot(t *testing.T) {
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{{PaneID: "p", TerminalID: "terminal", Agent: "claude", Status: "idle"}}, 0)
+	d := NewDispatcher(nil, state, nil, testLogger())
+	entered, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	opts := PaneReadOptions{Physical: true, SourceRevision: 1,
+		Execute: func(context.Context, PaneReadRequest, func(context.Context, PaneReadRequest) (herdr.PaneRead, error)) (PaneReadResult, error) {
+			calls.Add(1)
+			close(entered)
+			<-release
+			return PaneReadResult{Read: herdr.PaneRead{Content: []byte("old raw page")}, Capture: PaneReadCapture{Sequence: 1, TerminalID: "terminal"}}, nil
+		}}
+	type result struct {
+		response map[string]any
+		capture  PaneReadCapture
+	}
+	done := make(chan result, 2)
+	read := func() {
+		response, capture := d.HandleReadPaneWithOptions(context.Background(), map[string]any{"pane_id": "p", "lines": 100, "format": "ansi"}, opts)
+		done <- result{response, capture}
+	}
+	go read()
+	<-entered
+	go read()
+	deadline := time.Now().Add(time.Second)
+	for {
+		d.readMu.Lock()
+		joined := false
+		for _, call := range d.reads {
+			joined = call.followers == 1
+		}
+		d.readMu.Unlock()
+		if joined {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatal("follower did not join")
+		}
+		runtime.Gosched()
+	}
+	close(release)
+	for range 2 {
+		result := <-done
+		if result.capture.Sequence != 1 || result.capture.Admitted || result.response["content"] != "old raw page" {
+			t.Fatalf("relabelled shared result = %+v", result)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("underlying calls=%d", calls.Load())
+	}
+}
+
+func TestSingleFlightRejectedOrCancelledOwnerDoesNotTransferAdmission(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		state := NewState(testLogger())
+		state.CommitInventory([]*AgentState{{PaneID: "p", TerminalID: "terminal", Agent: "claude", Status: "idle"}}, 0)
+		d := NewDispatcher(nil, state, nil, testLogger())
+		entered, release := make(chan struct{}), make(chan struct{})
+		var calls atomic.Int32
+		opts := PaneReadOptions{Physical: true, Execute: func(ctx context.Context, _ PaneReadRequest, _ func(context.Context, PaneReadRequest) (herdr.PaneRead, error)) (PaneReadResult, error) {
+			sequence := calls.Add(1)
+			if sequence == 1 {
+				close(entered)
+				<-release
+			}
+			result := PaneReadResult{Read: herdr.PaneRead{Content: []byte("raw")}, Capture: PaneReadCapture{Sequence: uint64(sequence), Admitted: sequence > 1}}
+			if cancelled && sequence == 1 {
+				return result, context.Canceled
+			}
+			return result, nil
+		}}
+		done := make(chan PaneReadCapture, 2)
+		read := func() {
+			_, capture := d.HandleReadPaneWithOptions(context.Background(), map[string]any{"pane_id": "p", "lines": 100, "format": "ansi"}, opts)
+			done <- capture
+		}
+		go read()
+		<-entered
+		go read()
+		deadline := time.Now().Add(time.Second)
+		for {
+			d.readMu.Lock()
+			joined := false
+			for _, call := range d.reads {
+				joined = call.followers == 1
+			}
+			d.readMu.Unlock()
+			if joined {
+				break
+			}
+			if time.Now().After(deadline) {
+				close(release)
+				t.Fatal("follower did not join")
+			}
+			runtime.Gosched()
+		}
+		close(release)
+		for range 2 {
+			if capture := <-done; capture.Admitted || capture.Sequence != 1 {
+				t.Fatalf("rejected owner capture = %+v", capture)
+			}
+		}
+		read()
+		if capture := <-done; !capture.Admitted || capture.Sequence != 2 {
+			t.Fatalf("fresh retry = %+v", capture)
+		}
+	}
+}
 
 func TestHandleReadPaneUsesRecentRowsForResizedPane(t *testing.T) {
 	dir := t.TempDir()

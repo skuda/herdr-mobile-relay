@@ -2033,7 +2033,7 @@ func TestPaneWatchUpdateSendsResizeSettledDelta(t *testing.T) {
 	}
 }
 
-func TestPreparePaneResponsePreservesHistoryForViewportOnlyRead(t *testing.T) {
+func TestPreparePaneResponsePreservesHistoryForUnknownViewportOnlyRead(t *testing.T) {
 	s := testServerWithCacheDir(t.TempDir())
 	s.state.CommitInventory([]*coordinator.AgentState{{
 		PaneID: "pane-1", Agent: "claude", Status: "idle",
@@ -3346,7 +3346,7 @@ func TestRemovedPaneHistoryIsDiscarded(t *testing.T) {
 	s := New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s.historyM.Merge("pane-1", "one\ntwo\nthree\nfour\nfive\nsix\nseven")
 	s.historyCaptureMu.Lock()
-	s.historyActive["pane-1"] = true
+	s.historyActive["pane-1"] = historyIdentity{}
 	s.historyLast["pane-1"] = time.Now()
 	s.historyCaptureMu.Unlock()
 

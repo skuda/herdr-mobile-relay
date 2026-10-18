@@ -139,6 +139,7 @@ type Server struct {
 	inventoryPublicationObserver func(string)
 	// Optional test hook between history loading and tuple revalidation.
 	conversationHistoryReadObserver func()
+	historyReadFinishedObserver     func(historyReadToken)
 
 	paneWatchMu sync.Mutex
 	paneWatches map[string]*paneWatch
@@ -146,7 +147,9 @@ type Server struct {
 	historyCaptureMu  sync.Mutex
 	historyInflight   map[string]bool
 	historyLast       map[string]time.Time
-	historyActive     map[string]bool
+	historyActive     map[string]historyIdentity
+	historySequence   uint64
+	historyArchived   map[string]uint64
 	historyReconciled bool
 	pushReconcileMu   sync.Mutex
 	pushReconciled    bool
@@ -264,7 +267,8 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		inventoryView:       cloneStringMap(initialInventory.Status),
 		historyInflight:     make(map[string]bool),
 		historyLast:         make(map[string]time.Time),
-		historyActive:       make(map[string]bool),
+		historyActive:       make(map[string]historyIdentity),
+		historyArchived:     make(map[string]uint64),
 		pushTestLast:        make(map[string]time.Time),
 	}
 }
@@ -755,10 +759,11 @@ func (s *Server) Run(ctx context.Context) error {
 		case "read_pane":
 			s.applyPaneReadLease(client.ID(), msg)
 			s.stopPaneWatch(client.ID(), inbound.PaneID)
-			resp := s.preparePaneResponse(msg, s.dispatcher.HandleReadPane(ctx, msg))
+			resp := s.readPaneResponse(ctx, msg)
 			if inbound.Target != nil {
 				resp["target"] = *inbound.Target
 			}
+			resp = fitPaneContentResponse(resp)
 			if unchanged := unchangedPaneResponse(msg, resp); unchanged != nil {
 				s.hub.Send(client, unchanged)
 				break
@@ -2107,21 +2112,8 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 		}()
 		readCtx, cancel := context.WithTimeout(taskCtx, 3*time.Second)
 		defer cancel()
-		read, err := s.herdrC.ReadPane(readCtx, paneID, history.MaxLines, "ansi")
-		content := read.Content
-		if err != nil || len(content) == 0 || question.LayoutHint(string(content)) {
-			return
-		}
-		agent, ok := s.state.Agent(paneID)
-		if !ok || !isClaudeLike(agent.Agent) {
-			return
-		}
-		s.historyCaptureMu.Lock()
-		defer s.historyCaptureMu.Unlock()
-		if !s.historyActive[paneID] {
-			return
-		}
-		s.historyM.Merge(paneID, string(content))
+		s.syncHistoryPanes(s.state.Snapshot())
+		_, _ = s.captureTerminalHistory(readCtx, paneID)
 	})
 	if started {
 		return
@@ -2132,29 +2124,39 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 }
 
 func (s *Server) syncHistoryPanes(agents []*coordinator.AgentState) {
-	active := make(map[string]bool, len(agents))
+	active := make(map[string]historyIdentity, len(agents))
+	present := make(map[string]bool, len(agents))
 	for _, agent := range agents {
 		if isClaudeLike(agent.Agent) {
-			active[agent.PaneID] = true
+			active[agent.PaneID] = historyIdentity{terminalID: agent.TerminalID, generation: agent.Generation}
+			present[agent.PaneID] = true
 		}
 	}
-
+	forgotten := make(map[string]string)
 	s.historyCaptureMu.Lock()
-	defer s.historyCaptureMu.Unlock()
 	if !s.historyReconciled {
-		s.historyM.Reconcile(active)
+		s.historyM.Reconcile(present)
 		s.historyReconciled = true
 	}
-	for paneID := range s.historyActive {
-		if active[paneID] {
+	for paneID, previous := range s.historyActive {
+		current, exists := active[paneID]
+		if exists && (previous.terminalID == "" || current.terminalID == "" || previous.terminalID == current.terminalID) {
 			continue
 		}
 		delete(s.historyActive, paneID)
 		delete(s.historyLast, paneID)
+		delete(s.historyArchived, paneID)
 		s.historyM.Discard(paneID)
+		forgotten[paneID] = previous.terminalID
 	}
-	for paneID := range active {
-		s.historyActive[paneID] = true
+	for paneID, identity := range active {
+		s.historyActive[paneID] = identity
+	}
+	s.historyCaptureMu.Unlock()
+	if s.paneSizeM != nil {
+		for paneID, terminalID := range forgotten {
+			s.paneSizeM.ForgetHistoryPane(paneID, terminalID)
+		}
 	}
 }
 
@@ -2226,15 +2228,10 @@ func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, se
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	read, err := s.herdrC.ReadPane(readCtx, paneID, history.MaxLines, "ansi")
-	content := read.Content
-	if err != nil || len(content) == 0 {
+	s.syncHistoryPanes(s.state.Snapshot())
+	completionContent, err := s.captureTerminalHistory(readCtx, paneID)
+	if err != nil || completionContent == "" {
 		return ""
-	}
-	raw := string(content)
-	completionContent := raw
-	if isClaudeLike(agent) && !question.LayoutHint(raw) {
-		completionContent = s.historyM.Merge(paneID, raw)
 	}
 	if response := question.LatestCompletedResponse(completionContent); response != "" {
 		return response

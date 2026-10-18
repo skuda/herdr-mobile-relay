@@ -771,6 +771,18 @@ describe('virtual terminal row index', () => {
     expect(range.end - range.start).toBeLessThan(100);
   });
 
+  it('rejects redraw header matches and validates prepends near the visible anchor', () => {
+    const render = (rows: string[]) => renderTerminalContent(rows.join('\n'), 'ansi', true, true, 40).rows;
+    const header = Array.from({ length: 8 }, (_, i) => `header ${i}`);
+    const previous = [...header, ...Array.from({ length: 492 }, (_, i) => i.toString(36).padStart(3, '0'))];
+    const redraw = [...Array.from({ length: 20 }, (_, i) => `redraw ${i}`), ...header, ...previous.slice(28)];
+    expect(renderedRowShift(render(previous), render(redraw), 250)).toBe(0);
+    const archive = [...Array.from({ length: 20 }, (_, i) => `archive ${i}`), ...header, ...Array.from({ length: 22 }, (_, i) => `extra ${i}`)];
+    expect(renderedRowShift(render(previous), render([...archive, ...previous]), 250)).toBe(-50);
+    const repeated = Array.from({ length: 500 }, (_, i) => `row ${i % 10}`);
+    expect(renderedRowShift(render(repeated), render([...header, ...repeated]), 250)).toBe(0);
+  });
+
   it('detects prepends around short blank and repeated contextual rows', () => {
     const render = (rows: string[]) => renderTerminalContent(rows.join('\n'), 'ansi', true, true, 40).rows;
     for (const rows of [

@@ -771,7 +771,7 @@
       ? null
       : pendingResizeAnchor || currentVirtualAnchor(previousTop);
     // Shift the anchor index for cropped or prepended context blocks.
-    const rowShift = renderedRowShift(renderedRows, rendered.rows);
+    const rowShift = renderedRowShift(renderedRows, rendered.rows, previousAnchor?.index);
     if (rowShift) wideGridOffsets.clear();
     if (previousAnchor && rowShift) {
       previousAnchor = { ...previousAnchor, index: Math.max(0, previousAnchor.index - rowShift) };

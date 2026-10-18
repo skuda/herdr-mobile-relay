@@ -2532,6 +2532,24 @@ async function openHistoryLease(page: Page) {
   await server(page, 0, { type: 'command_result', action: 'lease_pane_size', request_id: lease.request_id, ok: true, phase: 'completed', data: { columns: 40, rows: 46 } });
 }
 
+async function toggleHistoryLease(page: Page, enabled: boolean) {
+  const leases = (await leaseCommands(page)).length;
+  const releases = (await releaseCommands(page)).length;
+  await handshake(page, 0, { capabilities: enabled ? [...optInCapabilities, 'pane_realtime_delta'] : ['attention_classification', 'pane_realtime_delta'] });
+  if (!enabled) {
+    for (const lease of (await leaseCommands(page)).slice(1)) {
+      await server(page, 0, { type: 'command_result', action: 'lease_pane_size', request_id: lease.request_id, ok: true, phase: 'completed', data: { columns: 40, rows: 46 } });
+    }
+    await expect.poll(async () => (await releaseCommands(page)).length).toBeGreaterThan(releases);
+    const release = (await releaseCommands(page)).at(-1)!;
+    await server(page, 0, { type: 'command_result', action: 'release_pane_size', request_id: release.request_id, ok: true, phase: 'completed' });
+  } else {
+    await expect.poll(async () => (await leaseCommands(page)).length).toBeGreaterThan(leases);
+    const lease = (await leaseCommands(page)).at(-1)!;
+    await server(page, 0, { type: 'command_result', action: 'lease_pane_size', request_id: lease.request_id, ok: true, phase: 'completed', data: { columns: 40, rows: 46 } });
+  }
+}
+
 async function historyFrame(page: Page, rows: string[], extra: Record<string, unknown> = {}) {
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', viewport_only: true, content: rows.join('\n'), ...extra });
 }
@@ -2566,8 +2584,21 @@ test.describe('leased fullscreen history qualification', () => {
       await expect(page.getByRole('log')).toContainText(`marker ${String(count - 1).padStart(5, '0')}`);
       expect(await page.locator('[data-terminal-row]').count()).toBeLessThan(250);
     }
+    await historyScroll(page, 'top');
+    await expect(page.locator('[data-terminal-row="20"]')).toHaveText('');
+    const blankHeight = await page.locator('[data-terminal-row="20"]').evaluate((element) => element.getBoundingClientRect().height);
+    expect(blankHeight).toBeGreaterThan(10);
+    const styled = page.locator('[data-terminal-row="21"]');
+    await expect(styled).toContainText('styled row');
+    expect(await styled.evaluate((element) => getComputedStyle(element).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
+    await historyScroll(page, 'bottom');
     await server(page, 0, { type: 'pane_delta', pane_id: 'w1:p1', format: 'ansi', viewport_only: true, base_fingerprint: 'history-10000', content_fingerprint: 'delta', segments: [{ copy_lines: 10000 }, { text: '\nlatest footer' }] });
     await expect(page.getByRole('log')).toContainText('latest footer');
+    const clipped = Array.from({ length: 300 }, (_, index) => `\u001b[44mstyled suffix ${index} ${'X'.repeat(60)}\u001b[0m`);
+    await historyFrame(page, clipped, { truncated: true });
+    await expect(page.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '300');
+    await expect(page.getByRole('log')).toContainText('styled suffix 299');
+    await expect(page.getByRole('status').filter({ hasText: 'Older terminal history is not shown' })).toBeVisible();
   });
 
   test('S6-02 applies a 40-column shared lease on a wider phone', async ({ page }) => {
@@ -2631,11 +2662,25 @@ test.describe('leased fullscreen history qualification', () => {
 
   test('S6-07 resumes after settled metadata wait expiry release and refocus', async ({ page }) => {
     await openHistoryLease(page);
-    await historyFrame(page, ['stable page']);
+    await historyFrame(page, ['stable unleased page']);
+    await toggleHistoryLease(page, false);
+    await historyFrame(page, ['stable unleased page'], { viewport_only: false });
+    await toggleHistoryLease(page, true);
     await historyFrame(page, ['settling page'], { resize_settling: true });
-    await page.waitForTimeout(4200);
-    await expect(page.getByRole('log')).toContainText('settling page');
+    await page.waitForTimeout(100);
+    await expect(page.getByRole('log')).toContainText('stable unleased page');
+    await expect(page.getByRole('log')).not.toContainText('settling page');
     await historyFrame(page, ['settling page'], { resize_settling: false });
+    await expect(page.getByRole('log')).toContainText('settling page');
+    await toggleHistoryLease(page, false);
+    await historyFrame(page, ['second stable page'], { viewport_only: false });
+    await toggleHistoryLease(page, true);
+    await historyFrame(page, ['timeout page'], { resize_settling: true });
+    await page.waitForTimeout(100);
+    await expect(page.getByRole('log')).toContainText('second stable page');
+    await expect(page.getByRole('log')).not.toContainText('timeout page');
+    await page.waitForTimeout(4100);
+    await expect(page.getByRole('log')).toContainText('timeout page');
     await page.evaluate(() => { Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' }); document.dispatchEvent(new Event('visibilitychange')); Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' }); document.dispatchEvent(new Event('visibilitychange')); });
     await historyFrame(page, ['after refocus']);
     await expect(page.getByRole('log')).toContainText('after refocus');
@@ -2649,6 +2694,7 @@ test.describe('leased fullscreen history qualification', () => {
     await expect(page.getByRole('status').filter({ hasText: 'Older terminal history is not shown' })).toBeVisible();
     await historyFrame(page, ['fitting page'], { truncated: false });
     await expect(page.getByRole('log')).toContainText('fitting page');
+    await expect(page.getByRole('status').filter({ hasText: 'Older terminal history is not shown' })).toHaveCount(0);
   });
 
   test('S6-09 renders displaced rows before one current fixed header', async ({ page }) => {
@@ -2660,13 +2706,23 @@ test.describe('leased fullscreen history qualification', () => {
 
   test('S6-10 keeps anchors through legacy physical and restored frames', async ({ page }) => {
     await openHistoryLease(page);
-    const rows = historyRows(500);
+    await toggleHistoryLease(page, false);
+    const rows = Array.from({ length: 500 }, (_, index) => `row ${index.toString().padStart(3, '0')}`);
     await historyFrame(page, rows, { viewport_only: false });
     await historyScroll(page, 'middle'); await page.waitForTimeout(100);
     const before = await historyAnchor(page);
-    await historyFrame(page, rows);
-    await historyFrame(page, rows, { viewport_only: false });
+    await toggleHistoryLease(page, true);
+    await historyFrame(page, [...rows, 'physical latest']);
+    await expect(page.getByRole('log')).toHaveClass(/resize-layout/);
     await expect.poll(async () => (await historyAnchor(page))?.text).toBe(before?.text);
+    expect(Math.abs((await historyAnchor(page))!.offset - before!.offset)).toBeLessThan(20);
+    await toggleHistoryLease(page, false);
+    await historyFrame(page, [...rows, 'physical latest', 'restored latest'], { viewport_only: false });
+    await expect(page.getByRole('log')).not.toHaveClass(/resize-layout/);
+    await expect.poll(async () => (await historyAnchor(page))?.text).toBe(before?.text);
+    expect(Math.abs((await historyAnchor(page))!.offset - before!.offset)).toBeLessThan(20);
+    await historyScroll(page, 'bottom');
+    await expect(page.getByRole('log')).toContainText('restored latest');
   });
 
   test('S6-11 keeps row count and scrolled anchor stable during progress redraws', async ({ page }) => {

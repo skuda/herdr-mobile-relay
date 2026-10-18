@@ -825,27 +825,42 @@ export function terminalScreenColumns(
 }
 
 /** Positive shifts describe a cropped prefix; negative shifts describe a prepend. */
-export function renderedRowShift(previous: RenderedTerminalRow[], current: RenderedTerminalRow[]): number {
-  const croppedPrefix = (older: RenderedTerminalRow[], newer: RenderedTerminalRow[]): number | null => {
-    if (!older.length || !newer.length) return null;
+export function renderedRowShift(previous: RenderedTerminalRow[], current: RenderedTerminalRow[], anchorIndex?: number): number {
+  if (!previous.length || !current.length) return 0;
+  const shifts = new Set<number>();
+  const matches = (oldStart: number, newStart: number, count: number) => {
+    if (oldStart < 0 || newStart < 0 || oldStart + count > previous.length || newStart + count > current.length) return false;
+    let nonEmpty = 0;
+    for (let i = 0; i < count; i += 1) {
+      if (previous[oldStart + i].text !== current[newStart + i].text) return false;
+      if (previous[oldStart + i].text.trim()) nonEmpty += 1;
+    }
+    return nonEmpty >= 2;
+  };
+  const anchorMatches = (shift: number) => {
+    const anchor = Math.min(previous.length - 1, Math.max(0, anchorIndex ?? Math.floor(previous.length / 2)));
+    const start = Math.max(0, shift, anchor - 4);
+    const count = Math.min(12, previous.length - start, current.length - (start - shift));
+    return count >= 2 && matches(start, start - shift, count);
+  };
+  const leadingSize = (rows: RenderedTerminalRow[]) => {
     let size = 0;
     let nonEmpty = 0;
-    while (size < newer.length && size < 32 && (nonEmpty < 2 || size < 8)) {
-      if (newer[size].text.trim()) nonEmpty += 1;
+    while (size < rows.length && size < 32 && (nonEmpty < 2 || size < 8)) {
+      if (rows[size].text.trim()) nonEmpty += 1;
       size += 1;
     }
-    if (nonEmpty < 2) return null;
-    for (let shift = 0; shift <= older.length - size; shift += 1) {
-      let index = 0;
-      while (index < size && older[shift + index].text === newer[index].text) index += 1;
-      if (index === size) return shift;
-    }
-    return null;
+    return size;
   };
-  const crop = croppedPrefix(previous, current);
-  if (crop !== null) return crop;
-  const prepend = croppedPrefix(current, previous);
-  return prepend === null ? 0 : -prepend;
+  const cropSize = leadingSize(current);
+  for (let shift = 0; shift <= previous.length - cropSize; shift += 1) {
+    if (matches(shift, 0, cropSize) && anchorMatches(shift)) shifts.add(shift);
+  }
+  const prependSize = leadingSize(previous);
+  for (let offset = 1; offset <= current.length - prependSize; offset += 1) {
+    if (matches(0, offset, prependSize) && anchorMatches(-offset)) shifts.add(-offset);
+  }
+  return shifts.size === 1 ? shifts.values().next().value! : 0;
 }
 
 

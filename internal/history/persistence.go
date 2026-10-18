@@ -63,7 +63,7 @@ func (m *Manager) saveState(job persistenceJob, now time.Time) error {
 	}
 	if err != nil {
 		state.dirty = true
-		state.saveDue = now.Add(time.Second)
+		state.saveDue = m.now().Add(time.Second)
 		return fmt.Errorf("save pane history %q: %w", job.paneID, err)
 	}
 	m.lastSave[job.paneID] = now

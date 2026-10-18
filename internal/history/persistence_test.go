@@ -66,6 +66,31 @@ func TestFooterOnlyDirtyStatePersists(t *testing.T) {
 	}
 }
 
+func TestSlowSaveBatchRetainsRetryGapAfterFailure(t *testing.T) {
+	m := NewManager(t.TempDir())
+	now := time.Unix(10000, 0)
+	m.now = func() time.Time { return now }
+	m.Merge("first", snapshotPage("A", "B"))
+	m.Merge("second", snapshotPage("C", "D"))
+	calls := 0
+	m.writeFile = func(path string, data []byte, mode os.FileMode) error {
+		calls++
+		if calls == 1 {
+			now = now.Add(5 * time.Second)
+			return os.WriteFile(path, data, mode)
+		}
+		return errors.New("failed after slow job")
+	}
+	if err := m.FlushDue(now); err == nil {
+		t.Fatal("failed job did not report error")
+	}
+	for paneID, state := range m.states {
+		if state.dirty && state.saveDue.Before(now.Add(time.Second)) {
+			t.Fatalf("pane %s retry=%v failure time=%v", paneID, state.saveDue, now)
+		}
+	}
+}
+
 func TestFailedSaveRetainsDirtyStateAndDoesNotAdvanceLastSave(t *testing.T) {
 	m := NewManager(t.TempDir())
 	now := time.Unix(10000, 0)

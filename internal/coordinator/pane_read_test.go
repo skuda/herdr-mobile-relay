@@ -76,6 +76,47 @@ func TestPhysicalFlightSharedAcrossReaderLimits(t *testing.T) {
 	}
 }
 
+func TestPaneResponseLimitsComposedAndRawRows(t *testing.T) {
+	for _, physical := range []bool{false, true} {
+		for _, admitted := range []bool{false, true} {
+			for _, tt := range []struct {
+				name          string
+				content       string
+				composed      string
+				raw           string
+				readTruncated bool
+				composedClip  bool
+				rawClip       bool
+			}{
+				{name: "trailing newline at limit", content: "one\ntwo\nthree\n", composed: "two\nthree\n", raw: "one\ntwo\nthree\n", composedClip: true},
+				{name: "trailing newline over limit", content: "archive\none\ntwo\nthree\n", composed: "two\nthree\n", raw: "one\ntwo\nthree\n", composedClip: true, rawClip: true},
+				{name: "below limit", content: "two\nthree\n", composed: "two\nthree\n", raw: "two\nthree\n"},
+				{name: "no trailing newline", content: "one\ntwo\nthree", composed: "one\ntwo\nthree", raw: "one\ntwo\nthree"},
+				{name: "upstream truncation", content: "two\nthree\n", composed: "two\nthree\n", raw: "two\nthree\n", readTruncated: true, composedClip: true, rawClip: true},
+			} {
+				t.Run(fmt.Sprintf("physical=%v/admitted=%v/%s", physical, admitted, tt.name), func(t *testing.T) {
+					state := NewState(testLogger())
+					state.CommitInventory([]*AgentState{{PaneID: "p", TerminalID: "terminal", Agent: "qoder", Status: "idle"}}, 0)
+					d := NewDispatcher(nil, state, nil, testLogger())
+					options := PaneReadOptions{Physical: physical,
+						Execute: func(context.Context, PaneReadRequest, func(context.Context, PaneReadRequest) (herdr.PaneRead, error)) (PaneReadResult, error) {
+							return PaneReadResult{Read: herdr.PaneRead{Content: []byte(tt.content), Truncated: tt.readTruncated},
+								Response: map[string]any{"content": tt.content}, Capture: PaneReadCapture{Admitted: admitted}}, nil
+						}}
+					response, _ := d.HandleReadPaneWithOptions(context.Background(), map[string]any{"pane_id": "p", "lines": 3, "format": "ansi"}, options)
+					want, clipped := tt.raw, tt.rawClip
+					if admitted {
+						want, clipped = tt.composed, tt.composedClip
+					}
+					if response["content"] != want || response["truncated"] != clipped {
+						t.Fatalf("limited response content=%q truncated=%v, want content=%q truncated=%v", response["content"], response["truncated"], want, clipped)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestSingleFlightFollowerCannotRelabelOlderSnapshot(t *testing.T) {
 	state := NewState(testLogger())
 	state.CommitInventory([]*AgentState{{PaneID: "p", TerminalID: "terminal", Agent: "claude", Status: "idle"}}, 0)

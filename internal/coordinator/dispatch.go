@@ -1288,7 +1288,15 @@ func (d *Dispatcher) handleReadPane(ctx context.Context, message map[string]any,
 	if composed, ok := response["content"].(string); ok {
 		content = composed
 	}
-	limited := string(capPaneContentLines([]byte(content), lines))
+	limited := content
+	if call.result.Capture.Admitted {
+		rows := strings.Split(content, "\n")
+		if len(rows) > lines {
+			limited = strings.Join(rows[len(rows)-lines:], "\n")
+		}
+	} else {
+		limited = string(capPaneContentLines([]byte(content), lines))
+	}
 	response["type"], response["pane_id"], response["content"] = "pane_content", paneID, limited
 	response["format"], response["viewport_only"] = format, terminalColumns > 0
 	response["truncated"] = read.Truncated || len(limited) != len(content)

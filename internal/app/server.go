@@ -2117,18 +2117,11 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 		return
 	}
 	s.historyCaptureMu.Lock()
-	closed := s.historyClosed
-	s.historyCaptureMu.Unlock()
-	if closed || s.historyCaptureDeferred(paneID) {
-		return
-	}
-	s.historyCaptureMu.Lock()
 	if s.historyClosed || s.historyInflight[paneID] || s.historyNow().Sub(s.historyLast[paneID]) < history.CaptureInterval {
 		s.historyCaptureMu.Unlock()
 		return
 	}
 	s.historyInflight[paneID] = true
-	s.historyLast[paneID] = s.historyNow()
 	s.historyCaptureMu.Unlock()
 
 	started := s.historyTasks.Start(func(taskCtx context.Context) {
@@ -2139,6 +2132,12 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 		}()
 		readCtx, cancel := context.WithTimeout(taskCtx, 3*time.Second)
 		defer cancel()
+		if s.historyCaptureDeferred(readCtx, paneID) {
+			return
+		}
+		s.historyCaptureMu.Lock()
+		s.historyLast[paneID] = s.historyNow()
+		s.historyCaptureMu.Unlock()
 		s.syncHistoryPanes(s.state.Snapshot())
 		_, _ = s.captureTerminalHistory(readCtx, paneID)
 	})

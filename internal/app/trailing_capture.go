@@ -93,12 +93,12 @@ func (s *Server) acknowledgeHistoryLocked(token historyReadToken) {
 	}
 }
 
-func (s *Server) historyCaptureDeferred(paneID string) bool {
+func (s *Server) historyCaptureDeferred(ctx context.Context, paneID string) bool {
 	agent, ok := s.state.Agent(paneID)
 	if !ok || s.paneSizeM == nil || !s.paneSizeM.Available() || agent.TerminalID == "" {
 		return false
 	}
-	handle, err := s.paneSizeM.BeginHistoryRead(context.Background(), paneID, agent.TerminalID)
+	handle, err := s.paneSizeM.BeginHistoryRead(ctx, paneID, agent.TerminalID)
 	if err != nil {
 		return false
 	}

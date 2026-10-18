@@ -245,6 +245,61 @@ func TestTrailingCaptureUsesPaneWideSourceAndSurvivesRestoreBoundary(t *testing.
 	}
 }
 
+type slowHistoryProvider struct {
+	*paneSizeFakes
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (p *slowHistoryProvider) PaneGet(ctx context.Context, paneID string) (*herdr.Pane, error) {
+	if paneID == "slow" {
+		p.once.Do(func() { close(p.entered) })
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return p.paneSizeFakes.PaneGet(ctx, paneID)
+}
+
+func TestSlowHistoryGeometryDoesNotBlockOtherPaneScheduling(t *testing.T) {
+	s, f, _ := captureServer(t, false)
+	agent, _ := s.state.Agent("pane-1")
+	slow := *agent
+	slow.PaneID = "slow"
+	s.state.CommitInventory([]*coordinator.AgentState{agent, &slow}, s.state.RevisionCounter())
+	s.syncHistoryPanes(s.state.Snapshot())
+	provider := &slowHistoryProvider{paneSizeFakes: f, entered: make(chan struct{})}
+	s.paneSizeM = panesize.NewManagerWith(provider, f, f, s.historyNow, nil)
+	root := t.TempDir()
+	bin := filepath.Join(root, "herdr")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf 'fast A\\nfast B'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s.herdrC = herdr.NewClient(bin, filepath.Join(root, "missing.sock"))
+	t.Cleanup(func() { _ = s.herdrC.Close() })
+	s.historyTasks = newLifecycleTasks(context.Background())
+	t.Cleanup(s.historyTasks.Stop)
+	done := make(chan struct{})
+	go func() {
+		s.scheduleHistoryCapture(context.Background(), "slow")
+		s.scheduleHistoryCapture(context.Background(), "pane-1")
+		close(done)
+	}()
+	select {
+	case <-provider.entered:
+	case <-time.After(time.Second):
+		t.Fatal("slow preflight did not enter")
+	}
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("slow preflight blocked other scheduling")
+	}
+	waitHistoryCapture(t, s)
+	if got := s.historyM.Content("pane-1", 0); got != "fast A\nfast B" {
+		t.Fatalf("fast pane capture=%q", got)
+	}
+}
+
 func TestReplacementDepartureBeforeReconciliationIsRetained(t *testing.T) {
 	s, _, _ := captureServer(t, false)
 	s.state.SetOnStatusTransition(s.enqueueHistoryTransition)

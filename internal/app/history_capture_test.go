@@ -1219,6 +1219,28 @@ func TestInlineAndUnsupportedLeaseReadsRemainRaw(t *testing.T) {
 	}
 }
 
+func TestUnleasedTextReadLeavesLegacyANSIArchiveUnchanged(t *testing.T) {
+	s, _, _ := captureServer(t, false)
+	retained := capturePage("retained A", "retained B")
+	if result := executeCapture(t, s, retained, false); !result.Capture.Admitted {
+		t.Fatal("legacy ANSI fixture was not admitted")
+	}
+	raw := capturePage("visible C", "visible D")
+	installPaneReadFixture(t, s, func(context.Context) (string, error) { return raw, nil })
+	response := s.readPaneResponse(context.Background(), map[string]any{"pane_id": "pane-1", "format": "text", "lines": 100})
+	if response["error"] != nil || response["content"] != raw || response["format"] != "text" {
+		t.Fatalf("text read did not return raw visible page: %+v", response)
+	}
+	if got := s.historyM.Content("pane-1", 0); got != retained {
+		t.Fatalf("text read changed ANSI archive: %q", got)
+	}
+	response = s.readPaneResponse(context.Background(), map[string]any{"pane_id": "pane-1", "format": "ansi", "lines": 100})
+	want := capturePage("retained A", "retained B", "visible C", "visible D")
+	if response["error"] != nil || response["content"] != want {
+		t.Fatalf("ANSI read did not compose retained rows: %+v", response)
+	}
+}
+
 func TestTextReadDoesNotEnterPhysicalArchive(t *testing.T) {
 	s, _, _ := captureServer(t, true)
 	request := captureRequest(s, false)

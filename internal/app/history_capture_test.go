@@ -207,7 +207,8 @@ func TestTrailingCaptureCoalescesAndCannotClearNewerRequest(t *testing.T) {
 
 func TestTrailingCaptureRekeysSameTerminalGenerationAndCancelsReplacement(t *testing.T) {
 	s, _, _ := captureServer(t, false)
-	pendingDeparture(s, 10)
+	s.state.SetOnStatusTransition(s.enqueueHistoryTransition)
+	s.state.CommitEvent("pane-1", "idle", 1)
 	first := *s.historyPending["pane-1"]
 	agent, _ := s.state.Agent("pane-1")
 	agent.SessionID = "discovered"
@@ -526,6 +527,29 @@ func TestStaleHistoryInventoryCannotDiscardReplacementPage(t *testing.T) {
 	s.syncHistorySnapshot(older)
 	if got := s.historyM.Content("pane-1", 0); got != capturePage("Q A", "Q B") {
 		t.Fatalf("stale inventory removed Q: %q", got)
+	}
+}
+
+func TestOlderHistorySnapshotPreservesNewerPendingDeparture(t *testing.T) {
+	s, _, _ := captureServer(t, false)
+	older := s.state.InventorySnapshot()
+	s.state.SetOnStatusTransition(s.enqueueHistoryTransition)
+	agent, _ := s.state.Agent("pane-1")
+	agent.TerminalID = "terminal-new"
+	s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+	s.state.CommitEvent("pane-1", "idle", 1)
+	pending := s.historyPending["pane-1"]
+	if pending == nil || pending.revision <= older.Revision || pending.identity.terminalID != "terminal-new" {
+		t.Fatalf("replacement departure was not queued after snapshot: %+v", pending)
+	}
+	want := *pending
+	s.syncHistorySnapshot(older)
+	if got := s.historyPending["pane-1"]; got == nil || *got != want {
+		t.Fatalf("older snapshot changed newer pending departure: got=%+v want=%+v", got, want)
+	}
+	s.syncHistorySnapshot(s.state.InventorySnapshot())
+	if got := s.historyPending["pane-1"]; got == nil || *got != want {
+		t.Fatalf("replacement snapshot changed pending departure: got=%+v want=%+v", got, want)
 	}
 }
 

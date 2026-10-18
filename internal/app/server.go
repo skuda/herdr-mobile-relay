@@ -2192,6 +2192,9 @@ func (s *Server) syncHistorySnapshot(snapshot coordinator.InventorySnapshot) {
 		s.historyActive[paneID] = identity
 	}
 	for paneID, pending := range s.historyPending {
+		if pending.revision > snapshot.Revision {
+			continue
+		}
 		identity, exists := active[paneID]
 		if !exists || identity.terminalID != pending.identity.terminalID {
 			delete(s.historyPending, paneID)

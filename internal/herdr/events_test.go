@@ -257,6 +257,62 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
+func TestPaneSnapshotPreservesScrollMetricPresence(t *testing.T) {
+	for _, tt := range paneScrollPresenceCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			var pane SnapshotPane
+			if err := json.Unmarshal([]byte(tt.json), &pane); err != nil {
+				t.Fatal(err)
+			}
+			pane.ID, pane.TerminalID = "pane-1", "term-1"
+			cache := NewSessionCache(SessionSnapshot{
+				Panes:  []SnapshotPane{pane},
+				Agents: []SnapshotAgent{{PaneID: pane.ID, TerminalID: pane.TerminalID, Agent: "claude"}},
+			})
+			assertScroll := func() {
+				t.Helper()
+				panes := cache.Snapshot().Panes
+				if len(panes) != 1 {
+					t.Fatalf("cached panes = %+v", panes)
+				}
+				encoded, err := json.Marshal(panes[0].Scroll)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(encoded) != tt.want {
+					t.Fatalf("cached scroll = %s, want %s", encoded, tt.want)
+				}
+			}
+			assertScroll()
+			data, err := json.Marshal(map[string]any{"pane": pane})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := cache.Apply(Event{Event: "pane.updated", Data: data}); err != nil {
+				t.Fatal(err)
+			}
+			assertScroll()
+		})
+	}
+	t.Run("agent-only snapshot", func(t *testing.T) {
+		var snapshot SessionSnapshot
+		if err := json.Unmarshal([]byte(`{"agents":[{"pane_id":"pane-1","terminal_id":"term-1","agent":"claude"}]}`), &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		panes := NewSessionCache(snapshot).Snapshot().Panes
+		if len(panes) != 1 {
+			t.Fatalf("cached panes = %+v", panes)
+		}
+		encoded, err := json.Marshal(panes[0].Scroll)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(encoded) != "null" {
+			t.Fatalf("agent-only scroll = %s, want null", encoded)
+		}
+	})
+}
+
 func TestSessionCacheCoalescesTerminalLocalPaneUpdates(t *testing.T) {
 	cache := NewSessionCache(SessionSnapshot{
 		Panes: []SnapshotPane{{
@@ -288,7 +344,7 @@ func TestSessionCacheCoalescesTerminalLocalPaneUpdates(t *testing.T) {
 		t.Fatal("terminal-local pane update triggered a topology commit")
 	}
 	pane := cache.Snapshot().Panes[0]
-	if pane.Name != "new title" || pane.Revision != 6 || pane.Scroll.MaxOffsetFromBottom != 12 {
+	if pane.Name != "new title" || pane.Revision != 6 || pane.Scroll == nil || pane.Scroll.MaxOffsetFromBottom == nil || *pane.Scroll.MaxOffsetFromBottom != 12 {
 		t.Fatalf("cached pane = %+v, want updated local metadata", pane)
 	}
 

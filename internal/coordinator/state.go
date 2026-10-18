@@ -54,7 +54,16 @@ type AgentState struct {
 	PaneRevision                 int                    `json:"-"`
 	StateRevision                int64                  `json:"pane_revision,omitempty"`
 	ScrollMaxOffset              int                    `json:"-"`
+	ScrollMetricsKnown           bool                   `json:"-"`
 	ForegroundCwd                string                 `json:"-"`
+}
+
+func (a *AgentState) UsesNoScrollbackHistory() bool {
+	if a == nil || !a.ScrollMetricsKnown || a.ScrollMaxOffset != 0 {
+		return false
+	}
+	lower := strings.ToLower(a.Agent)
+	return strings.Contains(lower, "claude") || strings.Contains(lower, "qoder")
 }
 
 type TransitionCallback func(paneID, agent, project, status string, revision int64)
@@ -428,12 +437,18 @@ func (s *State) commitTopologyLocked(agents []*AgentState, baseRev int64) {
 		if incoming == nil {
 			continue
 		}
+		cp := *incoming
+		cp.ScrollMetricsKnown = false
+		cp.ScrollMaxOffset = 0
 		existing, exists := s.agents[incoming.PaneID]
+		if exists && cp.PaneID != "" && cp.TerminalID != "" && cp.TerminalID == existing.TerminalID {
+			cp.ScrollMetricsKnown = existing.ScrollMetricsKnown
+			cp.ScrollMaxOffset = existing.ScrollMaxOffset
+		}
 		if !exists || paneSessionReplaced(existing, incoming) {
-			topology[index] = incoming
+			topology[index] = &cp
 			continue
 		}
-		cp := *incoming
 		cp.Status = existing.Status
 		if existing.Status == "blocked" {
 			copyBlockedDetails(&cp, existing)
@@ -560,7 +575,8 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			}
 		} else if existing.Status == cp.Status && existing.Name == cp.Name && existing.Cwd == cp.Cwd && existing.Agent == cp.Agent &&
 			existing.ActivitySeq == cp.ActivitySeq &&
-			existing.PaneRevision == cp.PaneRevision && existing.ScrollMaxOffset == cp.ScrollMaxOffset && existing.ForegroundCwd == cp.ForegroundCwd {
+			existing.PaneRevision == cp.PaneRevision && existing.ScrollMaxOffset == cp.ScrollMaxOffset &&
+			existing.ScrollMetricsKnown == cp.ScrollMetricsKnown && existing.ForegroundCwd == cp.ForegroundCwd {
 			cp.UpdatedAt = existing.UpdatedAt
 		} else {
 			cp.UpdatedAt = time.Now().UnixMilli()

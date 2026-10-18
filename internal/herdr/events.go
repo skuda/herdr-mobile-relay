@@ -79,20 +79,18 @@ type SessionSnapshot struct {
 }
 
 type SnapshotPane struct {
-	ID            string `json:"pane_id"`
-	TerminalID    string `json:"terminal_id"`
-	WorkspaceID   string `json:"workspace_id"`
-	TabID         string `json:"tab_id"`
-	Focused       bool   `json:"focused"`
-	Cwd           string `json:"cwd"`
-	ForegroundCwd string `json:"foreground_cwd"`
-	Label         string `json:"label"`
-	Agent         string `json:"agent"`
-	Status        string `json:"agent_status"`
-	Revision      int    `json:"revision"`
-	Scroll        struct {
-		MaxOffsetFromBottom int `json:"max_offset_from_bottom"`
-	} `json:"scroll"`
+	ID            string      `json:"pane_id"`
+	TerminalID    string      `json:"terminal_id"`
+	WorkspaceID   string      `json:"workspace_id"`
+	TabID         string      `json:"tab_id"`
+	Focused       bool        `json:"focused"`
+	Cwd           string      `json:"cwd"`
+	ForegroundCwd string      `json:"foreground_cwd"`
+	Label         string      `json:"label"`
+	Agent         string      `json:"agent"`
+	Status        string      `json:"agent_status"`
+	Revision      int         `json:"revision"`
+	Scroll        *PaneScroll `json:"scroll"`
 }
 
 type SnapshotAgent struct {
@@ -908,18 +906,16 @@ func (c *SessionCache) applyAgent(agent SnapshotAgent) {
 // the authoritative sources for active agent identity.
 func paneToInventoryPane(snapshot SnapshotPane) Pane {
 	return Pane{
-		ID:          snapshot.ID,
-		TerminalID:  snapshot.TerminalID,
-		TabID:       snapshot.TabID,
-		WorkspaceID: snapshot.WorkspaceID,
-		Name:        snapshot.Label,
-		Status:      snapshot.Status,
-		Focused:     snapshot.Focused,
-		Cwd:         snapshot.Cwd,
-		Revision:    snapshot.Revision,
-		Scroll: struct {
-			MaxOffsetFromBottom int `json:"max_offset_from_bottom"`
-		}{MaxOffsetFromBottom: snapshot.Scroll.MaxOffsetFromBottom},
+		ID:            snapshot.ID,
+		TerminalID:    snapshot.TerminalID,
+		TabID:         snapshot.TabID,
+		WorkspaceID:   snapshot.WorkspaceID,
+		Name:          snapshot.Label,
+		Status:        snapshot.Status,
+		Focused:       snapshot.Focused,
+		Cwd:           snapshot.Cwd,
+		Revision:      snapshot.Revision,
+		Scroll:        snapshot.Scroll,
 		ForegroundCwd: snapshot.ForegroundCwd,
 	}
 }

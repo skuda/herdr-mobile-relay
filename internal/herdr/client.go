@@ -212,26 +212,28 @@ func NewClient(bin, socketPath string) *Client {
 	return client
 }
 
+type PaneScroll struct {
+	MaxOffsetFromBottom *int `json:"max_offset_from_bottom,omitempty"`
+}
+
 type Pane struct {
-	ID             string `json:"pane_id"`
-	TerminalID     string `json:"terminal_id"`
-	TabID          string `json:"tab_id"`
-	TabLabel       string `json:"tab_label"`
-	TabNumber      int    `json:"tab_number"`
-	WorkspaceID    string `json:"workspace_id"`
-	Agent          string `json:"agent"`
-	Name           string `json:"name"`
-	Status         string `json:"agent_status"`
-	Focused        bool   `json:"focused"`
-	Cwd            string `json:"cwd"`
-	Revision       int    `json:"revision"`
-	StateChangeSeq int64  `json:"state_change_seq"`
-	Scroll         struct {
-		MaxOffsetFromBottom int `json:"max_offset_from_bottom"`
-	} `json:"scroll"`
-	ForegroundCwd string `json:"foreground_cwd"`
-	Session       string `json:"-"`
-	SessionRaw    struct {
+	ID             string      `json:"pane_id"`
+	TerminalID     string      `json:"terminal_id"`
+	TabID          string      `json:"tab_id"`
+	TabLabel       string      `json:"tab_label"`
+	TabNumber      int         `json:"tab_number"`
+	WorkspaceID    string      `json:"workspace_id"`
+	Agent          string      `json:"agent"`
+	Name           string      `json:"name"`
+	Status         string      `json:"agent_status"`
+	Focused        bool        `json:"focused"`
+	Cwd            string      `json:"cwd"`
+	Revision       int         `json:"revision"`
+	StateChangeSeq int64       `json:"state_change_seq"`
+	Scroll         *PaneScroll `json:"scroll"`
+	ForegroundCwd  string      `json:"foreground_cwd"`
+	Session        string      `json:"-"`
+	SessionRaw     struct {
 		Value string `json:"value"`
 		Kind  string `json:"kind"`
 	} `json:"agent_session"`

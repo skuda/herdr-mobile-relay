@@ -11,6 +11,111 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
+func TestEventTopologyNewOrReplacedTerminalHasUnknownScroll(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		existingTerminal string
+		incomingTerminal string
+		newPane          bool
+	}{
+		{name: "new pane", incomingTerminal: "term-1", newPane: true},
+		{name: "replaced terminal", existingTerminal: "term-old", incomingTerminal: "term-1"},
+		{name: "missing old identity", incomingTerminal: "term-1"},
+		{name: "missing new identity", existingTerminal: "term-1"},
+		{name: "missing both identities"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state := testState()
+			if !tt.newPane {
+				state.CommitInventory([]*AgentState{{
+					PaneID: "pane-1", TerminalID: tt.existingTerminal, Agent: "claude", Status: "idle",
+					ScrollMetricsKnown: true, ScrollMaxOffset: 0,
+				}}, 0)
+			}
+			cached := scrollMetricEventCache(t).Snapshot()
+			poller := NewPoller(nil, state, time.Second, testLogger())
+			incoming := poller.agentsFromTopology(cached.Panes, nil)
+			if len(incoming) != 1 {
+				t.Fatalf("cached agents = %+v", incoming)
+			}
+			incoming[0].TerminalID = tt.incomingTerminal
+			state.CommitTopology(incoming, nil, state.RevisionCounter())
+			agent, ok := state.Agent("pane-1")
+			if !ok || agent.ScrollMetricsKnown || agent.ScrollMaxOffset != 0 || agent.UsesNoScrollbackHistory() {
+				t.Fatalf("event agent = %+v, want unknown metrics", agent)
+			}
+		})
+	}
+}
+
+func TestNoScrollbackHistoryEligibility(t *testing.T) {
+	for _, agentName := range []string{"claude", "Claude Code", "custom-CLAUDE", "qoder", "Qoder CLI", "codex", "opencode", ""} {
+		for _, metric := range []struct {
+			name   string
+			known  bool
+			offset int
+		}{
+			{name: "known zero", known: true},
+			{name: "known positive", known: true, offset: 12},
+			{name: "unknown zero"},
+			{name: "unknown positive", offset: 12},
+		} {
+			t.Run(agentName+"/"+metric.name, func(t *testing.T) {
+				agent := AgentState{Agent: agentName, ScrollMetricsKnown: metric.known, ScrollMaxOffset: metric.offset}
+				claudeLike := agentName == "claude" || agentName == "Claude Code" || agentName == "custom-CLAUDE" || agentName == "qoder" || agentName == "Qoder CLI"
+				want := claudeLike && metric.known && metric.offset == 0
+				if got := agent.UsesNoScrollbackHistory(); got != want {
+					t.Fatalf("eligibility = %v, want %v for %+v", got, want, agent)
+				}
+			})
+		}
+	}
+	t.Run("metric transitions", func(t *testing.T) {
+		state := testState()
+		for _, metric := range []struct {
+			known  bool
+			offset int
+			want   bool
+		}{
+			{known: true, want: true},
+			{known: true, offset: 12},
+			{},
+		} {
+			_, committed := state.CommitPoll([]*AgentState{{
+				PaneID: "pane-1", TerminalID: "term-1", Agent: "claude", Status: "idle",
+				ScrollMetricsKnown: metric.known, ScrollMaxOffset: metric.offset,
+			}}, nil, state.BeginPoll())
+			if !committed {
+				t.Fatal("metric transition poll did not commit")
+			}
+			agent, ok := state.Agent("pane-1")
+			if !ok || agent.ScrollMetricsKnown != metric.known || agent.ScrollMaxOffset != metric.offset || agent.UsesNoScrollbackHistory() != metric.want {
+				t.Fatalf("metric transition agent = %+v, want eligibility %v", agent, metric.want)
+			}
+		}
+	})
+	t.Run("presence updates metadata timestamp", func(t *testing.T) {
+		state := testState()
+		initial := &AgentState{PaneID: "pane-1", Agent: "claude", Status: "idle"}
+		state.CommitInventory([]*AgentState{initial}, 0)
+		known := *initial
+		known.ScrollMetricsKnown = true
+		state.CommitInventory([]*AgentState{&known}, state.RevisionCounter())
+		agent, _ := state.Agent("pane-1")
+		if agent.UpdatedAt == 0 || agent.LastActiveAt != 0 {
+			t.Fatalf("presence update agent = %+v, want metadata timestamp without activity", agent)
+		}
+		state.mu.Lock()
+		state.agents["pane-1"].UpdatedAt = 1
+		state.mu.Unlock()
+		state.CommitInventory([]*AgentState{initial}, state.RevisionCounter())
+		agent, _ = state.Agent("pane-1")
+		if agent.UpdatedAt <= 1 || agent.LastActiveAt != 0 {
+			t.Fatalf("absence update agent = %+v, want new metadata timestamp without activity", agent)
+		}
+	})
+}
+
 func TestInventoryFailureClearsReadinessAndPreservesStaleSnapshot(t *testing.T) {
 	state := NewState(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "idle"}}, 0)

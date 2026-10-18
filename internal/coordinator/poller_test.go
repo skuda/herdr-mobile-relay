@@ -14,6 +14,219 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
 
+func TestPollerJoinsPaneScrollByTerminalIdentity(t *testing.T) {
+	state := testState()
+	socket := startPollerTestSocket(t, func(method string) (any, string) {
+		switch method {
+		case "agent.list":
+			return json.RawMessage(`{"type":"agent_list","agents":[
+				{"pane_id":"positive","terminal_id":"term-positive","agent":"claude","agent_status":"working"},
+				{"pane_id":"zero","terminal_id":"term-zero","agent":"qoder","agent_status":"idle"}
+			]}`), ""
+		case "pane.list":
+			return json.RawMessage(`{"type":"pane_list","panes":[
+				{"pane_id":"zero","terminal_id":"term-zero","scroll":{"max_offset_from_bottom":0}},
+				{"pane_id":"shell","terminal_id":"term-shell","scroll":{"max_offset_from_bottom":0}},
+				{"pane_id":"positive","terminal_id":"term-positive","scroll":{"max_offset_from_bottom":42}}
+			]}`), ""
+		default:
+			return pollerSuccessResult(method), ""
+		}
+	})
+	client := herdr.NewClient("unused", socket)
+	t.Cleanup(func() { _ = client.Close() })
+	NewPoller(client, state, time.Second, testLogger()).poll(context.Background())
+	if !state.InventoryReady() || state.AgentCount() != 2 {
+		t.Fatalf("inventory ready=%v agents=%d", state.InventoryReady(), state.AgentCount())
+	}
+	for paneID, wantOffset := range map[string]int{"positive": 42, "zero": 0} {
+		agent, ok := state.Agent(paneID)
+		if !ok || !agent.ScrollMetricsKnown || agent.ScrollMaxOffset != wantOffset {
+			t.Fatalf("agent %q = %+v, want known scroll %d", paneID, agent, wantOffset)
+		}
+		if got := agent.UsesNoScrollbackHistory(); got != (wantOffset == 0) {
+			t.Fatalf("agent %q eligibility = %v", paneID, got)
+		}
+	}
+}
+
+func TestPollerScrollUnknownOnPaneListFailureOrIdentityMismatch(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		agentTerminal string
+		pane          string
+		paneError     string
+	}{
+		{name: "pane list failure", agentTerminal: "term-1", paneError: "upstream_down"},
+		{name: "terminal mismatch", agentTerminal: "term-1", pane: `{"pane_id":"pane-1","terminal_id":"term-old","scroll":{"max_offset_from_bottom":0}}`},
+		{name: "missing pane terminal", agentTerminal: "term-1", pane: `{"pane_id":"pane-1","scroll":{"max_offset_from_bottom":0}}`},
+		{name: "missing agent terminal", pane: `{"pane_id":"pane-1","terminal_id":"term-1","scroll":{"max_offset_from_bottom":0}}`},
+		{name: "both terminals missing", pane: `{"pane_id":"pane-1","scroll":{"max_offset_from_bottom":0}}`},
+		{name: "pane mismatch", agentTerminal: "term-1", pane: `{"pane_id":"pane-other","terminal_id":"term-1","scroll":{"max_offset_from_bottom":0}}`},
+		{name: "missing scroll", agentTerminal: "term-1", pane: `{"pane_id":"pane-1","terminal_id":"term-1"}`},
+		{name: "null scroll", agentTerminal: "term-1", pane: `{"pane_id":"pane-1","terminal_id":"term-1","scroll":null}`},
+		{name: "empty scroll", agentTerminal: "term-1", pane: `{"pane_id":"pane-1","terminal_id":"term-1","scroll":{}}`},
+		{name: "missing max field", agentTerminal: "term-1", pane: `{"pane_id":"pane-1","terminal_id":"term-1","scroll":{"offset_from_bottom":0}}`},
+		{name: "null max field", agentTerminal: "term-1", pane: `{"pane_id":"pane-1","terminal_id":"term-1","scroll":{"max_offset_from_bottom":null}}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state := testState()
+			state.CommitInventory([]*AgentState{{
+				PaneID: "pane-1", TerminalID: "term-1", Agent: "claude", Status: "idle",
+				ScrollMetricsKnown: true, ScrollMaxOffset: 0,
+			}}, 0)
+			socket := startPollerTestSocket(t, func(method string) (any, string) {
+				switch method {
+				case "agent.list":
+					return map[string]any{"type": "agent_list", "agents": []any{map[string]any{
+						"pane_id": "pane-1", "terminal_id": tt.agentTerminal, "agent": "claude", "agent_status": "idle",
+						"workspace_id": "workspace-1", "cwd": "/work/project", "scroll": map[string]any{"max_offset_from_bottom": 0},
+					}}}, ""
+				case "workspace.list":
+					return json.RawMessage(`{"type":"workspace_list","workspaces":[{"workspace_id":"workspace-1"}]}`), ""
+				case "pane.list":
+					return json.RawMessage(`{"type":"pane_list","panes":[` + tt.pane + `]}`), tt.paneError
+				default:
+					return pollerSuccessResult(method), ""
+				}
+			})
+			client := herdr.NewClient("unused", socket)
+			t.Cleanup(func() { _ = client.Close() })
+			NewPoller(client, state, time.Second, testLogger()).poll(context.Background())
+			agent, ok := state.Agent("pane-1")
+			if !state.InventoryReady() || !ok || agent.ScrollMetricsKnown || agent.ScrollMaxOffset != 0 || agent.UsesNoScrollbackHistory() {
+				t.Fatalf("ready=%v agent=%+v, want unknown scroll", state.InventoryReady(), agent)
+			}
+			if tt.paneError != "" {
+				workspaces := state.InventorySnapshot().Workspaces
+				if len(workspaces) != 1 || workspaces[0].Cwd != "/work/project" {
+					t.Fatalf("workspace hydration fallback = %+v", workspaces)
+				}
+			}
+		})
+	}
+}
+
+func TestEventTopologyPreservesCurrentSameTerminalScrollMetric(t *testing.T) {
+	state := testState()
+	cache := scrollMetricEventCache(t)
+	methods := make(chan string, 3)
+	socket := startPollerTestSocket(t, func(method string) (any, string) {
+		methods <- method
+		return json.RawMessage(`{"type":"agent_list","agents":[{"pane_id":"pane-1","terminal_id":"term-1","agent":"claude","agent_status":"idle"}]}`), ""
+	})
+	client := herdr.NewClient("unused", socket)
+	t.Cleanup(func() { _ = client.Close() })
+	poller := NewPoller(client, state, time.Second, testLogger())
+	poller.commitEventTopology(context.Background(), cache.Snapshot(), state.RevisionCounter())
+	agent, ok := state.Agent("pane-1")
+	if !ok || agent.ScrollMetricsKnown {
+		t.Fatalf("bootstrap agent = %+v, want unknown metrics", agent)
+	}
+	_, committed := state.CommitPoll([]*AgentState{{
+		PaneID: "pane-1", TerminalID: "term-1", Agent: "claude", Status: "idle",
+		ScrollMetricsKnown: true, ScrollMaxOffset: 27,
+	}}, nil, state.BeginPoll())
+	if !committed {
+		t.Fatal("metric poll did not commit")
+	}
+	if !poller.applyTopologyEvent(context.Background(), cache, herdr.Event{
+		Event: "tab.renamed", Data: json.RawMessage(`{"tab":{"tab_id":"tab-1","label":"Renamed"}}`),
+	}) {
+		t.Fatal("tab event failed")
+	}
+	agent, ok = state.Agent("pane-1")
+	if !ok || !agent.ScrollMetricsKnown || agent.ScrollMaxOffset != 27 || agent.UsesNoScrollbackHistory() {
+		t.Fatalf("agent after tab event = %+v, want known positive scroll", agent)
+	}
+	for range 2 {
+		select {
+		case method := <-methods:
+			if method != "agent.list" {
+				t.Fatalf("event refresh method = %q, want agent.list", method)
+			}
+		default:
+			t.Fatal("missing event inventory refresh")
+		}
+	}
+	select {
+	case method := <-methods:
+		t.Fatalf("unexpected event refresh method = %q", method)
+	default:
+	}
+}
+
+func TestEventTopologyMetricCarryForwardOccursAtCommit(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		known  bool
+		offset int
+	}{
+		{name: "positive", known: true, offset: 31},
+		{name: "unknown"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state := testState()
+			state.CommitInventory([]*AgentState{{
+				PaneID: "pane-1", TerminalID: "term-1", Agent: "claude", Status: "idle", ScrollMetricsKnown: true,
+			}}, 0)
+			socket := startPollerTestSocket(t, func(string) (any, string) {
+				return json.RawMessage(`{"type":"agent_list","agents":[{"pane_id":"pane-1","terminal_id":"term-1","agent":"claude","agent_status":"idle","scroll":{"max_offset_from_bottom":0}}]}`), ""
+			})
+			client := herdr.NewClient("unused", socket)
+			t.Cleanup(func() { _ = client.Close() })
+			poller := NewPoller(client, state, time.Second, testLogger())
+			entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			releaseEnrichment := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(releaseEnrichment)
+			poller.SetEnrich(func(context.Context, []*AgentState) {
+				close(entered)
+				<-release
+			})
+			topology := scrollMetricEventCache(t).Snapshot()
+			go func() {
+				poller.commitEventTopology(context.Background(), topology, state.RevisionCounter())
+				close(done)
+			}()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("event enrichment did not pause")
+			}
+			_, committed := state.CommitPoll([]*AgentState{{
+				PaneID: "pane-1", TerminalID: "term-1", Agent: "claude", Status: "idle",
+				ScrollMetricsKnown: tt.known, ScrollMaxOffset: tt.offset,
+			}}, nil, state.BeginPoll())
+			if !committed {
+				t.Fatal("newer metric poll did not commit")
+			}
+			releaseEnrichment()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("event commit did not finish")
+			}
+			agent, ok := state.Agent("pane-1")
+			if !ok || agent.ScrollMetricsKnown != tt.known || agent.ScrollMaxOffset != tt.offset {
+				t.Fatalf("event committed agent = %+v, want known=%v offset=%d", agent, tt.known, tt.offset)
+			}
+		})
+	}
+}
+
+func scrollMetricEventCache(t *testing.T) *herdr.SessionCache {
+	t.Helper()
+	var snapshot herdr.SessionSnapshot
+	if err := json.Unmarshal([]byte(`{
+		"panes":[{"pane_id":"pane-1","terminal_id":"term-1","scroll":{"max_offset_from_bottom":0}}],
+		"agents":[{"pane_id":"pane-1","terminal_id":"term-1","agent":"claude","agent_status":"idle"}]
+	}`), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	return herdr.NewSessionCache(snapshot)
+}
+
 func TestTopologyStaleRepollsAreBounded(t *testing.T) {
 	state := testState()
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "working"}}, 0)

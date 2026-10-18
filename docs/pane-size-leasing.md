@@ -28,8 +28,8 @@ the relay side can fix that; a Herdr-owned resize API is the proper fix (see
 | `release_pane_size` | Idempotent cleanup. Without `immediate` the lease lapses after a 10 s navigation grace; `immediate: true` (sent when the user turns the switch off) skips it. |
 | Authorization | Both are controller-only ordered mutations with exact target validation (`validateExactPaneTarget`); release keeps the stale-target cleanup allowance. Readers are denied. |
 | Disconnect | A departing connection's leases are released immediately. |
-| Pane reads | Client-supplied `terminal_columns`/`terminal_rows` are always stripped. A client that itself holds an active lease on the pane reads it at the leased geometry (viewport-only read); everyone else reads it at Herdr's size. |
-| Settling | For 3 s after a lease actually changes the size, viewport-only frames carry `resize_settling` so the app does not commit redrawn rows to history. |
+| Pane reads | The relay strips client-supplied `terminal_columns`/`terminal_rows`. A leasing client's response carries viewport geometry. Eligible no-scrollback Claude/Qoder panes use the pane-wide physical source described below, including reads from non-leasing clients. |
+| Settling | History admission pauses for reads inside or crossing a 3 s observed PTY-size settling interval. A raw frame can still reach the phone with `resize_settling`; the app bounds its display wait at 4 s. |
 
 Compatibility matrix:
 
@@ -155,6 +155,113 @@ a local change is never overwritten: a local resize back to exactly the leased
 value (ABA) is indistinguishable from no change, and a local resize landing
 between the relay's read and its write can be overwritten, because there is no
 compare-and-set for the window size.
+
+## Sampled fullscreen history
+
+The relay retains sampled physical pages for Claude-like agents while its
+pane-wide lease gate is active. `AgentState.UsesNoScrollbackHistory` selects
+names containing `claude` or `qoder` with a known zero
+`max_offset_from_bottom` metric. Polls join fresh `pane.list` metrics by pane
+and nonempty terminal identity; event topology commits retain current
+same-terminal evidence. Missing metrics do not qualify. Zero describes a lack
+of scrollback, not an explicit alternate-screen mode: a fresh primary-screen
+pane can satisfy this heuristic.
+
+`LeaseHistoryState` includes resolved lease state, navigation grace, expired
+leases awaiting cleanup, and pending restore work. The gate ends when cleanup
+drops that state. A lease owned by another relay does not enable this relay's
+physical source. Its observed PTY-size changes can still create a geometry
+boundary and a settling pause.
+
+While the gate and heuristic qualify, display, background, and completion
+fallback captures request ANSI `recent` with `PhysicalCaptureLines=1000`.
+A non-leasing reader of the same pane uses that source too. Reader preferences
+of 100, 500, 1,000, or 10,000 rows limit the response after archival; they do not
+change the physical capture shape. The retained body is bounded by
+`MaxLines=10000`.
+
+Before lease activation and after restore cleanup, Claude reads return to
+`ReadPane` (`recent-unwrapped`) and the legacy active-segment matcher. Qoder
+keeps its existing display-source selection outside the physical route.
+Inline or unknown-metric viewport responses remain raw. Prior physical
+segments stay frozen when a later legacy segment is matched.
+
+### Boundaries, matching, and the current page
+
+`BeginHistoryRead` and `Finish` sample a held, validated TTY descriptor around
+the content read. The epoch tracks observed PTY rows and columns. Lease/source
+changes and observed PTY epochs start fresh history segments; a return from
+width A through B to A remains a new segment when those changes are observed.
+A boundary can repeat one page. An external A→B→A change entirely between
+samples remains undetectable. Emulator-grid or pixel-only changes do not
+advance this epoch. Narrowing Herdr's grid below the PTY width can clip rows
+without a detected geometry change; the shared desktop-garbling limitation
+remains.
+
+Inside a physical segment, accepted fixed-header alignment archives displaced
+scroll rows. The response places that archive before the raw current page,
+including its current header, footer, and ANSI styling. The header is not added
+to the displaced region. A separate `ReplaceableTailLines=3` policy permits
+up to three bottom body rows to change in place. Those rows can contain a
+spinner, wrapped tips, or incomplete transcript text; their old values are not
+archived. Larger divergent tails and conflicting or reverse alignments retain
+the previous page and append the incoming page, which can repeat content even
+at unchanged PTY geometry.
+
+`FooterLines=6` splits the replaceable footer when a page exceeds six rows.
+Taller chrome can enter retained history; shorter chrome can leave transcript
+rows in the replaceable footer. Footer updates refresh even when the body is
+unchanged. Blank rows remain content rather than being collapsed. This does
+not establish the cause of a blank run or recover text absent from a sample.
+
+Herdr 0.9.5 supplies placeholder `pane.read.revision=0`, not usable content
+order. The relay sequences underlying reads at start and shares the owner's
+admission outcome with followers. An older completion cannot replace a newer
+archived read. Reads that sample content in a different order can still reach
+the conservative reverse/ambiguity fallback and repeat a page.
+
+The relay skips archival inside or across the three-second settling interval.
+Rows appearing and disappearing during that pause are lost. Bursts larger
+than the sampled page between captures can also leave gaps. The four-second
+background cadence and trailing requests improve sampling opportunities; an
+idle status does not establish a stable final page.
+
+### Response clipping, saving, and app compatibility
+
+Composed responses obey a JSON-encoded budget of 4 MiB minus 64 KiB, in addition
+to the reader's row limit. `fitPaneContentResponse` drops oldest response rows
+first, then current-page rows if needed. It keeps whole rows and reports
+`truncated`; if no row fits, it returns empty successful content with
+`truncated=true`. Response clipping does not delete stored history. This byte
+guard also applies to large unleased legacy responses; fitting legacy output
+stays unchanged.
+
+The truncation notice is not a completeness check: missing samples, settling
+loss, footer/tail replacement, and retention limits can omit text without a
+new notice. A narrow cosmetic limit remains for direct reads: if byte clipping
+changes `truncated` but leaves content identical, the previous notice can remain
+until a content change or watch frame delivers updated metadata.
+
+Accepted departures from `working` or `blocked` queue a trailing terminal
+capture, serviced on the four-second tick. Requests retain a 60-second lifetime
+and a five-actual-attempt bound. Native Conversation responses do not clear a
+separate pending terminal request. Dirty history has a scheduled save deadline:
+the first save is due immediately, later changes are due at the last successful
+save plus `SaveInterval=10s`, and write failures retain dirty state for retry.
+Shutdown closes admission, joins capture/persistence work, and saves admitted
+state. A crash before a successful save can still lose recent samples.
+
+Loaded history becomes a frozen prefix at its first runtime admission after
+restart, even if numeric PTY epochs and lease revisions repeat. Legacy files
+remain readable. Restart fencing does not infer the source or width of rows
+from older files. The shared pane-ID cache layout is unchanged; separate relays
+still need separate cache roots to avoid shared-cache interference.
+
+This release includes a new phone-app build. It estimates leased prose using
+the effective shared width and adjusts short/blank anchors for contextual
+prepends. Use the matching app build; the older 0.22.10 app can receive long
+frames but lacks these frontend corrections. No new history
+capability or client-side history merger is introduced.
 
 ## Residual risks
 

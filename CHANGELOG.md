@@ -5,6 +5,24 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Retain sampled fullscreen Claude/Qoder history during this relay's opted-in
+  Resize Session lease and pending restore, including reads from non-leasing
+  clients. Keep the current footer fresh, queue trailing captures, and save
+  dirty admitted history after output stops. Sampling gaps, resize settling,
+  footer/tail replacement, and retention limits can still omit text; source
+  and PTY boundaries can repeat a page. Unleased active segments keep the
+  legacy matcher.
+- Clip oldest response rows to an encoded-byte budget rather than disconnecting
+  a client for an oversized composed frame. This also fixes large unleased
+  history responses; fitting content stays unchanged, and a response with no
+  fitting row succeeds with empty truncated content. Stored history is not
+  shortened by response clipping.
+- Correct the phone app's leased-width height estimates and contextual prepend
+  anchors for short or blank rows. These frontend corrections require the new
+  app build.
+
 ## [0.22.10] - 2026-10-15
 
 ### Added

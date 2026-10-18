@@ -724,6 +724,53 @@ func TestHistoryReadPolicyChangeMidReadSkipsArchive(t *testing.T) {
 	}
 }
 
+func TestHistoryReadRejectsScrollMetricCycle(t *testing.T) {
+	for _, mode := range []string{"stable", "positive", "unknown"} {
+		t.Run(mode, func(t *testing.T) {
+			s, _, _ := captureServer(t, true)
+			s.state.SetOnStatusTransition(s.enqueueHistoryTransition)
+			s.state.CommitEvent("pane-1", "idle", 1)
+			pending := *s.historyPending["pane-1"]
+			request := captureRequest(s, true)
+			result, err := s.executeHistoryRead(context.Background(), request, func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error) {
+				if mode != "stable" {
+					agent, _ := s.state.Agent("pane-1")
+					if mode == "positive" {
+						agent.ScrollMaxOffset = 10
+					} else {
+						agent.ScrollMetricsKnown = false
+					}
+					s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+					agent.ScrollMetricsKnown, agent.ScrollMaxOffset = true, 0
+					s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+				}
+				return herdr.PaneRead{Content: []byte(capturePage("A", "B"))}, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := s.state.ContentRevision("pane-1"); got != request.ContentRevision {
+				t.Fatalf("metric fixture changed content revision: got=%d want=%d", got, request.ContentRevision)
+			}
+			if mode == "stable" {
+				if !result.Capture.Admitted || s.historyPending["pane-1"] != nil || s.historyAcknowledgements != 1 {
+					t.Fatal("stable read was not admitted and acknowledged")
+				}
+				return
+			}
+			if result.Capture.Admitted {
+				t.Fatal("scroll metric cycle was admitted")
+			}
+			if got := s.historyPending["pane-1"]; got == nil || got.sequence != pending.sequence || s.historyAcknowledgements != 0 {
+				t.Fatalf("metric cycle acknowledged pending request: %+v", got)
+			}
+			if result := executeCapture(t, s, capturePage("A", "B"), true); !result.Capture.Admitted || s.historyPending["pane-1"] != nil {
+				t.Fatal("following stable read was not admitted and acknowledged")
+			}
+		})
+	}
+}
+
 func TestFinishedReadPublishesOldEpochAfterLaterResize(t *testing.T) {
 	s, _, advance := captureServer(t, true)
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan coordinator.PaneReadResult, 1)

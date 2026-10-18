@@ -116,6 +116,59 @@ func TestNoScrollbackHistoryEligibility(t *testing.T) {
 	})
 }
 
+func TestScrollMetricsRevisionTracksCommittedChanges(t *testing.T) {
+	for _, path := range []string{"inventory", "poll", "topology same terminal", "topology missing terminal", "topology replacement"} {
+		t.Run(path, func(t *testing.T) {
+			state := testState()
+			initial := &AgentState{PaneID: "p", TerminalID: "terminal", Agent: "claude", Status: "idle", ScrollMetricsKnown: true}
+			state.CommitInventory([]*AgentState{initial}, 0)
+			first := state.ScrollMetricsRevision("p")
+			if first == 0 {
+				t.Fatal("initial metrics have no revision")
+			}
+			incoming := *initial
+			incoming.ScrollMaxOffset = 10
+			switch path {
+			case "inventory":
+				state.CommitInventory([]*AgentState{&incoming}, state.RevisionCounter())
+			case "poll":
+				if _, committed := state.CommitPoll([]*AgentState{&incoming}, nil, state.BeginPoll()); !committed {
+					t.Fatal("poll was not committed")
+				}
+			default:
+				if path == "topology missing terminal" {
+					incoming.TerminalID = ""
+				} else if path == "topology replacement" {
+					incoming.TerminalID = "replacement"
+				}
+				state.CommitTopology([]*AgentState{&incoming}, nil, state.RevisionCounter())
+			}
+			changed := state.ScrollMetricsRevision("p")
+			if path == "topology same terminal" {
+				if changed != first {
+					t.Fatalf("carried metrics advanced revision: got=%d want=%d", changed, first)
+				}
+			} else if changed <= first {
+				t.Fatalf("metric change did not advance revision: got=%d previous=%d", changed, first)
+			}
+			agent, _ := state.Agent("p")
+			state.CommitInventory([]*AgentState{agent}, state.RevisionCounter())
+			state.CommitEvent("p", "working", 1)
+			if got := state.ScrollMetricsRevision("p"); got != changed {
+				t.Fatalf("unchanged metrics advanced revision: got=%d want=%d", got, changed)
+			}
+			state.CommitInventory(nil, state.RevisionCounter())
+			if got := state.ScrollMetricsRevision("p"); got != 0 {
+				t.Fatalf("removed pane retained metric revision: %d", got)
+			}
+			state.CommitInventory([]*AgentState{initial}, state.RevisionCounter())
+			if got := state.ScrollMetricsRevision("p"); got <= changed {
+				t.Fatalf("reappearing pane reused metric revision: got=%d previous=%d", got, changed)
+			}
+		})
+	}
+}
+
 func TestAcceptedStatusObserverRunsOutsideLockWithCapturedIdentity(t *testing.T) {
 	for _, path := range []string{"inventory", "poll", "topology", "event"} {
 		t.Run(path, func(t *testing.T) {

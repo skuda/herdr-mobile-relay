@@ -53,6 +53,7 @@ func (s *Server) readPaneResponse(ctx context.Context, message map[string]any) m
 func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.PaneReadRequest,
 	readContent func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error),
 ) (coordinator.PaneReadResult, error) {
+	scrollMetricsRevision := s.state.ScrollMetricsRevision(request.PaneID)
 	agent := request.Agent
 	token := historyReadToken{paneID: request.PaneID, physical: request.Physical}
 	if agent != nil {
@@ -94,7 +95,7 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		physicalNow, revisionNow = token.geometry.Leased && current != nil && current.UsesNoScrollbackHistory(), token.geometry.LeaseRevision
 	}
 	stablePolicy := physicalNow == physicalAtStart && revisionNow == token.leaseRevision && request.Physical == physicalAtStart &&
-		agent != nil && current != nil && agent.UsesNoScrollbackHistory() == current.UsesNoScrollbackHistory()
+		s.state.ScrollMetricsRevision(request.PaneID) == scrollMetricsRevision && agent != nil && current != nil && agent.UsesNoScrollbackHistory() == current.UsesNoScrollbackHistory()
 	response := s.classifyRawPane(request.PaneID, string(read.Content), request.Format)
 	result := coordinator.PaneReadResult{Read: read, Response: response,
 		Capture: coordinator.PaneReadCapture{Sequence: token.sequence, TerminalID: token.identity.terminalID, Generation: token.identity.generation}}

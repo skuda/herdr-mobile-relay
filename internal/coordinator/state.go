@@ -88,6 +88,7 @@ type State struct {
 	workspaces         []herdr.Workspace
 	revision           map[string]int64
 	contentRev         map[string]int64
+	scrollMetricsRev   map[string]int64
 	attentionRev       map[string]int64
 	prevStatus         map[string]string
 	topologyGen        int64
@@ -147,6 +148,7 @@ func NewState(logger *slog.Logger) *State {
 		agents:             make(map[string]*AgentState),
 		revision:           make(map[string]int64),
 		contentRev:         make(map[string]int64),
+		scrollMetricsRev:   make(map[string]int64),
 		attentionRev:       make(map[string]int64),
 		prevStatus:         make(map[string]string),
 		unseenDone:         make(map[string]bool),
@@ -643,6 +645,9 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		s.applyBlockedCycleLocked(&cp, existing)
 		attentionChanged := !blockedDetailsEqual(existing, &cp)
 
+		if !exists || existing.ScrollMetricsKnown != cp.ScrollMetricsKnown || existing.ScrollMaxOffset != cp.ScrollMaxOffset {
+			s.scrollMetricsRev[incoming.PaneID] = s.revCounter
+		}
 		if !exists || existing.Status != cp.Status || existing.Name != cp.Name || existing.Cwd != cp.Cwd ||
 			existing.Agent != cp.Agent || existing.ActivitySeq != cp.ActivitySeq ||
 			attentionChanged {
@@ -689,6 +694,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			delete(s.agents, id)
 			delete(s.revision, id)
 			delete(s.contentRev, id)
+			delete(s.scrollMetricsRev, id)
 			delete(s.attentionRev, id)
 			delete(s.prevStatus, id)
 			delete(s.unseenDone, id)
@@ -1273,6 +1279,12 @@ func (s *State) ContentRevision(paneID string) int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.contentRev[paneID]
+}
+
+func (s *State) ScrollMetricsRevision(paneID string) int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.scrollMetricsRev[paneID]
 }
 
 func (s *State) AttentionRevision(paneID string) int64 {

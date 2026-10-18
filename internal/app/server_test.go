@@ -3350,6 +3350,7 @@ func TestRemovedPaneHistoryIsDiscarded(t *testing.T) {
 	s.historyLast["pane-1"] = time.Now()
 	s.historyCaptureMu.Unlock()
 
+	s.state.CommitInventory(nil, s.state.RevisionCounter())
 	s.syncHistoryPanes(nil)
 
 	s.historyCaptureMu.Lock()
@@ -3379,11 +3380,12 @@ func TestFirstInventoryReconcilesHistoryFromEarlierProcess(t *testing.T) {
 	earlier.historyM.SaveAll()
 
 	restarted := New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
-	restarted.syncHistoryPanes([]*coordinator.AgentState{{
+	restarted.state.CommitInventory([]*coordinator.AgentState{{
 		PaneID: "active-pane",
 		Agent:  "Claude Code",
 		Status: "working",
-	}})
+	}}, restarted.state.RevisionCounter())
+	restarted.syncHistoryPanes(restarted.state.Snapshot())
 
 	files, err := filepath.Glob(filepath.Join(cfg.CacheDir, "claude-history", "*.json"))
 	if err != nil {

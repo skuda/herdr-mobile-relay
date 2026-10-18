@@ -38,7 +38,6 @@ func (s *Server) physicalHistorySource(agent *coordinator.AgentState) (bool, uin
 
 func (s *Server) readPaneResponse(ctx context.Context, message map[string]any) map[string]any {
 	paneID, _ := message["pane_id"].(string)
-	s.syncHistoryPanes(s.state.Snapshot())
 	agent, _ := s.state.Agent(paneID)
 	physical, leaseRevision := s.physicalHistorySource(agent)
 	response, _ := s.dispatcher.HandleReadPaneWithOptions(ctx, message, coordinator.PaneReadOptions{

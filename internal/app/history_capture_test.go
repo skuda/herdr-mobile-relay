@@ -364,6 +364,37 @@ func TestSharedReadPendingAcknowledgement(t *testing.T) {
 	}
 }
 
+func TestReadBeforeInventoryPreservesCachedHistory(t *testing.T) {
+	s := testServerWithCacheDir(t.TempDir())
+	s.historyM.Merge("cached", capturePage("cached A", "cached B"))
+	if err := s.historyM.SaveAll(); err != nil {
+		t.Fatal(err)
+	}
+	s.dispatcher = coordinator.NewDispatcher(nil, s.state, nil, s.logger)
+	_ = s.readPaneResponse(context.Background(), map[string]any{})
+	matches, err := filepath.Glob(filepath.Join(s.cfg.CacheDir, "claude-history", "*.json"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("pre-inventory read removed persisted history: files=%v error=%v", matches, err)
+	}
+}
+
+func TestStaleHistoryInventoryCannotDiscardReplacementPage(t *testing.T) {
+	s, _, _ := captureServer(t, false)
+	older := s.state.InventorySnapshot()
+	agent, _ := s.state.Agent("pane-1")
+	agent.TerminalID = "terminal-new"
+	s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+	s.syncHistoryPanes(s.state.Snapshot())
+	result := executeCapture(t, s, capturePage("Q A", "Q B"), false)
+	if !result.Capture.Admitted {
+		t.Fatal("replacement Q was not admitted")
+	}
+	s.syncHistorySnapshot(older)
+	if got := s.historyM.Content("pane-1", 0); got != capturePage("Q A", "Q B") {
+		t.Fatalf("stale inventory removed Q: %q", got)
+	}
+}
+
 func TestEligibleViewportReadRetainsHistoryAndCurrentFooter(t *testing.T) {
 	s, _, _ := captureServer(t, true)
 	executeCapture(t, s, capturePage("A", "B", "C", "D", "E"), true)

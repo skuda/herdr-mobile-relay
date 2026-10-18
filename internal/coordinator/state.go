@@ -135,9 +135,11 @@ type PollToken struct {
 // workspaces, and readiness are captured while holding the same State lock so
 // callers never publish a tuple assembled from different commits.
 type InventorySnapshot struct {
-	Status     map[string]any
-	Agents     []*AgentState
-	Workspaces []herdr.Workspace
+	Revision    int64
+	Established bool
+	Status      map[string]any
+	Agents      []*AgentState
+	Workspaces  []herdr.Workspace
 }
 
 func NewState(logger *slog.Logger) *State {
@@ -333,6 +335,7 @@ func (s *State) InventorySnapshot() InventorySnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return InventorySnapshot{
+		Revision: s.revCounter, Established: !s.lastSuccessAt.IsZero(),
 		Status:     s.inventoryStatusLocked(),
 		Agents:     s.snapshotLocked(),
 		Workspaces: cloneWorkspaces(s.workspaces),

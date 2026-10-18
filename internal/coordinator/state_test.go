@@ -116,6 +116,73 @@ func TestNoScrollbackHistoryEligibility(t *testing.T) {
 	})
 }
 
+func TestAcceptedStatusObserverRunsOutsideLockWithCapturedIdentity(t *testing.T) {
+	for _, path := range []string{"inventory", "poll", "topology", "event"} {
+		t.Run(path, func(t *testing.T) {
+			state := testState()
+			state.CommitInventory([]*AgentState{{PaneID: "p", TerminalID: "terminal", Agent: "claude", Status: "working"}}, 0)
+			var events []StatusTransition
+			state.SetOnStatusTransition(func(event StatusTransition) {
+				if _, ok := state.Agent(event.PaneID); !ok {
+					t.Error("observer could not read committed state")
+				}
+				events = append(events, event)
+			})
+			agent, _ := state.Agent("p")
+			agent.Status = "idle"
+			switch path {
+			case "inventory":
+				state.CommitInventory([]*AgentState{agent}, state.RevisionCounter())
+			case "poll":
+				state.CommitPoll([]*AgentState{agent}, nil, state.BeginPoll())
+			case "topology":
+				state.CommitTopology([]*AgentState{{PaneID: "new", TerminalID: "new-terminal", Agent: "claude", Status: "idle"}}, nil, state.RevisionCounter())
+			case "event":
+				state.CommitEvent("p", "idle", 1)
+			}
+			if len(events) != 1 {
+				t.Fatalf("status events = %+v", events)
+			}
+			event := events[0]
+			if event.NewStatus != "idle" || event.Revision <= 0 || event.TerminalID == "" {
+				t.Fatalf("captured status event = %+v", event)
+			}
+			if path != "topology" && (event.PaneID != "p" || event.OldStatus != "working" || event.TerminalID != "terminal") {
+				t.Fatalf("captured identity = %+v", event)
+			}
+		})
+	}
+}
+
+func TestAcceptedStatusObserverIgnoresRejectedPollAndIdentityMismatch(t *testing.T) {
+	state := testState()
+	state.CommitInventory([]*AgentState{{PaneID: "p", TerminalID: "terminal", TabID: "tab", Agent: "claude", Status: "working"}}, 0)
+	calls := 0
+	state.SetOnStatusTransition(func(StatusTransition) { calls++ })
+	token := state.BeginPoll()
+	state.MarkTopologyChanged()
+	_, committed := state.CommitPoll([]*AgentState{{PaneID: "p", Status: "idle"}}, nil, token)
+	if committed || state.CommitEventForSession("p", "other-tab", "", "idle", 1) || calls != 0 {
+		t.Fatal("rejected update emitted accepted status")
+	}
+}
+
+func TestAcceptedStatusObserverIncludesBlockedChatDeparture(t *testing.T) {
+	state := testState()
+	state.CommitInventory([]*AgentState{{PaneID: "p", TerminalID: "terminal", Agent: "claude", Status: "blocked", AttentionKind: question.AttentionChat}}, 0)
+	var notificationCalls, statusCalls int
+	state.SetOnTransition(func(string, string, string, string, int64) { notificationCalls++ })
+	state.SetOnStatusTransition(func(event StatusTransition) {
+		if event.OldStatus == "blocked" && event.NewStatus == "idle" {
+			statusCalls++
+		}
+	})
+	state.CommitEvent("p", "idle", 1)
+	if statusCalls != 1 || notificationCalls != 0 {
+		t.Fatalf("status calls=%d notification calls=%d", statusCalls, notificationCalls)
+	}
+}
+
 func TestInventoryFailureClearsReadinessAndPreservesStaleSnapshot(t *testing.T) {
 	state := NewState(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "idle"}}, 0)

@@ -40,13 +40,19 @@ type PaneState struct {
 	loaded          bool
 	dirty           bool
 	mutationVersion uint64
+	saveDue         time.Time
 }
 
 type Manager struct {
-	mu       sync.Mutex
-	states   map[string]*PaneState
-	dir      string
-	lastSave map[string]time.Time
+	mu           sync.Mutex
+	states       map[string]*PaneState
+	dir          string
+	lastSave     map[string]time.Time
+	persistMu    sync.Mutex
+	wake         chan struct{}
+	now          func() time.Time
+	writeFile    func(string, []byte, os.FileMode) error
+	beforeRename func()
 }
 
 func NewManager(cacheDir string) *Manager {
@@ -56,6 +62,7 @@ func NewManager(cacheDir string) *Manager {
 		states:   make(map[string]*PaneState),
 		dir:      dir,
 		lastSave: make(map[string]time.Time),
+		wake:     make(chan struct{}, 1), now: time.Now, writeFile: os.WriteFile,
 	}
 }
 
@@ -91,12 +98,8 @@ func (m *Manager) Discard(paneID string) {
 	os.Remove(m.stateFile(paneID))
 }
 
-func (m *Manager) SaveAll() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for paneID, state := range m.states {
-		m.saveState(paneID, state)
-	}
+func (m *Manager) SaveAll() error {
+	return m.flush(m.now(), true)
 }
 
 // Reconcile removes persisted and in-memory history for panes that are absent
@@ -179,24 +182,17 @@ func (m *Manager) loadState(paneID string) *PaneState {
 }
 
 func (m *Manager) maybeSave(paneID string, state *PaneState) {
-	if t, ok := m.lastSave[paneID]; ok && time.Since(t) < SaveInterval {
+	if !state.dirty || !state.saveDue.IsZero() {
 		return
 	}
-	m.saveState(paneID, state)
-	m.lastSave[paneID] = time.Now()
-}
-
-func (m *Manager) saveState(paneID string, state *PaneState) {
-	data, err := json.Marshal(state)
-	if err != nil {
-		return
+	state.saveDue = m.now()
+	if saved := m.lastSave[paneID]; !saved.IsZero() {
+		state.saveDue = saved.Add(SaveInterval)
 	}
-	path := m.stateFile(paneID)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return
+	select {
+	case m.wake <- struct{}{}:
+	default:
 	}
-	os.Rename(tmp, path)
 }
 
 func (m *Manager) stateFile(paneID string) string {

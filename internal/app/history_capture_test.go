@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
@@ -28,6 +29,7 @@ func captureServer(t *testing.T, leased bool) (*Server, *paneSizeFakes, func(tim
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 	advance := func(d time.Duration) { mu.Lock(); now = now.Add(d); mu.Unlock() }
 	s.paneSizeM = panesize.NewManagerWith(f, f, f, clock, nil)
+	s.historyNow = clock
 	s.state.CommitInventory([]*coordinator.AgentState{{PaneID: "pane-1", TerminalID: "terminal-1", Agent: "claude", Status: "working", ScrollMetricsKnown: true}}, 0)
 	s.syncHistoryPanes(s.state.Snapshot())
 	if leased {
@@ -104,6 +106,261 @@ func TestPaneWideLeasedNoScrollbackWritersUseRecentANSI(t *testing.T) {
 	}
 	if strings.Count(string(calls), "--lines 1000 --source recent --format ansi") != 4 || strings.Contains(string(calls), "recent-unwrapped") {
 		t.Fatalf("writer source requests = %s", calls)
+	}
+}
+
+func pendingDeparture(s *Server, revision int64) {
+	s.enqueueHistoryTransition(coordinator.StatusTransition{PaneID: "pane-1", TerminalID: "terminal-1", Generation: s.state.Generation("pane-1"), OldStatus: "working", NewStatus: "idle", Revision: revision})
+}
+
+func TestTrailingCaptureSeesShortWorkingCycleBetweenTicks(t *testing.T) {
+	s, _, _ := captureServer(t, false)
+	s.state.SetOnStatusTransition(s.enqueueHistoryTransition)
+	s.state.CommitEvent("pane-1", "idle", 1)
+	s.state.CommitEvent("pane-1", "working", 2)
+	s.state.CommitEvent("pane-1", "idle", 3)
+	if pending := s.historyPending["pane-1"]; pending == nil {
+		t.Fatal("between-tick cycle lost trailing request")
+	}
+	result := executeCapture(t, s, capturePage("final A", "final B"), false)
+	if !result.Capture.Admitted || s.historyPending["pane-1"] != nil {
+		t.Fatal("admitted trailing page did not clear request")
+	}
+}
+
+func TestTrailingCaptureCoalescesAndCannotClearNewerRequest(t *testing.T) {
+	s, _, _ := captureServer(t, false)
+	pendingDeparture(s, 10)
+	first := *s.historyPending["pane-1"]
+	result, err := s.executeHistoryRead(context.Background(), captureRequest(s, false), func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error) {
+		pendingDeparture(s, 11)
+		return herdr.PaneRead{Content: []byte(capturePage("A", "B"))}, nil
+	})
+	if err != nil || !result.Capture.Admitted {
+		t.Fatalf("capture=%+v error=%v", result.Capture, err)
+	}
+	pending := s.historyPending["pane-1"]
+	if pending == nil || pending.sequence <= first.sequence || pending.queued != first.queued || pending.attempts != 1 {
+		t.Fatalf("newer coalesced request=%+v first=%+v", pending, first)
+	}
+	pendingDeparture(s, 10)
+	if s.historyPending["pane-1"].sequence != pending.sequence {
+		t.Fatal("old accepted revision replaced current request")
+	}
+	executeCapture(t, s, capturePage("A", "B"), false)
+	if s.historyPending["pane-1"] != nil {
+		t.Fatal("unchanged admitted capture did not acknowledge")
+	}
+}
+
+func TestTrailingCaptureRekeysSameTerminalGenerationAndCancelsReplacement(t *testing.T) {
+	s, _, _ := captureServer(t, false)
+	pendingDeparture(s, 10)
+	first := *s.historyPending["pane-1"]
+	agent, _ := s.state.Agent("pane-1")
+	agent.SessionID = "discovered"
+	s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+	s.syncHistoryPanes(s.state.Snapshot())
+	pending := s.historyPending["pane-1"]
+	if pending == nil || pending.identity.generation == first.identity.generation || pending.queued != first.queued {
+		t.Fatal("same terminal discovery did not rekey pending request")
+	}
+	agent, _ = s.state.Agent("pane-1")
+	agent.TerminalID = "replacement"
+	s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+	s.syncHistoryPanes(s.state.Snapshot())
+	if s.historyPending["pane-1"] != nil {
+		t.Fatal("replacement retained pending request")
+	}
+	pendingDeparture(s, 11)
+	if s.historyPending["pane-1"] != nil {
+		t.Fatal("delayed old-identity event created replacement request")
+	}
+}
+
+func TestTrailingCaptureSurvivesInflightIntervalSettleAndReadError(t *testing.T) {
+	s, _, advance := captureServer(t, true)
+	pendingDeparture(s, 10)
+	root := t.TempDir()
+	record, bin := filepath.Join(root, "calls"), filepath.Join(root, "herdr")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf 'call\\n' >> \""+record+"\"\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s.herdrC = herdr.NewClient(bin, filepath.Join(root, "missing.sock"))
+	t.Cleanup(func() { _ = s.herdrC.Close() })
+	s.historyTasks = newLifecycleTasks(context.Background())
+	t.Cleanup(s.historyTasks.Stop)
+	s.historyInflight["pane-1"] = true
+	s.captureHistoryTick(s.historyNow())
+	delete(s.historyInflight, "pane-1")
+	s.historyLast["pane-1"] = s.historyNow()
+	s.captureHistoryTick(s.historyNow())
+	advance(4 * time.Second)
+	_, _, _ = s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 70, 20)
+	s.captureHistoryTick(s.historyNow())
+	if s.historyPending["pane-1"].attempts != 0 {
+		t.Fatal("deferral consumed a read attempt")
+	}
+	advance(4 * time.Second)
+	s.captureHistoryTick(s.historyNow())
+	waitHistoryCapture(t, s)
+	if s.historyPending["pane-1"].attempts != 1 {
+		t.Fatal("failed read did not consume one attempt")
+	}
+	result := executeCapture(t, s, capturePage("final A", "final B"), true)
+	if !result.Capture.Admitted || s.historyPending["pane-1"] != nil {
+		t.Fatal("retry did not admit trailing page")
+	}
+}
+
+func waitHistoryCapture(t *testing.T, s *Server) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		s.historyCaptureMu.Lock()
+		inflight := s.historyInflight["pane-1"]
+		s.historyCaptureMu.Unlock()
+		if !inflight {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("history capture did not finish")
+		}
+		runtime.Gosched()
+	}
+}
+
+func TestTrailingCaptureUsesPaneWideSourceAndSurvivesRestoreBoundary(t *testing.T) {
+	s, _, advance := captureServer(t, true)
+	pendingDeparture(s, 10)
+	_ = s.paneSizeM.Release(context.Background(), "owner", "pane-1", true)
+	s.captureHistoryTick(s.historyNow())
+	if s.historyPending["pane-1"] == nil || s.historyPending["pane-1"].attempts != 0 {
+		t.Fatal("restore deferral lost request")
+	}
+	advance(4 * time.Second)
+	result := executeCapture(t, s, capturePage("restored A", "restored B"), false)
+	if !result.Capture.Admitted || s.historyPending["pane-1"] != nil || result.Capture.Snapshot.ReadSource != history.SourceLegacy {
+		t.Fatal("restored request did not use legacy source")
+	}
+}
+
+func TestTrailingCaptureBoundsAttemptsAndRequestLifetime(t *testing.T) {
+	for _, expire := range []string{"attempts", "lifetime"} {
+		s, _, _ := captureServer(t, false)
+		now := time.Unix(10000, 0)
+		s.historyNow = func() time.Time { return now }
+		pendingDeparture(s, 10)
+		if expire == "attempts" {
+			for range 5 {
+				_, _ = s.executeHistoryRead(context.Background(), captureRequest(s, false), func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error) {
+					return herdr.PaneRead{}, errors.New("read failed")
+				})
+			}
+		} else {
+			now = now.Add(60 * time.Second)
+		}
+		s.captureHistoryTick(now)
+		if s.historyPending["pane-1"] != nil {
+			t.Fatalf("%s did not expire request", expire)
+		}
+	}
+}
+
+func TestNativeConversationDoesNotSuppressTrailingTerminalCapture(t *testing.T) {
+	s, _, _ := captureServer(t, false)
+	home := t.TempDir()
+	const sessionID = "123e4567-e89b-12d3-a456-426614174322"
+	writeClaudeTranscriptAnswering(t, filepath.Join(home, ".claude", "projects", "-work-old", sessionID+".jsonl"), "work", "native answer")
+	s.conversationM = conversation.NewReader(home)
+	pendingDeparture(s, 10)
+	if got := s.captureFinishedPane(context.Background(), "pane-1", "claude", "/work/old", sessionID); got != "native answer" {
+		t.Fatalf("native completion=%q", got)
+	}
+	if s.historyPending["pane-1"] == nil {
+		t.Fatal("native response cleared terminal request")
+	}
+	executeCapture(t, s, capturePage("terminal A", "terminal B"), false)
+	if s.historyPending["pane-1"] != nil || s.historyM.Content("pane-1", 0) != capturePage("terminal A", "terminal B") {
+		t.Fatal("terminal trailing capture did not complete")
+	}
+}
+
+func TestSharedReadPendingAcknowledgement(t *testing.T) {
+	for _, mode := range []string{"present", "created after sample", "newer request", "rejected", "cancelled"} {
+		t.Run(mode, func(t *testing.T) {
+			s, _, _ := captureServer(t, false)
+			if mode != "created after sample" {
+				pendingDeparture(s, 10)
+			}
+			entered, release := make(chan struct{}), make(chan struct{})
+			s.dispatcher = coordinator.NewDispatcher(nil, s.state, nil, s.logger)
+			var reads atomic.Int32
+			options := coordinator.PaneReadOptions{Execute: func(ctx context.Context, request coordinator.PaneReadRequest, _ func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error)) (coordinator.PaneReadResult, error) {
+				reads.Add(1)
+				return s.executeHistoryRead(ctx, request, func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error) {
+					close(entered)
+					<-release
+					if mode == "cancelled" {
+						return herdr.PaneRead{}, context.Canceled
+					}
+					raw := capturePage("A", "B")
+					if mode == "rejected" {
+						raw = ""
+					}
+					return herdr.PaneRead{Content: []byte(raw)}, nil
+				})
+			}}
+			results := make(chan coordinator.PaneReadCapture, 3)
+			read := func() {
+				_, capture := s.dispatcher.HandleReadPaneWithOptions(context.Background(), map[string]any{"pane_id": "pane-1", "format": "ansi", "lines": 100}, options)
+				results <- capture
+			}
+			go read()
+			<-entered
+			if mode == "created after sample" {
+				pendingDeparture(s, 10)
+			}
+			if mode == "newer request" {
+				pendingDeparture(s, 11)
+			}
+			go read()
+			go read()
+			time.Sleep(20 * time.Millisecond)
+			close(release)
+			var first coordinator.PaneReadCapture
+			for index := range 3 {
+				capture := <-results
+				if index == 0 {
+					first = capture
+				} else if capture != first {
+					t.Fatal("followers changed underlying capture identity")
+				}
+			}
+			if reads.Load() != 1 {
+				t.Fatalf("underlying reads=%d", reads.Load())
+			}
+			pending := s.historyPending["pane-1"]
+			if (pending == nil) != (mode == "present") {
+				t.Fatalf("mode=%s pending=%+v", mode, pending)
+			}
+			if pending != nil && pending.attempts > 1 {
+				t.Fatal("followers consumed attempts")
+			}
+			wantAcknowledgements := uint64(0)
+			if mode == "present" {
+				wantAcknowledgements = 1
+			}
+			if s.historyAcknowledgements != wantAcknowledgements {
+				t.Fatalf("acknowledgements=%d want=%d", s.historyAcknowledgements, wantAcknowledgements)
+			}
+			if mode == "newer request" && pending.sequence == first.PendingSequence {
+				t.Fatal("newer request retained sampled sequence")
+			}
+			if mode == "created after sample" && first.PendingSequence != 0 {
+				t.Fatal("follower attached a request created after sampling")
+			}
+		})
 	}
 }
 

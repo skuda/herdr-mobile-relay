@@ -66,6 +66,20 @@ func (a *AgentState) UsesNoScrollbackHistory() bool {
 	return strings.Contains(lower, "claude") || strings.Contains(lower, "qoder")
 }
 
+type StatusTransition struct {
+	PaneID     string
+	TerminalID string
+	Generation int64
+	OldStatus  string
+	NewStatus  string
+	Revision   int64
+}
+
+type statusDelivery struct {
+	event    StatusTransition
+	observer func(StatusTransition)
+}
+
 type TransitionCallback func(paneID, agent, project, status string, revision int64)
 
 type State struct {
@@ -93,6 +107,8 @@ type State struct {
 	lastSuccessAt      time.Time
 	logger             *slog.Logger
 	onTransition       TransitionCallback
+	onStatusTransition func(StatusTransition)
+	pendingStatus      []statusDelivery
 	onInventory        func([]*AgentState)
 	notifyMu           sync.Mutex
 	pendingInventory   []*AgentState
@@ -184,6 +200,34 @@ func (s *State) SetOnTransition(fn TransitionCallback) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onTransition = fn
+}
+
+func (s *State) SetOnStatusTransition(observer func(StatusTransition)) {
+	s.mu.Lock()
+	s.onStatusTransition = observer
+	s.mu.Unlock()
+}
+
+func (s *State) queueStatusLocked(agent *AgentState, previous string) {
+	if s.onStatusTransition == nil || previous == agent.Status {
+		return
+	}
+	s.pendingStatus = append(s.pendingStatus, statusDelivery{observer: s.onStatusTransition, event: StatusTransition{
+		PaneID: agent.PaneID, TerminalID: agent.TerminalID, Generation: s.generation[agent.PaneID],
+		OldStatus: previous, NewStatus: agent.Status, Revision: s.revCounter,
+	}})
+}
+
+func (s *State) takeStatusLocked() []statusDelivery {
+	pending := s.pendingStatus
+	s.pendingStatus = nil
+	return pending
+}
+
+func deliverStatus(pending []statusDelivery) {
+	for _, delivery := range pending {
+		delivery.observer(delivery.event)
+	}
 }
 
 var attentionStatuses = map[string]bool{
@@ -389,7 +433,9 @@ func (s *State) MarkTopologyChanged() {
 func (s *State) CommitInventory(agents []*AgentState, baseRev int64) {
 	s.mu.Lock()
 	s.commitInventoryLocked(agents, baseRev)
+	pending := s.takeStatusLocked()
 	s.mu.Unlock()
+	deliverStatus(pending)
 	s.notifyInventory()
 }
 
@@ -426,7 +472,9 @@ func (s *State) CommitTopology(
 		s.topologyGen++
 	}
 	s.commitTopologyLocked(agents, baseRev)
+	pending := s.takeStatusLocked()
 	s.mu.Unlock()
+	deliverStatus(pending)
 	s.notifyInventory()
 	return workspaceChanged
 }
@@ -474,7 +522,9 @@ func (s *State) CommitPoll(
 	}
 	workspaceChanged = s.commitWorkspacesLocked(workspaces)
 	s.commitInventoryLocked(agents, token.BaseRevision)
+	pending := s.takeStatusLocked()
 	s.mu.Unlock()
+	deliverStatus(pending)
 	s.notifyInventory()
 	return workspaceChanged, true
 }
@@ -607,6 +657,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		s.revision[incoming.PaneID] = s.revCounter
 		s.agents[incoming.PaneID] = &cp
 		s.prevStatus[incoming.PaneID] = cp.Status
+		s.queueStatusLocked(&cp, prev)
 		s.registerTransition(incoming.PaneID, prev, cp.Status, previousAttention)
 		if !exists && (doneStatuses[cp.Status] || cp.Status == "idle") {
 			if cp.LastActiveAt > cp.LastSeenAt {
@@ -689,7 +740,11 @@ func (s *State) CommitEventForSession(
 	updatedAt int64,
 ) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer func() {
+		pending := s.takeStatusLocked()
+		s.mu.Unlock()
+		deliverStatus(pending)
+	}()
 
 	agent, exists := s.agents[paneID]
 	if !exists {
@@ -746,6 +801,7 @@ func (s *State) CommitEventForSession(
 		s.attentionRev[paneID]++
 	}
 	s.prevStatus[paneID] = status
+	s.queueStatusLocked(a, prev)
 	s.registerTransition(paneID, prev, status, previousAttention)
 	if !preservesChatCompletion(prev, status, previousAttention) {
 		s.syncAttentionCompletionLocked(paneID, previousAttention, a.AttentionKind)

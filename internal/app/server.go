@@ -144,19 +144,26 @@ type Server struct {
 	paneWatchMu sync.Mutex
 	paneWatches map[string]*paneWatch
 
-	historyCaptureMu  sync.Mutex
-	historyInflight   map[string]bool
-	historyLast       map[string]time.Time
-	historyActive     map[string]historyIdentity
-	historySequence   uint64
-	historyArchived   map[string]uint64
-	historyReconciled bool
-	pushReconcileMu   sync.Mutex
-	pushReconciled    bool
-	pushTestMu        sync.Mutex
-	pushTestLast      map[string]time.Time
-	transitionTasks   *lifecycleTasks
-	historyTasks      *lifecycleTasks
+	historyCaptureMu        sync.Mutex
+	historyInflight         map[string]bool
+	historyLast             map[string]time.Time
+	historyActive           map[string]historyIdentity
+	historySequence         uint64
+	historyArchived         map[string]uint64
+	historyPending          map[string]*pendingHistoryCapture
+	historyStatusRevision   map[string]int64
+	historyRequestSequence  uint64
+	historyAcknowledgements uint64
+	historyClosed           bool
+	historyNow              func() time.Time
+	persistenceTasks        *lifecycleTasks
+	historyReconciled       bool
+	pushReconcileMu         sync.Mutex
+	pushReconciled          bool
+	pushTestMu              sync.Mutex
+	pushTestLast            map[string]time.Time
+	transitionTasks         *lifecycleTasks
+	historyTasks            *lifecycleTasks
 }
 
 func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Server {
@@ -269,7 +276,8 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		historyLast:         make(map[string]time.Time),
 		historyActive:       make(map[string]historyIdentity),
 		historyArchived:     make(map[string]uint64),
-		pushTestLast:        make(map[string]time.Time),
+		historyPending:      make(map[string]*pendingHistoryCapture), historyStatusRevision: make(map[string]int64), historyNow: time.Now,
+		pushTestLast: make(map[string]time.Time),
 	}
 }
 
@@ -561,6 +569,9 @@ func (s *Server) Run(ctx context.Context) error {
 	ctx = runCtx
 	s.transitionTasks = newLifecycleTasks(ctx)
 	s.historyTasks = newLifecycleTasks(ctx)
+	s.persistenceTasks = newLifecycleTasks(ctx)
+	s.persistenceTasks.Start(s.historyM.RunPersistence)
+	s.state.SetOnStatusTransition(s.enqueueHistoryTransition)
 	defer s.drainLifecycleWork()
 	if s.uploadM != nil {
 		defer s.uploadM.Close()
@@ -1541,10 +1552,24 @@ func canonicalHTTPPath(raw string) bool {
 }
 
 func (s *Server) drainLifecycleWork() {
+	s.historyCaptureMu.Lock()
+	s.historyClosed = true
+	s.historyCaptureMu.Unlock()
 	s.state.SetOnTransition(nil)
-	s.transitionTasks.Stop()
-	s.historyTasks.Stop()
-	s.historyM.SaveAll()
+	s.state.SetOnStatusTransition(nil)
+	if s.transitionTasks != nil {
+		s.transitionTasks.Stop()
+	}
+	if s.historyTasks != nil {
+		s.historyTasks.Stop()
+	}
+	if s.persistenceTasks != nil {
+		s.persistenceTasks.Stop()
+	}
+	if err := s.historyM.SaveAll(); err != nil {
+		s.recordSafeError("final pane history save failed", err)
+		s.logger.Warn("final pane history save failed")
+	}
 }
 
 func (s *Server) reconcileRecoveredPush(ctx context.Context, agents []*coordinator.AgentState) {
@@ -2080,13 +2105,8 @@ func (s *Server) captureHistoryLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			for _, agent := range s.state.Snapshot() {
-				if !isClaudeLike(agent.Agent) || (agent.Status != "working" && agent.Status != "blocked") {
-					continue
-				}
-				s.scheduleHistoryCapture(ctx, agent.PaneID)
-			}
+		case now := <-ticker.C:
+			s.captureHistoryTick(now)
 		}
 	}
 }
@@ -2096,12 +2116,18 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 		return
 	}
 	s.historyCaptureMu.Lock()
-	if s.historyInflight[paneID] || time.Since(s.historyLast[paneID]) < history.CaptureInterval {
+	closed := s.historyClosed
+	s.historyCaptureMu.Unlock()
+	if closed || s.historyCaptureDeferred(paneID) {
+		return
+	}
+	s.historyCaptureMu.Lock()
+	if s.historyClosed || s.historyInflight[paneID] || s.historyNow().Sub(s.historyLast[paneID]) < history.CaptureInterval {
 		s.historyCaptureMu.Unlock()
 		return
 	}
 	s.historyInflight[paneID] = true
-	s.historyLast[paneID] = time.Now()
+	s.historyLast[paneID] = s.historyNow()
 	s.historyCaptureMu.Unlock()
 
 	started := s.historyTasks.Start(func(taskCtx context.Context) {
@@ -2151,6 +2177,14 @@ func (s *Server) syncHistoryPanes(agents []*coordinator.AgentState) {
 	}
 	for paneID, identity := range active {
 		s.historyActive[paneID] = identity
+	}
+	for paneID, pending := range s.historyPending {
+		identity, exists := active[paneID]
+		if !exists || identity.terminalID != pending.identity.terminalID {
+			delete(s.historyPending, paneID)
+		} else {
+			pending.identity = identity
+		}
 	}
 	s.historyCaptureMu.Unlock()
 	if s.paneSizeM != nil {

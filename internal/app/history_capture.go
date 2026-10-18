@@ -60,6 +60,10 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		token.identity = historyIdentity{terminalID: agent.TerminalID, generation: request.Generation}
 	}
 	s.historyCaptureMu.Lock()
+	if s.historyClosed {
+		s.historyCaptureMu.Unlock()
+		return coordinator.PaneReadResult{}, context.Canceled
+	}
 	s.historySequence++
 	token.sequence = s.historySequence
 	s.historyCaptureMu.Unlock()
@@ -73,6 +77,9 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 			defer handle.Close()
 		}
 	}
+	s.historyCaptureMu.Lock()
+	token.pendingSequence = s.pendingReadStartedLocked(request.PaneID, token.identity)
+	s.historyCaptureMu.Unlock()
 	read, err := readContent(ctx, request)
 	if err != nil {
 		return coordinator.PaneReadResult{}, err
@@ -122,7 +129,7 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 	s.historyCaptureMu.Lock()
 	defer s.historyCaptureMu.Unlock()
 	active, ok := s.historyActive[request.PaneID]
-	if !ok || active != token.identity || token.sequence <= s.historyArchived[request.PaneID] || ctx.Err() != nil {
+	if !ok || active != token.identity || token.sequence <= s.historyArchived[request.PaneID] || ctx.Err() != nil || s.historyClosed {
 		return result, nil
 	}
 	content, _, admission := s.historyM.AdmitSnapshot(request.PaneID, string(read.Content), context, 0)
@@ -130,6 +137,7 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		response["content"] = content
 		result.Capture.Admitted = true
 		s.historyArchived[request.PaneID] = token.sequence
+		s.acknowledgeHistoryLocked(token)
 	}
 	return result, nil
 }

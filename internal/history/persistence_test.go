@@ -1,0 +1,240 @@
+package history
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+func persistedState(t *testing.T, m *Manager, pane string) PaneState {
+	t.Helper()
+	data, err := os.ReadFile(m.stateFile(pane))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state PaneState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
+func TestDirtyHistoryFlushesAtSaveDeadlineWithoutNewFrames(t *testing.T) {
+	m := NewManager(t.TempDir())
+	now := time.Unix(10000, 0)
+	m.now = func() time.Time { return now }
+	m.Merge("p", snapshotPage("A", "B"))
+	if err := m.FlushDue(now); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Second)
+	m.Merge("p", snapshotPage("B", "C"))
+	due := m.states["p"].saveDue
+	now = now.Add(2 * time.Second)
+	m.Merge("p", snapshotPage("B", "C"))
+	if m.states["p"].saveDue != due {
+		t.Fatal("unchanged read postponed dirty deadline")
+	}
+	if err := m.FlushDue(due); err != nil {
+		t.Fatal(err)
+	}
+	if got := persistedState(t, m, "p"); strings.Join(got.History, "\n") != "A\nB\nC" || m.states["p"].dirty {
+		t.Fatalf("saved state=%+v", got)
+	}
+}
+
+func TestFooterOnlyDirtyStatePersists(t *testing.T) {
+	m := NewManager(t.TempDir())
+	now := time.Unix(10000, 0)
+	m.now = func() time.Time { return now }
+	m.Merge("p", snapshotPage("A", "B"))
+	if err := m.FlushDue(now); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Second)
+	m.Merge("p", strings.ReplaceAll(snapshotPage("A", "B"), "footer", "fresh"))
+	if err := m.FlushDue(now.Add(SaveInterval)); err != nil {
+		t.Fatal(err)
+	}
+	if got := persistedState(t, m, "p"); got.Footer[0] != "fresh1" {
+		t.Fatalf("footer=%v", got.Footer)
+	}
+}
+
+func TestFailedSaveRetainsDirtyStateAndDoesNotAdvanceLastSave(t *testing.T) {
+	m := NewManager(t.TempDir())
+	now := time.Unix(10000, 0)
+	m.now = func() time.Time { return now }
+	m.Merge("p", snapshotPage("A", "B"))
+	m.writeFile = func(string, []byte, os.FileMode) error { return errors.New("write failed") }
+	if err := m.FlushDue(now); err == nil {
+		t.Fatal("save failure hidden")
+	}
+	if !m.states["p"].dirty || !m.lastSave["p"].IsZero() || m.states["p"].saveDue.Before(now.Add(time.Second)) {
+		t.Fatal("failed save cleared dirty state or retry bound")
+	}
+	m.writeFile = os.WriteFile
+	if err := m.FlushDue(now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDiscardOrReplacementFencesQueuedSaveRename(t *testing.T) {
+	for _, discard := range []bool{true, false} {
+		m := NewManager(t.TempDir())
+		m.Merge("p", snapshotPage("A", "B"))
+		entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+		m.beforeRename = func() { close(entered); <-release }
+		go func() { done <- m.FlushDue(time.Now().Add(time.Hour)) }()
+		<-entered
+		m.Discard("p")
+		if !discard {
+			m.Merge("p", snapshotPage("replacement A", "replacement B"))
+		}
+		close(release)
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(m.stateFile("p")); !os.IsNotExist(err) {
+			t.Fatalf("obsolete save recreated file: %v", err)
+		}
+	}
+}
+
+func TestProgressTailUpdatesPersistWithoutArchiveGrowth(t *testing.T) {
+	m := NewManager(t.TempDir())
+	now := time.Unix(10000, 0)
+	m.now = func() time.Time { return now }
+	ctx := physicalContext(1, 40)
+	m.MergeSnapshot("p", snapshotPage("A", "B", "C", "progress 0"), ctx)
+	if err := m.FlushDue(now); err != nil {
+		t.Fatal(err)
+	}
+	for index := 1; index <= 5; index++ {
+		now = now.Add(time.Second)
+		m.MergeSnapshot("p", snapshotPage("A", "B", "C", fmt.Sprintf("progress %d", index)), ctx)
+	}
+	if err := m.FlushDue(now.Add(SaveInterval)); err != nil {
+		t.Fatal(err)
+	}
+	state := persistedState(t, m, "p")
+	if len(state.History) != 4 || state.LiveStart != 0 || state.History[3] != "progress 5" {
+		t.Fatalf("persisted progress=%+v", state)
+	}
+}
+
+func TestSaveSnapshotKeepsNewerMutationDirty(t *testing.T) {
+	m := NewManager(t.TempDir())
+	m.Merge("p", snapshotPage("A", "B"))
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	m.beforeRename = func() { close(entered); <-release }
+	go func() { done <- m.FlushDue(time.Now().Add(time.Hour)) }()
+	<-entered
+	m.Merge("p", snapshotPage("B", "C"))
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !m.states["p"].dirty {
+		t.Fatal("older save cleared a newer mutation")
+	}
+	m.beforeRename = nil
+	if err := m.FlushDue(time.Now().Add(2 * time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := persistedState(t, m, "p"); strings.Join(got.History, "\n") != "A\nB\nC" {
+		t.Fatalf("newer saved history=%v", got.History)
+	}
+}
+
+func TestRestartReadsFinalAdmittedPage(t *testing.T) {
+	root := t.TempDir()
+	m := NewManager(root)
+	m.MergeSnapshot("p", snapshotPage("A", "B"), physicalContext(1, 40))
+	if err := m.SaveAll(); err != nil {
+		t.Fatal(err)
+	}
+	m.MergeSnapshot("p", snapshotPage("A", "B", "final"), physicalContext(1, 40))
+	if err := m.FlushDue(time.Now().Add(SaveInterval)); err != nil {
+		t.Fatal(err)
+	}
+	if got := NewManager(root).Content("p", 0); got != snapshotPage("A", "B", "final") {
+		t.Fatalf("restart content=%q", got)
+	}
+}
+
+func TestUnchangedMergeDoesNotPostponeDirtyFlush(t *testing.T) {
+	m := NewManager(t.TempDir())
+	now := time.Unix(10000, 0)
+	m.now = func() time.Time { return now }
+	m.Merge("p", snapshotPage("A", "B"))
+	if err := m.FlushDue(now); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Second)
+	m.Merge("p", snapshotPage("B", "C"))
+	due := m.states["p"].saveDue
+	for range 5 {
+		now = now.Add(time.Second)
+		m.Merge("p", snapshotPage("B", "C"))
+	}
+	if m.states["p"].saveDue != due {
+		t.Fatal("unchanged merges reset save deadline")
+	}
+	if err := m.FlushDue(due); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTerminalReplacementInvalidatesQueuedSave(t *testing.T) {
+	m := NewManager(t.TempDir())
+	ctx := physicalContext(1, 40)
+	m.MergeSnapshot("p", snapshotPage("old A", "old B"), ctx)
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	m.beforeRename = func() { close(entered); <-release }
+	go func() { done <- m.FlushDue(time.Now().Add(time.Hour)) }()
+	<-entered
+	ctx.TerminalID = "replacement"
+	m.MergeSnapshot("p", snapshotPage("new A", "new B"), ctx)
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(m.stateFile("p")); !os.IsNotExist(err) {
+		t.Fatal("replaced state was recreated by old save")
+	}
+	m.beforeRename = nil
+	if err := m.SaveAll(); err != nil {
+		t.Fatal(err)
+	}
+	if got := persistedState(t, m, "p"); got.TerminalID != "replacement" || strings.Join(got.History, "\n") != "new A\nnew B" {
+		t.Fatalf("replacement saved=%+v", got)
+	}
+}
+
+func TestRunPersistenceSavesWithoutAnotherMerge(t *testing.T) {
+	m := NewManager(t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { m.RunPersistence(ctx); close(done) }()
+	m.Merge("p", snapshotPage("A", "B"))
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(m.stateFile("p")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatal("worker did not save")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+}

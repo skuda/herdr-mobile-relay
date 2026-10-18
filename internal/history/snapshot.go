@@ -55,7 +55,9 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		context.ReadSource = SourceLegacy
 	}
 	if state.TerminalID != "" && context.TerminalID != "" && state.TerminalID != context.TerminalID {
-		*state = PaneState{}
+		state = &PaneState{}
+		m.states[paneID] = state
+		delete(m.lastSave, paneID)
 	}
 	boundary := state.loaded || state.SnapshotVersion != snapshotVersion ||
 		state.ReadSource != context.ReadSource || state.GeometryEpoch != context.GeometryEpoch ||

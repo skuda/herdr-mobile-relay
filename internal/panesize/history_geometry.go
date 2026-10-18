@@ -313,6 +313,17 @@ func (r *HistoryRead) Close() error {
 	return nil
 }
 
+func (m *Manager) HistoryReadUnsafe(paneID, terminalID string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state := m.historyGeometry[paneID]
+	return state != nil && terminalID != "" && state.identity.terminalID == terminalID &&
+		(state.geometry.InProgress || historySettling(state.geometry, m.now()))
+}
+
 func (m *Manager) ForgetHistoryPane(paneID, terminalID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

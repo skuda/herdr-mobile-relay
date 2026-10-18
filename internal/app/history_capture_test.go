@@ -677,6 +677,22 @@ func TestLeaseActivationAndRestoreAreSourceBoundaries(t *testing.T) {
 	}
 }
 
+func TestFailedLegacyGeometrySampleRetainsRestoreSettleFence(t *testing.T) {
+	s, f, advance := captureServer(t, true)
+	executeCapture(t, s, capturePage("old A", "old B"), true)
+	_ = s.paneSizeM.Release(context.Background(), "owner", "pane-1", true)
+	f.mu.Lock()
+	f.size.Columns = 0
+	f.mu.Unlock()
+	if result := executeCapture(t, s, capturePage("settling A", "settling B"), false); result.Capture.Admitted {
+		t.Fatal("failed sample bypassed retained restore settling")
+	}
+	advance(4 * time.Second)
+	if result := executeCapture(t, s, capturePage("legacy A", "legacy B"), false); !result.Capture.Admitted {
+		t.Fatal("outside-settle legacy read required known geometry")
+	}
+}
+
 func TestHistoryLegacyAdmissionWithUnknownGeometry(t *testing.T) {
 	s, f, _ := captureServer(t, false)
 	f.mu.Lock()

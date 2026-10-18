@@ -76,6 +76,7 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 			defer handle.Close()
 		}
 	}
+	retainedUnsafe := s.paneSizeM != nil && s.paneSizeM.HistoryReadUnsafe(request.PaneID, token.identity.terminalID)
 	s.historyCaptureMu.Lock()
 	token.pendingSequence = s.pendingReadStartedLocked(request.PaneID, token.identity)
 	s.historyCaptureMu.Unlock()
@@ -109,7 +110,10 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 	if request.Physical {
 		eligible = eligible && handle != nil && geometryErr == nil && token.geometry.Known && token.geometry.Leased
 	} else {
-		eligible = eligible && !request.Resized && (handle == nil || geometryErr == nil)
+		if handle == nil && s.paneSizeM != nil {
+			retainedUnsafe = retainedUnsafe || s.paneSizeM.HistoryReadUnsafe(request.PaneID, token.identity.terminalID)
+		}
+		eligible = eligible && !request.Resized && !retainedUnsafe && (handle == nil || geometryErr == nil)
 	}
 	if !eligible {
 		return result, nil

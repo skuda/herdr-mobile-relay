@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -181,6 +182,81 @@ func TestFinishedReadPublishesOldEpochAfterLaterResize(t *testing.T) {
 	}
 }
 
+func TestSingleFlightFollowerCannotRelabelOlderSnapshot(t *testing.T) {
+	s, _, _ := captureServer(t, true)
+	s.dispatcher = coordinator.NewDispatcher(nil, s.state, nil, s.logger)
+	pageP, pageQ := capturePage("P A", "P B"), capturePage("Q A", "Q B")
+	ownerFinished, releaseOwner := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseOwner) }) }
+	t.Cleanup(release)
+	var ownerCalls atomic.Int32
+	on, revision := s.physicalHistorySource(captureRequest(s, true).Agent)
+	if !on {
+		t.Fatal("fixture does not have physical source")
+	}
+	options := coordinator.PaneReadOptions{Physical: true, SourceRevision: revision,
+		Execute: func(ctx context.Context, request coordinator.PaneReadRequest, _ func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error)) (coordinator.PaneReadResult, error) {
+			if request.Lines != 1000 {
+				t.Errorf("owner capture count=%d", request.Lines)
+			}
+			if ownerCalls.Add(1) != 1 {
+				return coordinator.PaneReadResult{}, errors.New("follower started an independent read")
+			}
+			result, err := s.executeHistoryRead(ctx, request, func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error) {
+				return herdr.PaneRead{Content: []byte(pageP)}, nil
+			})
+			close(ownerFinished)
+			<-releaseOwner
+			return result, err
+		}}
+	type callerResult struct {
+		response map[string]any
+		capture  coordinator.PaneReadCapture
+	}
+	ownerDone, followerDone := make(chan callerResult, 1), make(chan callerResult, 1)
+	message := func() map[string]any { return map[string]any{"pane_id": "pane-1", "lines": 1000, "format": "ansi"} }
+	go func() {
+		response, capture := s.dispatcher.HandleReadPaneWithOptions(context.Background(), message(), options)
+		ownerDone <- callerResult{response, capture}
+	}()
+	select {
+	case <-ownerFinished:
+	case <-time.After(time.Second):
+		t.Fatal("owner did not pause before flight removal")
+	}
+	newer := executeCapture(t, s, pageQ, true)
+	if !newer.Capture.Admitted || newer.Capture.Sequence != 2 {
+		t.Fatalf("background C capture=%+v", newer.Capture)
+	}
+	followerStarted := make(chan struct{})
+	go func() {
+		close(followerStarted)
+		response, capture := s.dispatcher.HandleReadPaneWithOptions(context.Background(), message(), options)
+		followerDone <- callerResult{response, capture}
+	}()
+	<-followerStarted
+	select {
+	case <-followerDone:
+		t.Fatal("follower returned before owner release")
+	case <-time.After(20 * time.Millisecond):
+	}
+	release()
+	owner, follower := <-ownerDone, <-followerDone
+	if ownerCalls.Load() != 1 || owner.capture.Sequence != 1 || follower.capture != owner.capture || follower.response["content"] != pageP {
+		t.Fatalf("owner=%+v follower=%+v underlying calls=%d", owner.capture, follower.capture, ownerCalls.Load())
+	}
+	s.historyCaptureMu.Lock()
+	sequence, archived := s.historySequence, s.historyArchived["pane-1"]
+	s.historyCaptureMu.Unlock()
+	if sequence != 2 || archived != 2 || follower.capture.PendingSequence != 0 {
+		t.Fatalf("follower changed admission bookkeeping: sequence=%d archived=%d pending=%d", sequence, archived, follower.capture.PendingSequence)
+	}
+	if got := s.historyM.Content("pane-1", 0); got != "P A\nP B\n"+pageQ {
+		t.Fatalf("follower replaced Q with P: %q", got)
+	}
+}
+
 func TestNewerArchivedReadRejectsOlderFinishedCompletion(t *testing.T) {
 	s, _, _ := captureServer(t, true)
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan coordinator.PaneReadResult, 1)
@@ -254,14 +330,39 @@ func TestPhysicalCaptureBudgetIgnoresReaderLines(t *testing.T) {
 		body[i] = fmt.Sprintf("marker-%03d", i)
 	}
 	raw := capturePage(body...)
+	root := t.TempDir()
+	page, record, bin := filepath.Join(root, "page"), filepath.Join(root, "calls"), filepath.Join(root, "herdr")
+	if err := os.WriteFile(page, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+record+"\"\ncat \""+page+"\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s.herdrC = herdr.NewClient(bin, filepath.Join(root, "missing.sock"))
+	t.Cleanup(func() { _ = s.herdrC.Close() })
+	s.dispatcher = coordinator.NewDispatcher(s.herdrC, s.state, nil, s.logger)
 	for range 4 {
-		result := executeCapture(t, s, raw, true)
-		if result.Response["content"] != raw || !result.Capture.Admitted {
-			t.Fatalf("stable capture = %+v", result.Capture)
+		response := s.readPaneResponse(context.Background(), map[string]any{"pane_id": "pane-1", "lines": 100, "format": "ansi"})
+		if response["error"] != nil || strings.Count(response["content"].(string), "\n")+1 != 100 || response["truncated"] != true {
+			t.Fatalf("100-row display response = %+v", response)
+		}
+		if got := s.historyM.Content("pane-1", 0); got != raw {
+			t.Fatal("display row clipping changed canonical stored page")
+		}
+		background, err := s.captureTerminalHistory(context.Background(), "pane-1")
+		if err != nil || background != raw {
+			t.Fatalf("background canonical page=%q error=%v", background, err)
+		}
+		if got := s.historyM.Content("pane-1", 0); got != raw {
+			t.Fatal("alternating captures grew archive")
 		}
 	}
-	if got := s.historyM.Content("pane-1", 0); got != raw {
-		t.Fatal("unchanged physical page grew archive")
+	calls, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(calls), "--lines 1000 --source recent --format ansi") != 8 {
+		t.Fatalf("noncanonical capture requests: %s", calls)
 	}
 }
 

@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"github.com/0cv/herdr-mobile-relay/internal/history"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 	"strings"
 	"testing"
@@ -79,41 +81,66 @@ func TestOversizedNewestRowProducesEmptyTruncatedSuccess(t *testing.T) {
 }
 
 func TestANSIHeavyFullFrameThroughHubSendAndReconnect(t *testing.T) {
-	s := testServerWithCacheDir(t.TempDir())
-	row := strings.Repeat("\x1b[38;2;123;123;123mX\x1b[0m", 20)
-	original := strings.Repeat(row+"\n", 9999) + row
-	response := fitPaneContentResponse(budgetFrame(original))
-	accepted := make(chan bool, 2)
-	s.hub.SetOnConnect(func(client *transport.ClientConn) { accepted <- s.hub.Send(client, response) })
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	defer s.hub.Shutdown(context.Background())
-	for range 2 {
-		frames := &leaseTestFrames{name: transport.TransportWebRTC, in: make(chan []byte, 1), out: make(chan []byte, 1), done: make(chan struct{})}
-		done := make(chan struct{})
-		go func() { s.hub.Serve(ctx, frames); close(done) }()
-		select {
-		case ok := <-accepted:
-			if !ok {
-				t.Fatal("Hub rejected fitting frame")
+	for _, source := range []string{history.SourceRecent, history.SourceLegacy} {
+		t.Run(source, func(t *testing.T) {
+			s, _, _ := captureServer(t, source == history.SourceRecent)
+			row := strings.Repeat("\x1b[38;2;123;123;123mX\x1b[0m", 20)
+			for page := range 10 {
+				body := make([]string, 994)
+				for index := range body {
+					body[index] = fmt.Sprintf("%d-%d %s", page, index, row)
+				}
+				result := executeCapture(t, s, capturePage(body...), source == history.SourceRecent)
+				if !result.Capture.Admitted {
+					t.Fatalf("page %d was not admitted", page)
+				}
 			}
-		case <-ctx.Done():
-			t.Fatal("Hub did not connect")
-		}
-		select {
-		case data := <-frames.out:
-			var delivered map[string]any
-			if err := json.Unmarshal(data, &delivered); err != nil {
-				t.Fatal(err)
+			stored := s.historyM.Content("pane-1", 0)
+			response := budgetFrame(stored)
+			encoded, err := json.Marshal(response)
+			if err != nil || len(encoded) <= PaneResponseBudgetBytes {
+				t.Fatalf("composed fixture bytes=%d error=%v", len(encoded), err)
 			}
-			if len(data) > PaneResponseBudgetBytes || delivered["content"] != response["content"] || delivered["truncated"] != true {
-				t.Fatal("Hub changed fitted frame")
+			fitPaneContentResponse(response)
+			accepted := make(chan bool, 2)
+			s.hub.SetOnConnect(func(client *transport.ClientConn) { accepted <- s.hub.Send(client, response) })
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			defer s.hub.Shutdown(context.Background())
+			for range 2 {
+				frames := &leaseTestFrames{name: transport.TransportWebRTC, in: make(chan []byte, 1), out: make(chan []byte, 1), done: make(chan struct{})}
+				done := make(chan struct{})
+				go func() { s.hub.Serve(ctx, frames); close(done) }()
+				select {
+				case ok := <-accepted:
+					if !ok {
+						t.Fatal("Hub rejected fitting frame")
+					}
+				case <-ctx.Done():
+					t.Fatal("Hub did not connect")
+				}
+				select {
+				case data := <-frames.out:
+					var delivered map[string]any
+					if err := json.Unmarshal(data, &delivered); err != nil {
+						t.Fatal(err)
+					}
+					if len(data) > PaneResponseBudgetBytes || delivered["content"] != response["content"] || delivered["truncated"] != true {
+						t.Fatal("Hub changed fitted frame")
+					}
+					if !strings.HasSuffix(stored, delivered["content"].(string)) {
+						t.Fatal("delivery omitted newest suffix")
+					}
+				case <-ctx.Done():
+					t.Fatal("Hub did not deliver frame")
+				}
+				frames.CloseNow()
+				<-done
 			}
-		case <-ctx.Done():
-			t.Fatal("Hub did not deliver frame")
-		}
-		frames.CloseNow()
-		<-done
+			if s.historyM.Content("pane-1", 0) != stored {
+				t.Fatal("byte fitting changed retained state")
+			}
+		})
 	}
 }
 

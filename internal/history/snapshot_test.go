@@ -418,19 +418,35 @@ func TestSourceGateCycleStartsNewSegmentWithoutIntermediateRead(t *testing.T) {
 }
 
 func TestUnleasedNoScrollbackExistingFixturesRemainByteIdentical(t *testing.T) {
-	fixtures := [][]string{
-		{snapshotPage("A", "B", "C"), snapshotPage("B", "C", "D")},
-		{snapshotPage("H1", "H2", "A", "B", "C", "D", "E"), snapshotPage("H1", "H2", "C", "D", "E", "F", "G")},
-		{snapshotPage("A", "B", "\x1b[42mstyle\x1b[0m", "old1", "old2"), snapshotPage("A", "B", "\x1b[44mstyle\x1b[0m", "new1", "new2")},
+	// Expected bytes were measured with Manager.Merge at bc4dd58.
+	fixtures := []struct {
+		frames []string
+		want   []string
+	}{
+		{
+			frames: []string{snapshotPage("A", "B", "C"), snapshotPage("B", "C", "D")},
+			want:   []string{"A\nB\nC\nfooter1\nfooter2\nfooter3\nfooter4\nfooter5\nfooter6", "A\nB\nC\nD\nfooter1\nfooter2\nfooter3\nfooter4\nfooter5\nfooter6"},
+		},
+		{
+			frames: []string{snapshotPage("H1", "H2", "A", "B", "C", "D", "E"), snapshotPage("H1", "H2", "C", "D", "E", "F", "G")},
+			want:   []string{"H1\nH2\nA\nB\nC\nD\nE\nfooter1\nfooter2\nfooter3\nfooter4\nfooter5\nfooter6", "H1\nH2\nA\nB\nC\nD\nE\nF\nG\nfooter1\nfooter2\nfooter3\nfooter4\nfooter5\nfooter6"},
+		},
+		{
+			frames: []string{snapshotPage("A", "B", "\x1b[42mstyle\x1b[0m", "old1", "old2"), snapshotPage("A", "B", "\x1b[44mstyle\x1b[0m", "new1", "new2")},
+			want:   []string{"A\nB\n\x1b[42mstyle\x1b[0m\nold1\nold2\nfooter1\nfooter2\nfooter3\nfooter4\nfooter5\nfooter6", "A\nB\n\x1b[44mstyle\x1b[0m\nnew1\nnew2\nfooter1\nfooter2\nfooter3\nfooter4\nfooter5\nfooter6"},
+		},
 	}
-	for _, frames := range fixtures {
+	for _, fixture := range fixtures {
 		legacy := NewManager(t.TempDir())
 		segmented := NewManager(t.TempDir())
-		for _, raw := range frames {
-			want := legacy.Merge("p", raw)
-			got := segmented.MergeSnapshot("p", raw, SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy})
-			if got != want {
-				t.Fatalf("legacy parity: got %q, want %q", got, want)
+		for index, raw := range fixture.frames {
+			for name, got := range map[string]string{
+				"Merge":         legacy.Merge("p", raw),
+				"MergeSnapshot": segmented.MergeSnapshot("p", raw, SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy}),
+			} {
+				if got != fixture.want[index] {
+					t.Fatalf("%s parity: got %q, want %q", name, got, fixture.want[index])
+				}
 			}
 		}
 	}

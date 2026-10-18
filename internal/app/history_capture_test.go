@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -61,6 +63,56 @@ func executeCapture(t *testing.T, s *Server, raw string, physical bool) coordina
 		t.Fatal(err)
 	}
 	return result
+}
+
+func installPaneReadFixture(t *testing.T, s *Server, read func(context.Context) (string, error)) {
+	t.Helper()
+	socket := filepath.Join(t.TempDir(), "herdr.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var workers sync.WaitGroup
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				defer conn.Close()
+				decoder, encoder := json.NewDecoder(conn), json.NewEncoder(conn)
+				for {
+					var request struct {
+						ID     string `json:"id"`
+						Method string `json:"method"`
+					}
+					if decoder.Decode(&request) != nil {
+						return
+					}
+					if request.Method != "pane.read" {
+						t.Errorf("unexpected method %q", request.Method)
+						return
+					}
+					content, err := read(ctx)
+					if err != nil {
+						return
+					}
+					if encoder.Encode(map[string]any{"id": request.ID, "result": map[string]any{"type": "pane_read", "read": map[string]any{"text": content, "revision": 0, "truncated": false}}}) != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	s.herdrC = herdr.NewClient("unused", socket)
+	s.dispatcher = coordinator.NewDispatcher(s.herdrC, s.state, nil, s.logger)
+	t.Cleanup(func() { cancel(); _ = s.herdrC.Close(); _ = listener.Close(); <-acceptDone; workers.Wait() })
 }
 
 func TestPaneWideLeasedNoScrollbackWritersUseRecentANSI(t *testing.T) {
@@ -487,6 +539,121 @@ func TestEligibleViewportReadRetainsHistoryAndCurrentFooter(t *testing.T) {
 	}
 }
 
+type pausedHistoryResizeOps struct {
+	panesize.TerminalOps
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (o *pausedHistoryResizeOps) Open(path string) (panesize.Terminal, error) {
+	terminal, err := o.TerminalOps.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	return pausedHistoryResizeTerminal{Terminal: terminal, ops: o}, nil
+}
+
+type pausedHistoryResizeTerminal struct {
+	panesize.Terminal
+	ops *pausedHistoryResizeOps
+}
+
+func (t pausedHistoryResizeTerminal) SetSize(size panesize.Winsize) error {
+	err := t.Terminal.SetSize(size)
+	t.ops.once.Do(func() { close(t.ops.entered); <-t.ops.release })
+	return err
+}
+
+func TestHistoryWritersRejectUnsafeIntervals(t *testing.T) {
+	for _, phase := range []string{"acquire settle", "restore settle", "crossed epoch", "resize in progress"} {
+		for _, writer := range []string{"phone", "non-owner", "scheduled", "completion"} {
+			t.Run(phase+"/"+writer, func(t *testing.T) {
+				s, f, advance := captureServer(t, true)
+				baseline := capturePage("retained A", "retained B")
+				executeCapture(t, s, baseline, true)
+				var releaseResize func()
+				if phase == "resize in progress" {
+					ops := &pausedHistoryResizeOps{TerminalOps: f, entered: make(chan struct{}), release: make(chan struct{})}
+					s.paneSizeM = panesize.NewManagerWith(f, f, ops, s.historyNow, nil)
+					done := make(chan error, 1)
+					go func() { _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 70, 20); done <- err }()
+					select {
+					case <-ops.entered:
+					case <-time.After(time.Second):
+						t.Fatal("resize did not pause")
+					}
+					var once sync.Once
+					releaseResize = func() {
+						once.Do(func() {
+							close(ops.release)
+							if err := <-done; err != nil {
+								t.Error(err)
+							}
+						})
+					}
+					t.Cleanup(releaseResize)
+				} else if phase == "acquire settle" {
+					if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 70, 20); err != nil {
+						t.Fatal(err)
+					}
+				} else if phase == "restore settle" {
+					if err := s.paneSizeM.Release(context.Background(), "owner", "pane-1", true); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var contentReads atomic.Int32
+				installPaneReadFixture(t, s, func(context.Context) (string, error) {
+					contentReads.Add(1)
+					if phase == "crossed epoch" {
+						if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 70, 20); err != nil {
+							return "", err
+						}
+						advance(4 * time.Second)
+					}
+					return capturePage("unsafe A", "unsafe B"), nil
+				})
+				switch writer {
+				case "phone", "non-owner":
+					message := map[string]any{"pane_id": "pane-1", "format": "ansi", "lines": 100}
+					reader := "owner"
+					if writer == "non-owner" {
+						reader = "reader"
+					}
+					s.applyPaneReadLease(reader, message)
+					response := s.readPaneResponse(context.Background(), message)
+					if response["error"] != nil {
+						t.Fatalf("display failed: %+v", response)
+					}
+					if writer == "non-owner" && response["viewport_only"] == true {
+						t.Fatal("non-owner acquired viewport lease metadata")
+					}
+				case "scheduled":
+					s.historyTasks = newLifecycleTasks(context.Background())
+					t.Cleanup(s.historyTasks.Stop)
+					s.scheduleHistoryCapture(context.Background(), "pane-1")
+					waitHistoryCapture(t, s)
+				case "completion":
+					s.captureFinishedPane(context.Background(), "pane-1", "claude", "", "")
+				}
+				if releaseResize != nil {
+					releaseResize()
+				}
+				if got := s.historyM.Content("pane-1", 0); got != baseline {
+					t.Fatalf("unsafe %s read changed history: %q", writer, got)
+				}
+				wantReads := int32(1)
+				if writer == "scheduled" && phase != "crossed epoch" {
+					wantReads = 0
+				}
+				if contentReads.Load() != wantReads {
+					t.Fatalf("content reads=%d want=%d", contentReads.Load(), wantReads)
+				}
+			})
+		}
+	}
+}
+
 func TestHistoryWritersSkipAcquireRestoreSettleAndCrossedEpoch(t *testing.T) {
 	for _, phase := range []string{"acquire settle", "restore settle", "crossed epoch", "unknown geometry"} {
 		t.Run(phase, func(t *testing.T) {
@@ -549,6 +716,129 @@ func TestFinishedReadPublishesOldEpochAfterLaterResize(t *testing.T) {
 	executeCapture(t, s, capturePage("new A", "new B"), true)
 	if got := s.historyM.Content("pane-1", 0); got != capturePage("old A", "old B", "new A", "new B") {
 		t.Fatalf("epoch composition = %q", got)
+	}
+}
+
+func TestSingleFlightOwnerAdmitsOnceForSeveralFollowers(t *testing.T) {
+	s, _, _ := captureServer(t, true)
+	pendingDeparture(s, 10)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	var reads, admissions, mutations atomic.Int32
+	s.historyAdmissionObserver = func(_ historyReadToken, admission history.SnapshotAdmission) {
+		if admission.Admitted {
+			admissions.Add(1)
+		}
+		if admission.ContentChanged || admission.MetadataChanged {
+			mutations.Add(1)
+		}
+	}
+	installPaneReadFixture(t, s, func(ctx context.Context) (string, error) {
+		if reads.Add(1) != 1 {
+			return "", errors.New("follower started another underlying read")
+		}
+		close(entered)
+		select {
+		case <-release:
+			return capturePage("owner A", "owner B"), nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	})
+	physical, revision := s.physicalHistorySource(captureRequest(s, true).Agent)
+	options := coordinator.PaneReadOptions{Physical: physical, SourceRevision: revision, Execute: s.executeHistoryRead}
+	type readResult struct {
+		response map[string]any
+		capture  coordinator.PaneReadCapture
+	}
+	results := make(chan readResult, 6)
+	read := func() {
+		response, capture := s.dispatcher.HandleReadPaneWithOptions(context.Background(), map[string]any{"pane_id": "pane-1", "lines": 1000, "format": "ansi"}, options)
+		results <- readResult{response, capture}
+	}
+	go read()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("owner did not start")
+	}
+	started := make(chan struct{}, 5)
+	for range 5 {
+		go func() { started <- struct{}{}; read() }()
+	}
+	for range 5 {
+		<-started
+	}
+	time.Sleep(20 * time.Millisecond)
+	unblock()
+	var owner coordinator.PaneReadCapture
+	for index := range 6 {
+		result := <-results
+		if result.response["error"] != nil {
+			t.Fatalf("shared read failed: %+v", result.response)
+		}
+		if index == 0 {
+			owner = result.capture
+		} else if result.capture != owner {
+			t.Fatal("follower changed capture identity")
+		}
+	}
+	if reads.Load() != 1 || admissions.Load() != 1 || mutations.Load() != 1 || s.historyAcknowledgements != 1 || s.historySequence != 1 || s.historyArchived["pane-1"] != 1 {
+		t.Fatalf("reads=%d admissions=%d mutations=%d acknowledgements=%d allocated=%d archived=%d", reads.Load(), admissions.Load(), mutations.Load(), s.historyAcknowledgements, s.historySequence, s.historyArchived["pane-1"])
+	}
+	if s.historyPending["pane-1"] != nil || s.historyM.Content("pane-1", 0) != capturePage("owner A", "owner B") {
+		t.Fatal("shared admission did not retain page and acknowledge request")
+	}
+}
+
+func TestPaneReadZeroRevisionUsesDistinctUnderlyingSequences(t *testing.T) {
+	s, _, _ := captureServer(t, true)
+	var reads atomic.Int32
+	installPaneReadFixture(t, s, func(context.Context) (string, error) {
+		if reads.Add(1) == 1 {
+			return capturePage("old A", "old B"), nil
+		}
+		return capturePage("new A", "new B"), nil
+	})
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	s.historyReadFinishedObserver = func(token historyReadToken) {
+		if token.sequence == 1 {
+			close(entered)
+			<-release
+		}
+	}
+	execute := func() (coordinator.PaneReadResult, error) {
+		return s.executeHistoryRead(context.Background(), captureRequest(s, true), func(ctx context.Context, request coordinator.PaneReadRequest) (herdr.PaneRead, error) {
+			return s.herdrC.ReadPaneRecent(ctx, request.PaneID, history.PhysicalCaptureLines, "ansi")
+		})
+	}
+	type outcome struct {
+		result coordinator.PaneReadResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() { result, err := execute(); done <- outcome{result, err} }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("first zero-revision read did not finish sampling")
+	}
+	newer, err := execute()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unblock()
+	older := <-done
+	if older.err != nil || older.result.Capture.Sequence != 1 || newer.Capture.Sequence != 2 || older.result.Capture.Admitted || !newer.Capture.Admitted {
+		t.Fatalf("zero-revision captures: old=%+v error=%v new=%+v", older.result.Capture, older.err, newer.Capture)
+	}
+	if reads.Load() != 2 || s.historyArchived["pane-1"] != 2 || s.historyM.Content("pane-1", 0) != capturePage("new A", "new B") {
+		t.Fatal("placeholder revision overrode underlying-read ordering")
 	}
 }
 

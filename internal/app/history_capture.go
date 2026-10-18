@@ -136,6 +136,9 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		return result, nil
 	}
 	content, _, admission := s.historyM.AdmitSnapshot(request.PaneID, string(read.Content), context, 0)
+	if s.historyAdmissionObserver != nil {
+		s.historyAdmissionObserver(token, admission)
+	}
 	if admission.Admitted {
 		response["content"] = content
 		result.Capture.Admitted = true

@@ -2033,7 +2033,7 @@ func TestPaneWatchUpdateSendsResizeSettledDelta(t *testing.T) {
 	}
 }
 
-func TestPreparePaneResponsePreservesHistoryForUnknownViewportOnlyRead(t *testing.T) {
+func TestReadPaneResponsePreservesHistoryForUnknownViewportOnlyRead(t *testing.T) {
 	s := testServerWithCacheDir(t.TempDir())
 	s.state.CommitInventory([]*coordinator.AgentState{{
 		PaneID: "pane-1", Agent: "claude", Status: "idle",
@@ -2046,10 +2046,10 @@ func TestPreparePaneResponsePreservesHistoryForUnknownViewportOnlyRead(t *testin
 		"content": "current 1\ncurrent 2", "format": "ansi",
 		"truncated": false, "viewport_only": true,
 	}
-	s.preparePaneResponse(
-		map[string]any{"pane_id": "pane-1", "lines": 100, "terminal_columns": 59},
-		response,
-	)
+	s.syncHistoryPanes(s.state.Snapshot())
+	raw := response["content"].(string)
+	installPaneReadFixture(t, s, func(context.Context) (string, error) { return raw, nil })
+	response = s.readPaneResponse(context.Background(), map[string]any{"pane_id": "pane-1", "lines": 100, "format": "ansi", "terminal_columns": 59})
 
 	if response["content"] != "current 1\ncurrent 2" {
 		t.Fatalf("resized content = %q, want clean current viewport", response["content"])

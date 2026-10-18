@@ -35,7 +35,6 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/fsutil"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
-	"github.com/0cv/herdr-mobile-relay/internal/noecho"
 	"github.com/0cv/herdr-mobile-relay/internal/panesize"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
@@ -140,6 +139,7 @@ type Server struct {
 	// Optional test hook between history loading and tuple revalidation.
 	conversationHistoryReadObserver func()
 	historyReadFinishedObserver     func(historyReadToken)
+	historyAdmissionObserver        func(historyReadToken, history.SnapshotAdmission)
 
 	paneWatchMu sync.Mutex
 	paneWatches map[string]*paneWatch
@@ -2890,72 +2890,6 @@ func (s *Server) publicJobState(filename, defaultState string) map[string]any {
 		}
 	}
 	return result
-}
-
-// preparePaneResponse annotates a pane frame with everything the phone needs
-// to decide what it may offer the operator. The no-echo flag is computed last,
-// on the content the phone will actually render, so full reads, deltas and the
-// history-merged frames all agree on the tail.
-func (s *Server) preparePaneResponse(message, response map[string]any) map[string]any {
-	response = s.classifyPaneResponse(message, response)
-	content, ok := successfulPaneContent(response)
-	if !ok {
-		return response
-	}
-	prompt, secret := noecho.Match(content)
-	response["no_echo"] = secret
-	if secret {
-		response["no_echo_prompt"] = prompt
-	}
-	return response
-}
-
-func (s *Server) classifyPaneResponse(message, response map[string]any) map[string]any {
-	content, ok := successfulPaneContent(response)
-	if !ok {
-		return response
-	}
-	paneID, _ := message["pane_id"].(string)
-	agent, _ := s.agentInfo(paneID)
-	classification := question.Classify(content, agent)
-	response["attention_kind"] = classification.Kind
-	response["prompt"] = classification.Prompt
-	response["command"] = classification.Command
-	response["options"] = classification.Options
-	response["interaction"] = classification.Interaction
-	response["question_layout"] = classification.QuestionLayout
-	if interaction := classification.Interaction; interaction != nil {
-		if text := strings.TrimSpace(interaction.Other.Text); text != "" {
-			s.state.RecordCustomAnswer(paneID, interaction.Question, text)
-		}
-		question.FillCustomAnswers(interaction, s.state.CustomAnswers(paneID))
-	}
-	if viewportOnly, _ := response["viewport_only"].(bool); viewportOnly &&
-		s.paneSizeM != nil && s.paneSizeM.ResizedWithin(paneID, paneResizeSettleWindow) {
-		// The agent re-renders its transcript after a size change and can
-		// push a redrawn block into the scrollback for a while; the app must
-		// not commit rows from frames read inside this window as history.
-		response["resize_settling"] = true
-	}
-	agentLower := strings.ToLower(agent)
-	if classification.Interaction != nil ||
-		(!strings.Contains(agentLower, "claude") && !strings.Contains(agentLower, "qoder")) {
-		return response
-	}
-	if viewportOnly, _ := response["viewport_only"].(bool); viewportOnly {
-		return response
-	}
-	historyLimit := messageInt(message["lines"], 30)
-	if historyLimit < 1 {
-		historyLimit = 1
-	} else if historyLimit > history.MaxLines {
-		historyLimit = history.MaxLines
-	}
-	herdrTruncated, _ := response["truncated"].(bool)
-	merged, historyTruncated := s.historyM.MergeLimited(paneID, content, historyLimit)
-	response["content"] = merged
-	response["truncated"] = herdrTruncated || historyTruncated
-	return response
 }
 
 func successfulPaneContent(response map[string]any) (string, bool) {

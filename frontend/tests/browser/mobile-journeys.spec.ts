@@ -2518,6 +2518,178 @@ async function showWidePane(page: Page, socket: number) {
   await expect(page.getByRole('log')).toContainText('resize session baseline');
 }
 
+async function openHistoryLease(page: Page) {
+  await page.setViewportSize({ width: 540, height: 850 });
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: [...optInCapabilities, 'pane_realtime_delta'] });
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'History lease', agent: 'claude' }] });
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open History lease on Fedora' }).click();
+  await expect.poll(async () => (await leaseCommands(page)).length).toBeGreaterThan(0);
+  const lease = (await leaseCommands(page)).at(-1)!;
+  await server(page, 0, { type: 'command_result', action: 'lease_pane_size', request_id: lease.request_id, ok: true, phase: 'completed', data: { columns: 40, rows: 46 } });
+}
+
+async function historyFrame(page: Page, rows: string[], extra: Record<string, unknown> = {}) {
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', viewport_only: true, content: rows.join('\n'), ...extra });
+}
+
+async function historyScroll(page: Page, position: 'middle' | 'bottom' | 'top') {
+  await page.getByRole('log').evaluate((element, where) => {
+    element.scrollTop = where === 'middle' ? element.scrollHeight / 2 : where === 'bottom' ? element.scrollHeight : 0;
+    element.dispatchEvent(new Event('scroll'));
+  }, position);
+}
+
+async function historyAnchor(page: Page) {
+  return page.getByRole('log').evaluate((element) => {
+    const top = element.getBoundingClientRect().top;
+    const rows = [...element.querySelectorAll<HTMLElement>('[data-terminal-row]')];
+    const index = rows.findIndex((row) => row.getBoundingClientRect().bottom > top);
+    const row = rows[index];
+    return row ? { text: row.textContent, context: rows.slice(index, index + 4).map((item) => item.textContent), offset: row.getBoundingClientRect().top - top } : null;
+  });
+}
+
+const historyRows = (count: number) => Array.from({ length: count }, (_, index) => `marker ${String(index).padStart(5, '0')} ${index % 7 ? 'phone row' : 'desktop row '.repeat(12)}`);
+
+test.describe('leased fullscreen history qualification', () => {
+  test('S6-01 accepts long viewport frames and deltas with styled and blank rows', async ({ page }) => {
+    await openHistoryLease(page);
+    for (const count of [1000, 10000]) {
+      const rows = historyRows(count);
+      rows[20] = ''; rows[21] = '\u001b[44mstyled row\u001b[0m';
+      await historyFrame(page, rows, { content_fingerprint: `history-${count}` });
+      await expect(page.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', String(count));
+      await expect(page.getByRole('log')).toContainText(`marker ${String(count - 1).padStart(5, '0')}`);
+      expect(await page.locator('[data-terminal-row]').count()).toBeLessThan(250);
+    }
+    await server(page, 0, { type: 'pane_delta', pane_id: 'w1:p1', format: 'ansi', viewport_only: true, base_fingerprint: 'history-10000', content_fingerprint: 'delta', segments: [{ copy_lines: 10000 }, { text: '\nlatest footer' }] });
+    await expect(page.getByRole('log')).toContainText('latest footer');
+  });
+
+  test('S6-02 applies a 40-column shared lease on a wider phone', async ({ page }) => {
+    await openHistoryLease(page);
+    await historyFrame(page, ['X'.repeat(150)]);
+    const dimensions = await page.getByRole('log').evaluate((element) => {
+      const row = element.querySelector<HTMLElement>('.ansi-line')!;
+      return { row: row.getBoundingClientRect().width, viewport: element.clientWidth };
+    });
+    expect(dimensions.row).toBeLessThan(dimensions.viewport * 0.85);
+  });
+
+  test('S6-03 estimates four-line offscreen prose at the shared lease width', async ({ page }) => {
+    await openHistoryLease(page);
+    await historyFrame(page, Array.from({ length: 1000 }, () => 'X'.repeat(150)));
+    const geometry = await page.getByRole('log').evaluate((element) => {
+      const row = element.querySelector<HTMLElement>('.ansi-line')!;
+      const lineHeight = Number.parseFloat(getComputedStyle(row).lineHeight);
+      return { lineHeight, mounted: row.getBoundingClientRect().height, total: element.scrollHeight };
+    });
+    expect(geometry.mounted / geometry.lineHeight).toBeCloseTo(4, 0);
+    expect(Math.abs(geometry.total - geometry.lineHeight * 4000) / (geometry.lineHeight * 4000)).toBeLessThan(0.05);
+  });
+
+  test('S6-04 follows the bottom across append clipping and height corrections', async ({ page }) => {
+    await openHistoryLease(page);
+    const rows = historyRows(1000);
+    await historyFrame(page, rows);
+    await historyScroll(page, 'bottom');
+    await historyFrame(page, [...rows.slice(50), 'latest bottom']);
+    await expect(page.getByRole('log')).toContainText('latest bottom');
+    await expect.poll(() => page.getByRole('log').evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  });
+
+  test('S6-05 preserves a scrolled anchor when archive is prepended after settling', async ({ page }) => {
+    await openHistoryLease(page);
+    const rows = historyRows(500);
+    await historyFrame(page, rows);
+    await historyScroll(page, 'middle');
+    await page.waitForTimeout(100);
+    const before = await historyAnchor(page);
+    await historyFrame(page, rows, { resize_settling: true });
+    await historyFrame(page, [...historyRows(100).map((row) => `archive ${row}`), ...rows]);
+    await expect.poll(async () => (await historyAnchor(page))?.text).toBe(before?.text);
+    expect(Math.abs((await historyAnchor(page))!.offset - before!.offset)).toBeLessThan(20);
+  });
+
+  test('S6-06 preserves contextual three-character blank and repeated anchors', async ({ page }) => {
+    await openHistoryLease(page);
+    for (const style of ['short', 'blank', 'repeated']) {
+      const rows = Array.from({ length: 500 }, (_, index) => style === 'short' ? index.toString(36).padStart(3, '0') : index % 3 ? (style === 'blank' ? '' : 'same') : `context ${index}`);
+      await historyFrame(page, rows);
+      await historyScroll(page, 'middle');
+      await page.waitForTimeout(100);
+      const before = await historyAnchor(page);
+      await historyFrame(page, [...Array.from({ length: 50 }, (_, i) => `archive ${i}`), ...rows]);
+      await expect.poll(async () => (await historyAnchor(page))?.context).toEqual(before?.context);
+      expect(Math.abs((await historyAnchor(page))!.offset - before!.offset)).toBeLessThan(20);
+    }
+  });
+
+  test('S6-07 resumes after settled metadata wait expiry release and refocus', async ({ page }) => {
+    await openHistoryLease(page);
+    await historyFrame(page, ['stable page']);
+    await historyFrame(page, ['settling page'], { resize_settling: true });
+    await page.waitForTimeout(4200);
+    await expect(page.getByRole('log')).toContainText('settling page');
+    await historyFrame(page, ['settling page'], { resize_settling: false });
+    await page.evaluate(() => { Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' }); document.dispatchEvent(new Event('visibilitychange')); Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' }); document.dispatchEvent(new Event('visibilitychange')); });
+    await historyFrame(page, ['after refocus']);
+    await expect(page.getByRole('log')).toContainText('after refocus');
+  });
+
+  test('S6-08 keeps box scrollers and shows server clipping notice', async ({ page }) => {
+    await openHistoryLease(page);
+    await historyFrame(page, ['┌' + '─'.repeat(38) + '┐', '│' + 'cell'.padEnd(38) + '│', '│' + 'wide cell'.padEnd(98) + '│', '\u001b[44mnewest styled suffix\u001b[0m'], { truncated: true });
+    await expect(page.getByRole('log')).toContainText('newest styled suffix');
+    await expect(page.locator('.terminal-wide-grid')).toHaveCount(1);
+    await expect(page.getByRole('status').filter({ hasText: 'Older terminal history is not shown' })).toBeVisible();
+    await historyFrame(page, ['fitting page'], { truncated: false });
+    await expect(page.getByRole('log')).toContainText('fitting page');
+  });
+
+  test('S6-09 renders displaced rows before one current fixed header', async ({ page }) => {
+    await openHistoryLease(page);
+    await historyFrame(page, ['A', 'B', 'H1', 'H2', 'C', 'D', 'E', 'F', 'G']);
+    const rows = await page.locator('[data-terminal-row]').allTextContents();
+    expect(rows).toEqual(['A', 'B', 'H1', 'H2', 'C', 'D', 'E', 'F', 'G']);
+  });
+
+  test('S6-10 keeps anchors through legacy physical and restored frames', async ({ page }) => {
+    await openHistoryLease(page);
+    const rows = historyRows(500);
+    await historyFrame(page, rows, { viewport_only: false });
+    await historyScroll(page, 'middle'); await page.waitForTimeout(100);
+    const before = await historyAnchor(page);
+    await historyFrame(page, rows);
+    await historyFrame(page, rows, { viewport_only: false });
+    await expect.poll(async () => (await historyAnchor(page))?.text).toBe(before?.text);
+  });
+
+  test('S6-11 keeps row count and scrolled anchor stable during progress redraws', async ({ page }) => {
+    await openHistoryLease(page);
+    const rows = historyRows(500);
+    await historyFrame(page, [...rows, 'spinner 0', 'tip', 'footer']);
+    await historyScroll(page, 'middle'); await page.waitForTimeout(100);
+    const before = await historyAnchor(page);
+    for (let i = 1; i <= 5; i += 1) await historyFrame(page, [...rows, `spinner ${i}`, 'tip', 'footer']);
+    await expect(page.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '503');
+    await expect.poll(async () => (await historyAnchor(page))?.text).toBe(before?.text);
+    await historyScroll(page, 'bottom'); await expect(page.getByRole('log')).toContainText('spinner 5');
+  });
+
+  test('S6-12 shows displaced scroll rows once above the latest progress tail', async ({ page }) => {
+    await openHistoryLease(page);
+    await historyFrame(page, ['H1', 'H2', 'A', 'B', 'C', 'D', 'E', 'old spinner']);
+    await historyFrame(page, ['A', 'B', 'H1', 'H2', 'C', 'D', 'E', 'F', 'G', 'new spinner', 'footer']);
+    expect(await page.locator('[data-terminal-row]').allTextContents()).toEqual(['A', 'B', 'H1', 'H2', 'C', 'D', 'E', 'F', 'G', 'new spinner', 'footer']);
+    await expect(page.getByRole('log')).not.toContainText('old spinner');
+  });
+});
+
 async function settingsFromTerminal(page: Page) {
   await page.getByRole('button', { name: 'Back' }).click();
   await page.getByRole('navigation', { name: 'Application' })

@@ -763,6 +763,25 @@ describe('activity, question drafts, and launch names', () => {
 });
 
 describe('virtual terminal row index', () => {
+  it('keeps mixed-width physical rows and spacer offsets bounded', () => {
+    const index = new VirtualTerminalIndex();
+    index.reset(Array.from({ length: 10000 }, (_, i) => i % 2 ? 72 : 18));
+    const range = index.range(index.offset(5000), 500, 100);
+    expect(range.top + (index.offset(range.end) - index.offset(range.start)) + range.bottom).toBe(index.total);
+    expect(range.end - range.start).toBeLessThan(100);
+  });
+
+  it('detects prepends around short blank and repeated contextual rows', () => {
+    const render = (rows: string[]) => renderTerminalContent(rows.join('\n'), 'ansi', true, true, 40).rows;
+    for (const rows of [
+      ['abc', 'def', 'ghi', 'jkl', 'mno', 'pqr', 'stu', 'vwx'],
+      ['', '', 'context A', '', 'context B', '', 'context C', 'end'],
+      ['same', 'same', 'context A', 'same', 'context B', 'same', 'context C', 'end'],
+    ]) {
+      expect(renderedRowShift(render(rows), render(['archive A', 'archive B', ...rows]))).toBe(-2);
+      expect(renderedRowShift(render(['archive A', 'archive B', ...rows]), render(rows))).toBe(2);
+    }
+  });
   it('maps variable row heights to bounded visible ranges', () => {
     const index = new VirtualTerminalIndex();
     index.reset([10, 20, 30, 40]);

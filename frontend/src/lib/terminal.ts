@@ -824,26 +824,28 @@ export function terminalScreenColumns(
   return columns;
 }
 
-/**
- * Rows cropped from the front between two renders of a growing log. The new
- * head must reappear verbatim as a block of the previous rows; wholesale
- * redraws find no block and return 0.
- */
+/** Positive shifts describe a cropped prefix; negative shifts describe a prepend. */
 export function renderedRowShift(previous: RenderedTerminalRow[], current: RenderedTerminalRow[]): number {
-  if (!previous.length || !current.length) return 0;
-  let size = 0;
-  let nonEmpty = 0;
-  while (size < current.length && size < 32 && (nonEmpty < 2 || size < 8)) {
-    if (current[size].text.trim()) nonEmpty += 1;
-    size += 1;
-  }
-  if (nonEmpty < 2) return 0;
-  for (let shift = 0; shift <= previous.length - size; shift += 1) {
-    let index = 0;
-    while (index < size && previous[shift + index].text === current[index].text) index += 1;
-    if (index === size) return shift;
-  }
-  return 0;
+  const croppedPrefix = (older: RenderedTerminalRow[], newer: RenderedTerminalRow[]): number | null => {
+    if (!older.length || !newer.length) return null;
+    let size = 0;
+    let nonEmpty = 0;
+    while (size < newer.length && size < 32 && (nonEmpty < 2 || size < 8)) {
+      if (newer[size].text.trim()) nonEmpty += 1;
+      size += 1;
+    }
+    if (nonEmpty < 2) return null;
+    for (let shift = 0; shift <= older.length - size; shift += 1) {
+      let index = 0;
+      while (index < size && older[shift + index].text === newer[index].text) index += 1;
+      if (index === size) return shift;
+    }
+    return null;
+  };
+  const crop = croppedPrefix(previous, current);
+  if (crop !== null) return crop;
+  const prepend = croppedPrefix(current, previous);
+  return prepend === null ? 0 : -prepend;
 }
 
 

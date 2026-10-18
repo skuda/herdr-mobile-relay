@@ -770,8 +770,7 @@
     let previousAnchor = stick
       ? null
       : pendingResizeAnchor || currentVirtualAnchor(previousTop);
-    // Rows cropped from the front shift every index; keep the anchor on the
-    // same row.
+    // Shift the anchor index for cropped or prepended context blocks.
     const rowShift = renderedRowShift(renderedRows, rendered.rows);
     if (rowShift) wideGridOffsets.clear();
     if (previousAnchor && rowShift) {
@@ -887,6 +886,11 @@
   ) {
     const width = terminalElement?.clientWidth
       || Math.round(window.visualViewport?.width || window.innerWidth);
+    const containerColumns = measuredPaneColumns() || lastLeasedColumns || renderedResizeColumns || 80;
+    const leasedColumns = lastLeasedColumns || renderedResizeColumns;
+    const wrappingColumns = resizeLayoutActive && leasedColumns > 0
+      ? Math.min(containerColumns, leasedColumns)
+      : containerColumns;
     const layoutSignature = [
       lastPreserveLayout ? 'preserve' : 'readable',
       resizeLayoutActive ? 'resize' : 'fixed',
@@ -894,6 +898,7 @@
       lastLeasedColumns || renderedResizeColumns,
       $interfaceSize,
       width,
+      wrappingColumns,
     ].join(':');
     if (layoutSignature !== virtualLayoutSignature) {
       virtualLayoutSignature = layoutSignature;
@@ -905,10 +910,6 @@
     const style = terminalElement ? getComputedStyle(terminalElement) : null;
     const parsedLineHeight = Number.parseFloat(style?.lineHeight || '');
     const lineHeight = Number.isFinite(parsedLineHeight) && parsedLineHeight > 0 ? parsedLineHeight : 18;
-    const wrappingColumns = measuredPaneColumns()
-      || lastLeasedColumns
-      || renderedResizeColumns
-      || 80;
     const sizes = renderedRows.map((row) => {
       const measured = virtualHeightCache.get(row.html);
       if (measured) return measured;

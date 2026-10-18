@@ -513,6 +513,48 @@ func (r *historyFlakyResolver) TTYPath(ctx context.Context, pid int) (string, er
 	return r.TTYResolver.TTYPath(ctx, pid)
 }
 
+func TestForgetHistoryPaneRetainsResizeAndSettleFence(t *testing.T) {
+	f := newFixture(t)
+	f.addPane("p", 100, "/dev/pts/1", 1)
+	initial := historySample(t, f, "p")
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	f.m.ops = historyBarrierOps{TerminalOps: f.ops, after: func() { close(entered); <-release }}
+	go func() {
+		_, _, err := f.m.Acquire(context.Background(), "owner", "p", 60, 20)
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("resize did not reach publication barrier")
+	}
+	f.m.ForgetHistoryPane("p", "terminal-p")
+	during := historyRead(t, f, "p")
+	finishUnsafe(t, during)
+	unblock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	f.m.ForgetHistoryPane("p", "terminal-p")
+	settling := historyRead(t, f, "p")
+	geometry := finishUnsafe(t, settling)
+	if geometry.Epoch <= initial.Epoch || geometry.ChangedAt.IsZero() {
+		t.Fatalf("forgotten resize lost completion geometry: %+v", geometry)
+	}
+	f.clock.Advance(HistorySettleWindow)
+	finishSafe(t, historyRead(t, f, "p"))
+	f.m.ForgetHistoryPane("p", "terminal-p")
+	f.m.mu.Lock()
+	remaining := len(f.m.historyGeometry)
+	f.m.mu.Unlock()
+	if remaining != 0 {
+		t.Fatal("settled forget retained geometry")
+	}
+}
+
 func TestForgetHistoryGeometryDoesNotDropNewTerminalOrLeaseCleanup(t *testing.T) {
 	f := newFixture(t)
 	f.addPane("p", 100, "/dev/pts/1", 1)

@@ -317,6 +317,10 @@ func (m *Manager) ForgetHistoryPane(paneID, terminalID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if state := m.historyGeometry[paneID]; state != nil && terminalID != "" && state.identity.terminalID == terminalID {
+		if state.geometry.InProgress || historySettling(state.geometry, m.now()) {
+			state.geometry.Revision = m.nextHistoryRevisionLocked()
+			return
+		}
 		delete(m.historyGeometry, paneID)
 	}
 }

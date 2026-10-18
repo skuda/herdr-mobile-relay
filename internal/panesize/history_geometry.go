@@ -31,9 +31,10 @@ type HistoryGeometry struct {
 }
 
 type historyGeometryState struct {
-	identity terminalIdentity
-	geometry HistoryGeometry
-	baseline bool
+	identity  terminalIdentity
+	geometry  HistoryGeometry
+	baseline  bool
+	forgotten bool
 }
 
 // HistoryRead holds a validated descriptor until Finish, Close, or cancellation.
@@ -81,6 +82,7 @@ func (m *Manager) nextHistoryRevisionLocked() uint64 {
 func (m *Manager) historyStateLocked(paneID string, identity terminalIdentity) *historyGeometryState {
 	state := m.historyGeometry[paneID]
 	if state != nil && state.identity == identity {
+		state.forgotten = false
 		return state
 	}
 	state = &historyGeometryState{
@@ -180,6 +182,7 @@ func (m *Manager) BeginHistoryRead(ctx context.Context, paneID, terminalID strin
 	}
 	var identity terminalIdentity
 	if cached := m.historyGeometry[paneID]; cached != nil && cached.identity.terminalID == terminalID {
+		cached.forgotten = false
 		identity = cached.identity
 	}
 	m.mu.Unlock()
@@ -329,6 +332,7 @@ func (m *Manager) ForgetHistoryPane(paneID, terminalID string) {
 	defer m.mu.Unlock()
 	if state := m.historyGeometry[paneID]; state != nil && terminalID != "" && state.identity.terminalID == terminalID {
 		if state.geometry.InProgress || historySettling(state.geometry, m.now()) {
+			state.forgotten = true
 			state.geometry.Revision = m.nextHistoryRevisionLocked()
 			return
 		}

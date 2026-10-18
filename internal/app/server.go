@@ -148,6 +148,7 @@ type Server struct {
 	historyInflight          map[string]bool
 	historyLast              map[string]time.Time
 	historyActive            map[string]historyIdentity
+	historyOtherTerminals    map[string]string
 	historySequence          uint64
 	historyArchived          map[string]uint64
 	historyPending           map[string]*pendingHistoryCapture
@@ -2159,11 +2160,14 @@ func (s *Server) syncHistorySnapshot(snapshot coordinator.InventorySnapshot) {
 	}
 	agents := snapshot.Agents
 	active := make(map[string]historyIdentity, len(agents))
+	otherTerminals := make(map[string]string)
 	present := make(map[string]bool, len(agents))
 	for _, agent := range agents {
 		if isClaudeLike(agent.Agent) {
 			active[agent.PaneID] = historyIdentity{terminalID: agent.TerminalID, generation: agent.Generation}
 			present[agent.PaneID] = true
+		} else {
+			otherTerminals[agent.PaneID] = agent.TerminalID
 		}
 	}
 	forgotten := make(map[string]string)
@@ -2177,6 +2181,16 @@ func (s *Server) syncHistorySnapshot(snapshot coordinator.InventorySnapshot) {
 		s.historyM.Reconcile(present)
 		s.historyReconciled = true
 	}
+	for paneID, previous := range s.historyOtherTerminals {
+		current, exists := otherTerminals[paneID]
+		if identity, claudeLike := active[paneID]; claudeLike {
+			current, exists = identity.terminalID, true
+		}
+		if !exists || current != previous {
+			forgotten[paneID] = previous
+		}
+	}
+	s.historyOtherTerminals = otherTerminals
 	for paneID, previous := range s.historyActive {
 		current, exists := active[paneID]
 		if exists && (previous.terminalID == "" || current.terminalID == "" || previous.terminalID == current.terminalID) {

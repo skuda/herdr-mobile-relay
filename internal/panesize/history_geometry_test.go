@@ -555,6 +555,98 @@ func TestForgetHistoryPaneRetainsResizeAndSettleFence(t *testing.T) {
 	}
 }
 
+func TestForgottenHistoryGeometryReapedAfterSettling(t *testing.T) {
+	for _, phase := range []string{"settling", "in progress"} {
+		t.Run(phase, func(t *testing.T) {
+			f := newFixture(t)
+			f.addPane("p", 100, "/dev/pts/1", 1)
+			read := historyRead(t, f, "p")
+			var done chan error
+			var unblock func()
+			if phase == "in progress" {
+				entered, release := make(chan struct{}), make(chan struct{})
+				done = make(chan error, 1)
+				var once sync.Once
+				unblock = func() { once.Do(func() { close(release) }) }
+				t.Cleanup(unblock)
+				f.m.ops = historyBarrierOps{TerminalOps: f.ops, after: func() { close(entered); <-release }}
+				go func() { _, _, err := f.m.Acquire(context.Background(), "owner", "p", 60, 20); done <- err }()
+				select {
+				case <-entered:
+				case <-time.After(time.Second):
+					t.Fatal("resize did not reach publication barrier")
+				}
+			} else {
+				f.acquire("owner", "p", 60, 20)
+			}
+			f.m.ForgetHistoryPane("p", "terminal-p")
+			f.m.SweepExpired(context.Background())
+			if !f.m.HistoryReadUnsafe("p", "terminal-p") {
+				t.Fatal("forget dropped unsafe resize fence")
+			}
+			finishUnsafe(t, read)
+			if unblock != nil {
+				unblock()
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.m.SweepExpired(context.Background())
+			if !f.m.HistoryReadUnsafe("p", "terminal-p") {
+				t.Fatal("sweep dropped settle fence")
+			}
+			f.clock.Advance(HistorySettleWindow)
+			f.m.SweepExpired(context.Background())
+			f.m.mu.Lock()
+			remaining := len(f.m.historyGeometry)
+			f.m.mu.Unlock()
+			if remaining != 0 {
+				t.Fatal("sweep retained forgotten settled geometry")
+			}
+		})
+	}
+}
+
+func TestReusedForgottenHistoryGeometrySurvivesSweep(t *testing.T) {
+	for _, reuse := range []string{"read", "size change", "state lookup", "failed read"} {
+		t.Run(reuse, func(t *testing.T) {
+			f := newFixture(t)
+			f.addPane("p", 100, "/dev/pts/1", 1)
+			f.acquire("owner", "p", 60, 20)
+			f.m.mu.Lock()
+			original := f.m.historyGeometry["p"]
+			f.m.mu.Unlock()
+			f.m.ForgetHistoryPane("p", "terminal-p")
+			switch reuse {
+			case "read":
+				finishUnsafe(t, historyRead(t, f, "p"))
+			case "size change":
+				f.acquire("owner", "p", 70, 20)
+			case "state lookup":
+				f.m.mu.Lock()
+				f.m.historyStateLocked("p", original.identity)
+				f.m.mu.Unlock()
+			case "failed read":
+				f.ops.mu.Lock()
+				f.ops.devices["/dev/pts/1"].size.Columns = 0
+				f.ops.mu.Unlock()
+				if read, err := f.m.BeginHistoryRead(context.Background(), "p", "terminal-p"); err == nil {
+					_ = read.Close()
+					t.Fatal("zero-width read succeeded")
+				}
+			}
+			f.clock.Advance(HistorySettleWindow)
+			f.m.SweepExpired(context.Background())
+			f.m.mu.Lock()
+			remaining := f.m.historyGeometry["p"]
+			f.m.mu.Unlock()
+			if remaining != original {
+				t.Fatal("sweep reaped reused geometry")
+			}
+		})
+	}
+}
+
 func TestForgetHistoryGeometryDoesNotDropNewTerminalOrLeaseCleanup(t *testing.T) {
 	f := newFixture(t)
 	f.addPane("p", 100, "/dev/pts/1", 1)

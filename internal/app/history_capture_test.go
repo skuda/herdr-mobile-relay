@@ -1227,6 +1227,50 @@ func TestUnleasedNoScrollbackUsesReadPaneAndLegacyFixtureBytes(t *testing.T) {
 	}
 }
 
+func TestNonClaudeInventoryDepartureForgetsGeometry(t *testing.T) {
+	for _, departure := range []string{"removed", "terminal changed"} {
+		t.Run(departure, func(t *testing.T) {
+			s, _, advance := captureServer(t, false)
+			agent, _ := s.state.Agent("pane-1")
+			agent.Agent = "codex"
+			s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+			s.syncHistorySnapshot(s.state.InventorySnapshot())
+			older := s.state.InventorySnapshot()
+			if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 60, 20); err != nil {
+				t.Fatal(err)
+			}
+			advance(panesize.HistorySettleWindow)
+			read, err := s.paneSizeM.BeginHistoryRead(context.Background(), "pane-1", "terminal-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			original, err := read.Finish()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if departure == "removed" {
+				s.state.CommitInventory(nil, s.state.RevisionCounter())
+			} else {
+				agent.TerminalID = "terminal-new"
+				s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+			}
+			s.syncHistorySnapshot(s.state.InventorySnapshot())
+			s.syncHistorySnapshot(older)
+			read, err = s.paneSizeM.BeginHistoryRead(context.Background(), "pane-1", "terminal-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			recreated, err := read.Finish()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recreated.Epoch <= original.Epoch {
+				t.Fatalf("departed non-Claude pane retained geometry: old epoch=%d new epoch=%d", original.Epoch, recreated.Epoch)
+			}
+		})
+	}
+}
+
 func TestHistorySameTerminalDiscoveryKeepsArchive(t *testing.T) {
 	s, _, _ := captureServer(t, true)
 	executeCapture(t, s, capturePage("A", "B", "C", "D", "E"), true)

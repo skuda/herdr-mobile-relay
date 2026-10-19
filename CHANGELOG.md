@@ -12,13 +12,15 @@ project follows [Semantic Versioning](https://semver.org/).
   clients. Keep the current footer fresh, queue trailing captures, and save
   dirty admitted history after output stops. Sampling gaps, resize settling,
   footer/tail replacement, and retention limits can still omit text; source
-  and PTY boundaries can repeat a page. Unleased active segments keep the
-  legacy matcher.
-- Clip oldest response rows to an encoded-byte budget rather than disconnecting
-  a client for an oversized composed frame. This also fixes large unleased
-  history responses; fitting content stays unchanged, and a response with no
-  fitting row succeeds with empty truncated content. Stored history is not
-  shortened by response clipping.
+  and fullscreen PTY/restart boundaries can repeat a page. Unleased panes
+  with scrollback keep legacy matching across PTY resizes and relay restarts.
+  Known-zero no-scrollback panes retain those boundaries. Physical matching
+  preserves raw rows while updating a three-row content tail in place.
+- Clip oldest response rows so a single composed frame no longer exceeds the
+  per-message limit. This includes large unleased history responses; fitting
+  content stays unchanged, and a response with no fitting row succeeds with
+  empty truncated content. Stored history is not shortened by response
+  clipping. The shared transport queue and its eviction policy are unchanged.
 - Correct the phone app's leased-width height estimates and contextual prepend
   anchors for short or blank rows. These frontend corrections require the new
   app build.

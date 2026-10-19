@@ -154,9 +154,9 @@ type cleanupState struct {
 }
 
 type paneState struct {
-	// lock serializes terminal I/O for this pane (open, validate, ioctl) and
-	// the decision that precedes it. It is a channel so waiting is bounded by
-	// a context. Field access is guarded by Manager.mu, never by lock.
+	// lock serializes lease acquisition, reconciliation, and restore work.
+	// History reads use geometry revision checks instead of this lock.
+	// Channel waits are context-bound; Manager.mu guards field access.
 	lock      chan struct{}
 	resolved  bool
 	identity  terminalIdentity

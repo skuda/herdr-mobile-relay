@@ -259,8 +259,9 @@ desktop Safari reports an occluded window as hidden and brief app switches
 must not resize the shared pane. Several phones on one pane get the narrowest
 requested size. Readers never resize anything.
 
-Eligible fullscreen Claude/Qoder history follows this relay's pane-wide lease and restore state, rather than the
-reader's own lease; the sampling limits are described below.
+Eligible fullscreen Claude/Qoder history follows this relay's pane-wide lease
+and restore state, rather than the reader's own lease; the sampling limits are
+described below.
 
 **Lease Terminal Height** (off by default, available only with Resize Session
 on and a relay that supports it) also fits the height, so full-screen agents
@@ -283,7 +284,9 @@ connections can request 10,000. Responses also have an encoded-byte budget.
 The relay removes oldest response rows to fit it, without deleting retained
 history. A row that cannot fit can leave an empty successful response with the
 history-limit notice. Large unleased legacy responses use this byte guard too;
-content that fits the budget is unchanged.
+content that fits the budget is unchanged. A single composed frame no longer
+exceeds the per-message limit; the shared transport queue and its eviction
+policy are unchanged.
 
 During this relay's Resize Session lease or pending restore, eligible
 Claude/Qoder panes retain sampled fullscreen pages before the current raw
@@ -295,10 +298,12 @@ preference and retains up to 10,000 body rows. Before activation and after
 restore cleanup, the unleased legacy matcher resumes with earlier segments
 retained.
 
-This is sampled history, not a complete transcript. Source/PTY boundaries can
-repeat one page. Sampling gaps and the three-second resize-settling pause can
-lose output. The six-row footer split is a heuristic; up to three bottom body
-rows can change in place without archiving their old text. Retained desktop
+This is sampled history, not a complete transcript. Source boundaries and
+fullscreen PTY/restart boundaries can repeat one page. Unleased panes with
+scrollback keep legacy matching across PTY resizes and relay restarts. Sampling
+gaps and the three-second resize-settling pause can lose output. The six-row
+footer split is a heuristic; up to three content-tail rows before trailing
+blank padding can change in place without archiving their old text. Retained desktop
 rows can wrap unevenly. PTY epochs do not detect emulator-grid or pixel-only
 changes, and a narrower Herdr grid can clip rows. The absence of an older-history
 notice does not establish that omitted samples or replaced tails were retained.
@@ -306,9 +311,9 @@ For direct reads, an unchanged-content response can keep an earlier truncation
 notice until a content change or watch frame updates it.
 
 Footer updates refresh without a body change. Dirty admitted pages save on a
-deadline even after output stops, and the first runtime capture after restart
-starts a fresh segment. A crash before a successful save can still lose recent
-samples. This release also includes a new app build for effective-width height
+deadline even after output stops. Physical and no-scrollback history starts a
+fresh segment after restart; scrollback legacy reads resume matching. A crash
+before a successful save can still lose recent samples. This release also includes a new app build for effective-width height
 estimates and short/blank prepend anchors; use the matching build for those
 frontend corrections. See [sampled fullscreen history](pane-size-leasing.md#sampled-fullscreen-history)
 for source, matching, persistence, and clipping limits.

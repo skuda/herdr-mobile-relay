@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/0cv/herdr-mobile-relay/internal/history"
-	"github.com/0cv/herdr-mobile-relay/internal/transport"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/history"
 	"github.com/0cv/herdr-mobile-relay/internal/panedelta"
+	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
 func budgetFrame(content string) map[string]any {

@@ -126,14 +126,31 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		}
 		eligible = eligible && !request.Resized && !retainedUnsafe && (handle == nil || geometryErr == nil)
 	}
-	if !eligible {
-		return result, nil
-	}
 	context := history.SnapshotContext{TerminalID: token.identity.terminalID, ReadSource: history.SourceLegacy,
 		GeometryEpoch: token.geometry.Epoch, LeaseRevision: token.leaseRevision,
 		Columns: token.geometry.Columns, Rows: token.geometry.Rows, NoScrollback: agent.UsesNoScrollbackHistory()}
 	if request.Physical {
 		context.ReadSource = history.SourceRecent
+	}
+	preview := func() {
+		if !captureShape || interaction != nil || question.LayoutHint(string(read.Content)) || !identityCurrent || len(read.Content) == 0 {
+			return
+		}
+		active, ok := s.historyActive[request.PaneID]
+		if !ok || active != token.identity {
+			return
+		}
+		if content, composed := s.historyM.PreviewSnapshot(request.PaneID, string(read.Content), context); composed {
+			response["content"] = content
+			result.Composed = true
+		}
+		response["history_retry"] = true
+	}
+	if !eligible {
+		s.historyCaptureMu.Lock()
+		preview()
+		s.historyCaptureMu.Unlock()
+		return result, nil
 	}
 	result.Capture.Snapshot = context
 	result.Capture.PendingSequence = token.pendingSequence
@@ -144,6 +161,7 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 	defer s.historyCaptureMu.Unlock()
 	active, ok := s.historyActive[request.PaneID]
 	if !ok || active != token.identity || token.sequence <= s.historyArchived[request.PaneID] || ctx.Err() != nil || s.historyClosed {
+		preview()
 		return result, nil
 	}
 	content, _, admission := s.historyM.AdmitSnapshot(request.PaneID, string(read.Content), context, 0)

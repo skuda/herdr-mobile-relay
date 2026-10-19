@@ -27,6 +27,7 @@ type paneWatchFrame struct {
 	frameFingerprint    string
 	classificationAgent string
 	resizeSettling      bool
+	historyRetry        bool
 }
 
 type paneWatch struct {
@@ -225,6 +226,7 @@ func (s *Server) readPaneWatchFrame(watch *paneWatch) (map[string]any, *paneWatc
 		frameFingerprint:    frameFingerprint,
 		classificationAgent: classificationAgentID,
 		resizeSettling:      resizeSettling,
+		historyRetry:        response["history_retry"] == true,
 	}
 }
 
@@ -237,7 +239,7 @@ func paneWatchNeedsFrameRead(
 		return true
 	}
 	return acknowledged != nil &&
-		(acknowledged.resizeSettling ||
+		(acknowledged.resizeSettling || acknowledged.historyRetry ||
 			acknowledged.classificationAgent != classificationAgentID)
 }
 

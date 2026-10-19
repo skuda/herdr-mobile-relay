@@ -3,6 +3,7 @@ package history
 import (
 	"slices"
 	"strings"
+	"time"
 )
 
 const (
@@ -38,6 +39,26 @@ func (m *Manager) MergeSnapshot(paneID, rawContent string, context SnapshotConte
 func (m *Manager) MergeSnapshotLimited(paneID, rawContent string, context SnapshotContext, limit int) (string, bool) {
 	content, clipped, _ := m.AdmitSnapshot(paneID, rawContent, context, limit)
 	return content, clipped
+}
+
+func (m *Manager) PreviewSnapshot(paneID, rawContent string, context SnapshotContext) (string, bool) {
+	m.mu.Lock()
+	state := m.loadState(paneID)
+	if context.TerminalID == "" || state.TerminalID != context.TerminalID {
+		m.mu.Unlock()
+		return rawContent, false
+	}
+	clone := *state
+	clone.History, clone.Footer = slices.Clone(state.History), slices.Clone(state.Footer)
+	m.mu.Unlock()
+	if context.ReadSource == SourceRecent {
+		rows := append(slices.Clone(clone.History[:clone.LiveStart]), strings.Split(rawContent, "\n")...)
+		content, _ := limitSnapshotLines(rows, 0)
+		return content, true
+	}
+	preview := &Manager{states: map[string]*PaneState{paneID: &clone}, lastSave: make(map[string]time.Time), now: time.Now}
+	content, _, _ := preview.AdmitSnapshot(paneID, rawContent, context, 0)
+	return content, true
 }
 
 // AdmitSnapshot reports admission separately from content and metadata changes.

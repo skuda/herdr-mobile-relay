@@ -103,6 +103,7 @@ type PaneReadResult struct {
 	Read     herdr.PaneRead
 	Response map[string]any
 	Capture  PaneReadCapture
+	Composed bool
 }
 
 type PaneReadOptions struct {
@@ -1294,7 +1295,7 @@ func (d *Dispatcher) handleReadPane(ctx context.Context, message map[string]any,
 		content = composed
 	}
 	limited := content
-	if call.result.Capture.Admitted {
+	if call.result.Capture.Admitted || call.result.Composed {
 		rows := strings.Split(content, "\n")
 		if len(rows) > lines {
 			limited = strings.Join(rows[len(rows)-lines:], "\n")

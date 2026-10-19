@@ -298,24 +298,27 @@ preference and retains up to 10,000 body rows. Before activation and after
 restore cleanup, the unleased legacy matcher resumes with earlier segments
 retained.
 
-This is sampled history, not a complete transcript. Source boundaries and
-fullscreen PTY/restart boundaries can repeat one page. Unleased panes with
-scrollback keep legacy matching across PTY resizes and relay restarts. Sampling
-gaps and the three-second resize-settling pause can lose output. The six-row
-footer split is a heuristic; up to three content-tail rows before trailing
-blank padding can change in place without archiving their old text. Retained desktop
-rows can wrap unevenly. PTY epochs do not detect emulator-grid or pixel-only
-changes, and a narrower Herdr grid can clip rows. The absence of an older-history
-notice does not establish that omitted samples or replaced tails were retained.
-For direct reads, an unchanged-content response can keep an earlier truncation
-notice until a content change or watch frame updates it.
+This is sampled history, not a complete transcript. Source changes start
+segments for each pane. Lease changes, observed PTY changes, and relay restarts
+start segments for physical and known-zero no-scrollback contexts. These
+boundaries can repeat one page. Panes with scrollback keep legacy matching
+across leases, PTY resizes, and relay restarts. Sampling gaps and the three-second
+resize-settling pause can lose output. The six-row footer split is a heuristic;
+up to three content-tail rows before trailing blank padding can change in place
+without archiving their old text. Retained desktop rows can wrap unevenly. PTY
+epochs do not detect emulator-grid or pixel-only changes, and a narrower Herdr
+grid can clip rows. The absence of an older-history notice does not establish
+that omitted samples or replaced tails were retained. For direct reads, an
+unchanged-content response can keep an earlier truncation notice until a content
+change or watch frame updates it.
 
 Footer updates refresh without a body change. Dirty admitted pages save on a
 deadline even after output stops. Physical and no-scrollback history starts a
 fresh segment after restart; scrollback legacy reads resume matching. A crash
-before a successful save can still lose recent samples. This release also includes a new app build for effective-width height
-estimates and short/blank prepend anchors; use the matching build for those
-frontend corrections. See [sampled fullscreen history](pane-size-leasing.md#sampled-fullscreen-history)
+before a successful save can still lose recent samples. This release also
+includes a new app build for effective-width height estimates and short/blank
+prepend anchors; use the matching build for those frontend corrections. See
+[sampled fullscreen history](pane-size-leasing.md#sampled-fullscreen-history)
 for source, matching, persistence, and clipping limits.
 
 Terminal history is separate from ordinary Herdr scrollback and the provider's

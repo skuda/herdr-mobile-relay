@@ -178,8 +178,7 @@ While the gate and heuristic qualify, display, background, and completion
 fallback captures request ANSI `recent` with `PhysicalCaptureLines=1000`.
 A non-leasing reader of the same pane uses that source too. Reader preferences
 of 100, 500, 1,000, or 10,000 rows limit the response after archival; they do not
-change the physical capture shape. The retained body is bounded by
-`MaxLines=10000`.
+change the physical capture shape. The retained body is bounded by `MaxLines=10000`.
 
 Before lease activation and after restore cleanup, Claude reads return to
 `ReadPane` (`recent-unwrapped`) and the legacy active-segment matcher. Qoder
@@ -194,17 +193,16 @@ the content read. This validation also runs for eligible unleased ANSI reads;
 text and legacy viewport-only reads skip it. Background deferral checks use
 retained geometry without opening another handle.
 
-The epoch tracks observed PTY rows and columns. Lease/source changes start
-fresh history segments. Observed PTY changes and relay restarts also start
-segments for no-scrollback panes, selected by the known-zero heuristic.
-Unleased panes with scrollback keep legacy matching across PTY changes and
-relay restarts. Previously frozen physical prefixes remain frozen. A failed
-geometry sample does not fabricate an epoch-zero boundary. A fullscreen
-boundary can repeat one page. An external A→B→A change entirely between
-samples remains undetectable. Emulator-grid or pixel-only changes do not
-advance this epoch. Narrowing Herdr's grid below the PTY width can clip rows
-without a detected geometry change; the shared desktop-garbling limitation
-remains.
+The epoch tracks observed PTY rows and columns. Source changes start fresh
+history segments for each pane. Lease changes, observed PTY changes, and relay
+restarts start segments for physical and known-zero no-scrollback contexts.
+Panes with scrollback keep legacy matching across leases, PTY resizes, and relay
+restarts. Previously frozen physical prefixes remain frozen. A failed geometry
+sample does not fabricate an epoch-zero boundary. A fullscreen boundary can
+repeat one page. An external A→B→A change entirely between samples remains
+undetectable. Emulator-grid or pixel-only changes do not advance this epoch.
+Narrowing Herdr's grid below the PTY width can clip rows without a detected
+geometry change; the shared desktop-garbling limitation remains.
 
 Inside a physical segment, accepted fixed-header alignment archives displaced
 scroll rows. The response places that archive before the raw current page,
@@ -269,14 +267,15 @@ state. A crash before a successful save can still lose recent samples.
 Physical and no-scrollback history becomes a frozen prefix at its first
 runtime admission after restart, even if numeric PTY epochs and lease revisions
 repeat. Scrollback legacy reads resume matching, including older-format files.
-Restart fencing does not infer the source or width of rows from older files. The shared pane-ID cache layout is unchanged; separate relays
-still need separate cache roots to avoid shared-cache interference.
+Restart fencing does not infer the source or width of rows from older files.
+The shared pane-ID cache layout is unchanged; separate relays still need
+separate cache roots to avoid shared-cache interference.
 
 This release includes a new phone-app build. It estimates leased prose using
 the effective shared width and adjusts short/blank anchors for contextual
 prepends. Use the matching app build; the older 0.22.10 app can receive long
-frames but lacks these frontend corrections. No new history
-capability or client-side history merger is introduced.
+frames but lacks these frontend corrections. No new history capability or
+client-side history merger is introduced.
 
 ## Residual risks
 

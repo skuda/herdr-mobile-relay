@@ -11,11 +11,13 @@ project follows [Semantic Versioning](https://semver.org/).
   Resize Session lease and pending restore, including reads from non-leasing
   clients. Keep the current footer fresh, queue trailing captures, and save
   dirty admitted history after output stops. Sampling gaps, resize settling,
-  footer/tail replacement, and retention limits can still omit text; source
-  and fullscreen PTY/restart boundaries can repeat a page. Unleased panes
-  with scrollback keep legacy matching across PTY resizes and relay restarts.
-  Known-zero no-scrollback panes retain those boundaries. Physical matching
-  preserves raw rows while updating a three-row content tail in place.
+  footer/tail replacement, and retention limits can still omit text. Source
+  changes start segments for each pane. Lease changes, observed PTY changes,
+  and relay restarts start segments for physical and known-zero no-scrollback
+  contexts. These boundaries can repeat a page. Panes with scrollback keep
+  legacy matching across leases, PTY resizes, and relay restarts. Physical
+  matching preserves raw rows while updating up to three content-tail rows in
+  place.
 - Clip oldest response rows so a single composed frame no longer exceeds the
   per-message limit. This includes large unleased history responses; fitting
   content stays unchanged, and a response with no fitting row succeeds with

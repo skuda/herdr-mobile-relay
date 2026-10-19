@@ -46,15 +46,17 @@ type PaneState struct {
 }
 
 type Manager struct {
-	mu           sync.Mutex
-	states       map[string]*PaneState
-	dir          string
-	lastSave     map[string]time.Time
-	persistMu    sync.Mutex
-	wake         chan struct{}
-	now          func() time.Time
-	writeFile    func(string, []byte, os.FileMode) error
-	beforeRename func()
+	mu                sync.Mutex
+	states            map[string]*PaneState
+	dir               string
+	lastSave          map[string]time.Time
+	persistMu         sync.Mutex
+	wake              chan struct{}
+	now               func() time.Time
+	writeFile         func(string, []byte, os.FileMode) error
+	removeFile        func(string) error
+	beforeRename      func()
+	unownedSaveErrors []error
 }
 
 func NewManager(cacheDir string) *Manager {
@@ -64,7 +66,7 @@ func NewManager(cacheDir string) *Manager {
 		states:   make(map[string]*PaneState),
 		dir:      dir,
 		lastSave: make(map[string]time.Time),
-		wake:     make(chan struct{}, 1), now: time.Now, writeFile: os.WriteFile,
+		wake:     make(chan struct{}, 1), now: time.Now, writeFile: os.WriteFile, removeFile: os.Remove,
 	}
 }
 

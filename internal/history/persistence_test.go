@@ -242,6 +242,153 @@ func TestPersistenceUnrelatedSaveDoesNotReportRecovery(t *testing.T) {
 	}
 }
 
+func TestPersistenceReportsObsoleteCleanupFailureAndRecovery(t *testing.T) {
+	for _, earlierFailure := range []bool{true, false} {
+		t.Run(fmt.Sprintf("earlier_failure=%v", earlierFailure), func(t *testing.T) {
+			m := NewManager(t.TempDir())
+			var clock atomic.Int64
+			clock.Store(time.Unix(10000, 0).UnixNano())
+			m.now = func() time.Time { return time.Unix(0, clock.Load()) }
+			paneContext := physicalContext(1, 40)
+			m.MergeSnapshot("a", snapshotPage("old A", "old B"), paneContext)
+			attempts := 0
+			m.writeFile = func(path string, data []byte, mode os.FileMode) error {
+				attempts++
+				if earlierFailure && attempts == 1 {
+					return errors.New("disk full")
+				}
+				return os.WriteFile(path, data, mode)
+			}
+			m.removeFile = func(string) error { return errors.New("obsolete cleanup denied") }
+			ctx, cancel := context.WithCancel(context.Background())
+			renames := 0
+			m.beforeRename = func() {
+				renames++
+				switch renames {
+				case 1:
+					replacement := paneContext
+					replacement.TerminalID = "replacement"
+					m.MergeSnapshot("a", snapshotPage("new A", "new B"), replacement)
+					m.mu.Lock()
+					m.states["a"].saveDue = m.now().Add(SaveInterval)
+					m.mu.Unlock()
+				case 3:
+					cancel()
+				}
+			}
+			done, reports := make(chan struct{}), make(chan error, 5)
+			go func() { m.RunPersistenceWithReport(ctx, func(err error) { reports <- err }); close(done) }()
+			t.Cleanup(func() { cancel(); <-done })
+			awaitReport := func(want string) {
+				t.Helper()
+				select {
+				case err := <-reports:
+					if want == "" {
+						if err != nil {
+							t.Fatalf("recovery error=%v", err)
+						}
+					} else if err == nil || !strings.Contains(err.Error(), want) {
+						t.Fatalf("persistence report=%v, want %q", err, want)
+					}
+				case <-time.After(3 * time.Second):
+					t.Fatalf("missing persistence report %q", want)
+				}
+			}
+			advance := func() {
+				clock.Add(int64(SaveInterval + time.Second))
+				select {
+				case m.wake <- struct{}{}:
+				default:
+				}
+			}
+			if earlierFailure {
+				awaitReport("disk full")
+				advance()
+			}
+			awaitReport("remove obsolete pane history temporary file: obsolete cleanup denied")
+			if err := m.persistenceError(); err != nil {
+				t.Fatalf("replacement retained an obsolete pane error: %v", err)
+			}
+			if _, err := os.Stat(m.stateFile("a") + ".tmp"); err != nil {
+				t.Fatalf("failed cleanup did not leave the temporary file: %v", err)
+			}
+			advance()
+			awaitReport("")
+			paneContext.TerminalID = "replacement"
+			m.MergeSnapshot("a", snapshotPage("new A", "new B", "new C"), paneContext)
+			advance()
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("persistence did not complete the later clean tick")
+			}
+			select {
+			case err := <-reports:
+				t.Fatalf("duplicate recovery report: %v", err)
+			default:
+			}
+		})
+	}
+}
+
+func TestPersistenceReportsPaneErrorsBeforeObsoleteCleanupFailure(t *testing.T) {
+	m := NewManager(t.TempDir())
+	now := time.Unix(10000, 0)
+	m.now = func() time.Time { return now }
+	m.Merge("b", snapshotPage("B", "C"))
+	m.writeFile = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
+	if err := m.FlushDue(now); err == nil {
+		t.Fatal("missing pane failure")
+	}
+	paneContext := physicalContext(1, 40)
+	m.MergeSnapshot("a", snapshotPage("old A", "old B"), paneContext)
+	m.writeFile = os.WriteFile
+	m.removeFile = func(string) error { return errors.New("obsolete cleanup denied") }
+	m.beforeRename = func() {
+		paneContext.TerminalID = "replacement"
+		m.MergeSnapshot("a", snapshotPage("new A", "new B"), paneContext)
+		m.mu.Lock()
+		m.states["a"].saveDue = now.Add(SaveInterval)
+		m.mu.Unlock()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done, reports := make(chan struct{}), make(chan error, 1)
+	go func() {
+		m.RunPersistenceWithReport(ctx, func(err error) { reports <- err; cancel() })
+		close(done)
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+	select {
+	case err := <-reports:
+		want := "save pane history \"b\": disk full\nremove obsolete pane history temporary file: obsolete cleanup denied"
+		if err == nil || err.Error() != want {
+			t.Fatalf("joined persistence report=%v, want %q", err, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("missing joined persistence report")
+	}
+	<-done
+	for range 2 {
+		if err := m.persistenceError(); err == nil || err.Error() != "save pane history \"b\": disk full" {
+			t.Fatalf("pane error changed after reporting: %v", err)
+		}
+	}
+	if err := m.takeUnownedSaveErrors(); err != nil {
+		t.Fatalf("reported cleanup error was not cleared: %v", err)
+	}
+}
+
+func TestObsoleteSaveUsesDefaultRemoveFile(t *testing.T) {
+	m := &Manager{dir: t.TempDir(), writeFile: os.WriteFile}
+	job := persistenceJob{paneID: "p", instance: &PaneState{}}
+	if err := m.saveState(job, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(m.stateFile("p") + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("default removal left the obsolete temporary file: %v", err)
+	}
+}
+
 func TestPersistenceErrorsFollowCurrentPaneStates(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 40)

@@ -55,6 +55,14 @@ func (m *Manager) persistenceError() error {
 	return errors.Join(failures...)
 }
 
+func (m *Manager) takeUnownedSaveErrors() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	err := errors.Join(m.unownedSaveErrors...)
+	m.unownedSaveErrors = nil
+	return err
+}
+
 func (m *Manager) saveState(job persistenceJob, now time.Time) error {
 	data, err := json.Marshal(&job.state)
 	if err == nil {
@@ -67,8 +75,14 @@ func (m *Manager) saveState(job persistenceJob, now time.Time) error {
 	defer m.mu.Unlock()
 	state := m.states[job.paneID]
 	if state != job.instance {
-		if removeErr := os.Remove(m.stateFile(job.paneID) + ".tmp"); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			return fmt.Errorf("remove obsolete pane history temporary file: %w", removeErr)
+		removeFile := m.removeFile
+		if removeFile == nil {
+			removeFile = os.Remove
+		}
+		if removeErr := removeFile(m.stateFile(job.paneID) + ".tmp"); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			err := fmt.Errorf("remove obsolete pane history temporary file: %w", removeErr)
+			m.unownedSaveErrors = append(m.unownedSaveErrors, err)
+			return err
 		}
 		return nil
 	}
@@ -129,7 +143,7 @@ func (m *Manager) RunPersistenceWithReport(ctx context.Context, report func(erro
 			}
 		case <-tick:
 			_ = m.FlushDue(m.now())
-			err := m.persistenceError()
+			err := errors.Join(m.persistenceError(), m.takeUnownedSaveErrors())
 			failure := ""
 			if err != nil {
 				failure = err.Error()

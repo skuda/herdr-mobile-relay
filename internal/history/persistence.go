@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"time"
@@ -42,6 +43,18 @@ func (m *Manager) flush(now time.Time, force bool) error {
 	return errors.Join(failures...)
 }
 
+func (m *Manager) persistenceError() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var failures []error
+	for _, paneID := range slices.Sorted(maps.Keys(m.states)) {
+		if err := m.states[paneID].saveError; err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
+}
+
 func (m *Manager) saveState(job persistenceJob, now time.Time) error {
 	data, err := json.Marshal(&job.state)
 	if err == nil {
@@ -66,8 +79,10 @@ func (m *Manager) saveState(job persistenceJob, now time.Time) error {
 	if err != nil {
 		state.dirty = true
 		state.saveDue = m.now().Add(time.Second)
-		return fmt.Errorf("save pane history %q: %w", job.paneID, err)
+		state.saveError = fmt.Errorf("save pane history %q: %w", job.paneID, err)
+		return state.saveError
 	}
+	state.saveError = nil
 	m.lastSave[job.paneID] = now
 	if state.mutationVersion == job.version {
 		state.dirty = false
@@ -113,7 +128,8 @@ func (m *Manager) RunPersistenceWithReport(ctx context.Context, report func(erro
 				timer.Stop()
 			}
 		case <-tick:
-			err := m.FlushDue(m.now())
+			_ = m.FlushDue(m.now())
+			err := m.persistenceError()
 			failure := ""
 			if err != nil {
 				failure = err.Error()

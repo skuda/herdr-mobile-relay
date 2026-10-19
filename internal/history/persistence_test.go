@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -91,6 +92,118 @@ func TestPersistenceReportsChangedFailureAndRecovery(t *testing.T) {
 	}
 	if calls.Load() != 4 {
 		t.Fatalf("persistence attempts=%d", calls.Load())
+	}
+}
+
+func TestPersistenceUnrelatedSaveDoesNotReportRecovery(t *testing.T) {
+	m := NewManager(t.TempDir())
+	var clock atomic.Int64
+	clock.Store(time.Unix(10000, 0).UnixNano())
+	m.now = func() time.Time { return time.Unix(0, clock.Load()) }
+	m.Merge("a", snapshotPage("A", "B"))
+	bSaved, retryStarted, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var attempts int
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	m.writeFile = func(path string, data []byte, mode os.FileMode) error {
+		if path == m.stateFile("a")+".tmp" {
+			attempts++
+			if attempts == 1 {
+				return errors.New("disk full")
+			}
+			close(retryStarted)
+			<-release
+			return os.WriteFile(path, data, mode)
+		}
+		err := os.WriteFile(path, data, mode)
+		close(bSaved)
+		return err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done, reports := make(chan struct{}), make(chan error, 5)
+	go func() { m.RunPersistenceWithReport(ctx, func(err error) { reports <- err }); close(done) }()
+	t.Cleanup(func() { cancel(); unblock(); <-done })
+	select {
+	case err := <-reports:
+		if err == nil || !strings.Contains(err.Error(), "disk full") {
+			t.Fatalf("initial failure=%v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("missing initial failure")
+	}
+	m.Merge("b", snapshotPage("C", "D"))
+	select {
+	case <-bSaved:
+	case <-time.After(3 * time.Second):
+		t.Fatal("unrelated pane did not save")
+	}
+	clock.Add(int64(2 * time.Second))
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+	select {
+	case <-retryStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("failed pane did not retry")
+	}
+	select {
+	case err := <-reports:
+		t.Fatalf("unrelated save reported recovery before failed pane succeeded: %v", err)
+	default:
+	}
+	m.mu.Lock()
+	if !m.states["a"].dirty {
+		m.mu.Unlock()
+		t.Fatal("failed pane became clean before its retry finished")
+	}
+	m.mu.Unlock()
+	cancel()
+	unblock()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("persistence did not finish the successful retry")
+	}
+	select {
+	case err := <-reports:
+		if err != nil {
+			t.Fatalf("recovery error=%v", err)
+		}
+	default:
+		t.Fatal("missing recovery after failed pane succeeded")
+	}
+	select {
+	case err := <-reports:
+		t.Fatalf("duplicate recovery report: %v", err)
+	default:
+	}
+}
+
+func TestPersistenceErrorsFollowCurrentPaneStates(t *testing.T) {
+	m := NewManager(t.TempDir())
+	ctx := physicalContext(1, 40)
+	for _, paneID := range []string{"b", "a"} {
+		m.MergeSnapshot(paneID, snapshotPage("A", "B"), ctx)
+	}
+	m.writeFile = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
+	if err := m.SaveAll(); err == nil {
+		t.Fatal("missing save failure")
+	}
+	want := "save pane history \"a\": disk full\nsave pane history \"b\": disk full"
+	for range 5 {
+		if err := m.persistenceError(); err == nil || err.Error() != want {
+			t.Fatalf("persistence errors=%v, want %q", err, want)
+		}
+	}
+	m.Discard("a")
+	if err := m.persistenceError(); err == nil || err.Error() != "save pane history \"b\": disk full" {
+		t.Fatalf("discard retained obsolete error: %v", err)
+	}
+	ctx.TerminalID = "replacement"
+	m.MergeSnapshot("b", snapshotPage("new A", "new B"), ctx)
+	if err := m.persistenceError(); err != nil {
+		t.Fatalf("replacement retained obsolete error: %v", err)
 	}
 }
 

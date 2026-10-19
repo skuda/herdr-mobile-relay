@@ -42,6 +42,7 @@ type PaneState struct {
 	dirty           bool
 	mutationVersion uint64
 	saveDue         time.Time
+	saveError       error
 }
 
 type Manager struct {

@@ -73,6 +73,7 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 	beforeHistory, beforeFooter := slices.Clone(state.History), slices.Clone(state.Footer)
 	beforeContext := state.snapshotContext()
 	beforeVersion, beforeSegment, beforeLive := state.SnapshotVersion, state.SegmentStart, state.LiveStart
+	beforeHash, beforeRefusals := state.LastHash, state.StaleRefusals
 	if context.ReadSource != SourceRecent {
 		context.ReadSource = SourceLegacy
 	}
@@ -115,7 +116,7 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		MetadataChanged: beforeContext != state.snapshotContext() || beforeVersion != state.SnapshotVersion ||
 			beforeSegment != state.SegmentStart || beforeLive != state.LiveStart || boundary,
 	}
-	if admission.ContentChanged || admission.MetadataChanged {
+	if admission.ContentChanged || admission.MetadataChanged || beforeHash != state.LastHash || beforeRefusals != state.StaleRefusals {
 		state.dirty = true
 		state.mutationVersion++
 	}

@@ -223,6 +223,48 @@ func TestSnapshotLegacyMatchingDoesNotSearchFrozenPrefix(t *testing.T) {
 	assertSnapshotContent(t, got, "A", "B", "frozen suffix", "current X", "current Y", "prefix", "A", "B", "new suffix")
 }
 
+func TestSnapshotLegacyMatcherChangesSurviveRestart(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir)
+	ctx := physicalContext(1, 40)
+	ctx.ReadSource = SourceLegacy
+	old := snapshotPage("A", "B", "old1", "old2", "old3", "old4")
+	next := snapshotPage("A", "B", "new1", "new2", "new3")
+	m.AdmitSnapshot("p", old, ctx, 0)
+	if err := m.SaveAll(); err != nil {
+		t.Fatal(err)
+	}
+	state := m.states["p"]
+	if state.dirty {
+		t.Fatal("initial save left state dirty")
+	}
+	version := state.mutationVersion
+	content, _, admission := m.AdmitSnapshot("p", next, ctx, 0)
+	if content != old || !admission.Admitted || admission.ContentChanged || admission.MetadataChanged || state.StaleRefusals != 1 {
+		t.Fatalf("first divergent admission = %+v content=%q stale_refusals=%d", admission, content, state.StaleRefusals)
+	}
+	if !state.dirty || state.mutationVersion != version+1 {
+		t.Errorf("matcher-only admission: dirty=%v mutationVersion=%d, want dirty=true mutationVersion=%d", state.dirty, state.mutationVersion, version+1)
+	}
+	if err := m.SaveAll(); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewManager(dir)
+	content, _, admission = restarted.AdmitSnapshot("p", next, ctx, 0)
+	if content != next || !admission.Admitted || !admission.ContentChanged || !admission.MetadataChanged {
+		t.Fatalf("second divergent admission after restart = %+v content=%q, want %q", admission, content, next)
+	}
+	if err := restarted.SaveAll(); err != nil {
+		t.Fatal(err)
+	}
+	state = restarted.states["p"]
+	version = state.mutationVersion
+	_, _, admission = restarted.AdmitSnapshot("p", next, ctx, 0)
+	if !admission.Admitted || admission.ContentChanged || admission.MetadataChanged || state.dirty || state.mutationVersion != version {
+		t.Fatalf("unchanged admission = %+v dirty=%v mutationVersion=%d, want clean version %d", admission, state.dirty, state.mutationVersion, version)
+	}
+}
+
 func TestSnapshotBlankOnlyOverlapDoesNotRemoveRows(t *testing.T) {
 	for _, old := range [][]string{{"", "", ""}, append([]string{"old A", "old B"}, make([]string, 35)...)} {
 		m := NewManager(t.TempDir())

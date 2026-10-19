@@ -33,7 +33,7 @@ func captureServer(t *testing.T, leased bool) (*Server, *paneSizeFakes, func(tim
 	s.paneSizeM = panesize.NewManagerWith(f, f, f, clock, nil)
 	s.historyNow = clock
 	s.state.CommitInventory([]*coordinator.AgentState{{PaneID: "pane-1", TerminalID: "terminal-1", Agent: "claude", Status: "working", ScrollMetricsKnown: true}}, 0)
-	s.syncHistoryPanes(s.state.Snapshot())
+	s.syncHistoryPanes()
 	if leased {
 		if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 60, 20); err != nil {
 			t.Fatal(err)
@@ -253,7 +253,7 @@ func TestTrailingCaptureRekeysSameTerminalGenerationAndCancelsReplacement(t *tes
 	agent, _ := s.state.Agent("pane-1")
 	agent.SessionID = "discovered"
 	s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
-	s.syncHistoryPanes(s.state.Snapshot())
+	s.syncHistoryPanes()
 	pending := s.historyPending["pane-1"]
 	if pending == nil || pending.identity.generation == first.identity.generation || pending.queued != first.queued {
 		t.Fatal("same terminal discovery did not rekey pending request")
@@ -261,7 +261,7 @@ func TestTrailingCaptureRekeysSameTerminalGenerationAndCancelsReplacement(t *tes
 	agent, _ = s.state.Agent("pane-1")
 	agent.TerminalID = "replacement"
 	s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
-	s.syncHistoryPanes(s.state.Snapshot())
+	s.syncHistoryPanes()
 	if s.historyPending["pane-1"] != nil {
 		t.Fatal("replacement retained pending request")
 	}
@@ -364,7 +364,7 @@ func TestSlowHistoryGeometryDoesNotBlockOtherPaneScheduling(t *testing.T) {
 	slow := *agent
 	slow.PaneID = "slow"
 	s.state.CommitInventory([]*coordinator.AgentState{agent, &slow}, s.state.RevisionCounter())
-	s.syncHistoryPanes(s.state.Snapshot())
+	s.syncHistoryPanes()
 	provider := &slowHistoryProvider{paneSizeFakes: f, entered: make(chan struct{})}
 	s.paneSizeM = panesize.NewManagerWith(provider, f, f, s.historyNow, nil)
 	root := t.TempDir()
@@ -410,7 +410,7 @@ func TestReplacementDepartureBeforeReconciliationIsRetained(t *testing.T) {
 	if pending == nil || pending.identity.terminalID != "replacement" {
 		t.Fatalf("new terminal departure lost: %+v", pending)
 	}
-	s.syncHistoryPanes(s.state.Snapshot())
+	s.syncHistoryPanes()
 	if s.historyPending["pane-1"] == nil {
 		t.Fatal("reconciliation removed newer terminal request")
 	}
@@ -569,7 +569,7 @@ func TestStaleHistoryInventoryCannotDiscardReplacementPage(t *testing.T) {
 	agent, _ := s.state.Agent("pane-1")
 	agent.TerminalID = "terminal-new"
 	s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
-	s.syncHistoryPanes(s.state.Snapshot())
+	s.syncHistoryPanes()
 	result := executeCapture(t, s, capturePage("Q A", "Q B"), false)
 	if !result.Capture.Admitted {
 		t.Fatal("replacement Q was not admitted")
@@ -830,7 +830,7 @@ func TestHistoryBookkeepingDoesNotWaitForPublication(t *testing.T) {
 				agent, _ := s.state.Agent("pane-1")
 				agent.Agent = "codex"
 				s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
-				s.syncHistoryPanes(s.state.Snapshot())
+				s.syncHistoryPanes()
 			}
 			s.historyCaptureMu.Lock()
 			var once sync.Once
@@ -1126,7 +1126,7 @@ func TestBackgroundReadRejectsTerminalReplacementAndGenerationChange(t *testing.
 				agent.SessionID = "discovered"
 			}
 			s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
-			s.syncHistoryPanes(s.state.Snapshot())
+			s.syncHistoryPanes()
 			return herdr.PaneRead{Content: []byte(capturePage("obsolete A", "obsolete B"))}, nil
 		})
 		if err != nil || result.Capture.Admitted || strings.Contains(s.historyM.Content("pane-1", 0), "obsolete") {
@@ -1415,7 +1415,7 @@ func TestHistorySameTerminalDiscoveryKeepsArchive(t *testing.T) {
 	agent, _ := s.state.Agent("pane-1")
 	agent.SessionID = "discovered"
 	s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
-	s.syncHistoryPanes(s.state.Snapshot())
+	s.syncHistoryPanes()
 	result := executeCapture(t, s, capturePage("C", "D", "E", "F", "G"), true)
 	if !result.Capture.Admitted || result.Response["content"] != capturePage("A", "B", "C", "D", "E", "F", "G") {
 		t.Fatalf("discovery result = %+v", result)

@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
-	"github.com/0cv/herdr-mobile-relay/internal/panesize"
 )
 
 const (
@@ -19,6 +18,10 @@ type pendingHistoryCapture struct {
 	revision int64
 	queued   time.Time
 	attempts int
+}
+
+func (p *pendingHistoryCapture) expired(now time.Time) bool {
+	return p.attempts >= trailingCaptureAttempts || now.Sub(p.queued) >= trailingCaptureLifetime
 }
 
 // enqueueHistoryTransition records accepted departures without coordinator lookups or pane reads.
@@ -38,20 +41,19 @@ func (s *Server) enqueueHistoryTransition(event coordinator.StatusTransition) {
 		return
 	}
 	s.historyStatusRevision[event.PaneID] = event.Revision
+	s.historyRequestSequence++
 	if existing := s.historyPending[event.PaneID]; existing != nil && existing.identity.terminalID == event.TerminalID {
-		s.historyRequestSequence++
 		existing.sequence = s.historyRequestSequence
 		existing.revision = event.Revision
 		return
 	}
-	s.historyRequestSequence++
 	s.historyPending[event.PaneID] = &pendingHistoryCapture{identity: historyIdentity{terminalID: event.TerminalID, generation: event.Generation},
 		sequence: s.historyRequestSequence, revision: event.Revision, queued: s.historyNow()}
 }
 
 func (s *Server) captureHistoryTick(now time.Time) {
 	agents := s.state.Snapshot()
-	s.syncHistoryPanes(agents)
+	s.syncHistoryPanes()
 	candidates := make(map[string]bool)
 	for _, agent := range agents {
 		if isClaudeLike(agent.Agent) && (agent.Status == "working" || agent.Status == "blocked") {
@@ -61,7 +63,7 @@ func (s *Server) captureHistoryTick(now time.Time) {
 	var expired []string
 	s.historyPendingMu.Lock()
 	for paneID, pending := range s.historyPending {
-		if now.Sub(pending.queued) >= trailingCaptureLifetime || pending.attempts >= trailingCaptureAttempts {
+		if pending.expired(now) {
 			delete(s.historyPending, paneID)
 			expired = append(expired, paneID)
 			continue
@@ -82,7 +84,7 @@ func (s *Server) pendingReadStartedLocked(paneID string, identity historyIdentit
 	if pending == nil || pending.identity != identity {
 		return 0
 	}
-	if pending.attempts >= trailingCaptureAttempts || s.historyNow().Sub(pending.queued) >= trailingCaptureLifetime {
+	if pending.expired(s.historyNow()) {
 		delete(s.historyPending, paneID)
 		return 0
 	}
@@ -97,16 +99,10 @@ func (s *Server) acknowledgeHistoryLocked(token historyReadToken) {
 	}
 }
 
-func (s *Server) historyCaptureDeferred(ctx context.Context, paneID string) bool {
+func (s *Server) historyCaptureDeferred(paneID string) bool {
 	agent, ok := s.state.Agent(paneID)
 	if !ok || s.paneSizeM == nil || !s.paneSizeM.Available() || agent.TerminalID == "" {
 		return false
 	}
-	handle, err := s.paneSizeM.BeginHistoryRead(ctx, paneID, agent.TerminalID)
-	if err != nil {
-		return false
-	}
-	geometry := handle.Geometry()
-	_ = handle.Close()
-	return geometry.InProgress || !geometry.ChangedAt.IsZero() && s.historyNow().Sub(geometry.ChangedAt) < panesize.HistorySettleWindow
+	return s.paneSizeM.HistoryReadUnsafe(paneID, agent.TerminalID)
 }

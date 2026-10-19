@@ -106,10 +106,11 @@ type PaneReadResult struct {
 }
 
 type PaneReadOptions struct {
-	Physical       bool
-	SourceRevision uint64
-	FollowerJoined func()
-	Execute        func(context.Context, PaneReadRequest, func(context.Context, PaneReadRequest) (herdr.PaneRead, error)) (PaneReadResult, error)
+	Physical        bool
+	SourceRevision  uint64
+	FollowerJoined  func()
+	ResizedRecently bool
+	Execute         func(context.Context, PaneReadRequest, func(context.Context, PaneReadRequest) (herdr.PaneRead, error)) (PaneReadResult, error)
 }
 
 type paneRead struct {
@@ -1303,6 +1304,9 @@ func (d *Dispatcher) handleReadPane(ctx context.Context, message map[string]any,
 	}
 	response["type"], response["pane_id"], response["content"] = "pane_content", paneID, limited
 	response["format"], response["viewport_only"] = format, terminalColumns > 0
+	if terminalColumns > 0 && options.ResizedRecently {
+		response["resize_settling"] = true
+	}
 	response["truncated"] = read.Truncated || len(limited) != len(content)
 	if _, ok := response["interaction"]; !ok {
 		response["interaction"], response["question_layout"] = nil, false

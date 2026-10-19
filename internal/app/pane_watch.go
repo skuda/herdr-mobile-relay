@@ -8,6 +8,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/history"
 	"github.com/0cv/herdr-mobile-relay/internal/panedelta"
+	"github.com/0cv/herdr-mobile-relay/internal/panesize"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
@@ -18,7 +19,7 @@ const defaultPaneWatchInterval = 250 * time.Millisecond
 // pane frames are marked resize_settling. Full-screen agents re-render their
 // transcript on SIGWINCH and can push redrawn rows into the scrollback for a
 // couple of seconds; observed up to ~2s for omp under load.
-const paneResizeSettleWindow = 3 * time.Second
+const paneResizeSettleWindow = panesize.HistorySettleWindow
 
 type paneWatchFrame struct {
 	content             string

@@ -2131,6 +2131,7 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 		return
 	}
 	s.historyInflight[paneID] = true
+	scheduledAt := s.historyNow()
 	s.historyCaptureMu.Unlock()
 
 	started := s.historyTasks.Start(func(taskCtx context.Context) {
@@ -2141,13 +2142,13 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 		}()
 		readCtx, cancel := context.WithTimeout(taskCtx, 3*time.Second)
 		defer cancel()
-		if s.historyCaptureDeferred(readCtx, paneID) {
+		if s.historyCaptureDeferred(paneID) {
 			return
 		}
 		s.historyCaptureMu.Lock()
-		s.historyLast[paneID] = s.historyNow()
+		s.historyLast[paneID] = scheduledAt
 		s.historyCaptureMu.Unlock()
-		s.syncHistoryPanes(s.state.Snapshot())
+		s.syncHistoryPanes()
 		_, _ = s.captureTerminalHistory(readCtx, paneID)
 	})
 	if started {
@@ -2158,7 +2159,7 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 	s.historyCaptureMu.Unlock()
 }
 
-func (s *Server) syncHistoryPanes(_ []*coordinator.AgentState) {
+func (s *Server) syncHistoryPanes() {
 	s.syncHistorySnapshot(s.state.InventorySnapshot())
 }
 
@@ -2169,11 +2170,9 @@ func (s *Server) syncHistorySnapshot(snapshot coordinator.InventorySnapshot) {
 	agents := snapshot.Agents
 	active := make(map[string]historyIdentity, len(agents))
 	otherTerminals := make(map[string]string)
-	present := make(map[string]bool, len(agents))
 	for _, agent := range agents {
 		if isClaudeLike(agent.Agent) {
 			active[agent.PaneID] = historyIdentity{terminalID: agent.TerminalID, generation: agent.Generation}
-			present[agent.PaneID] = true
 		} else {
 			otherTerminals[agent.PaneID] = agent.TerminalID
 		}
@@ -2186,6 +2185,10 @@ func (s *Server) syncHistorySnapshot(snapshot coordinator.InventorySnapshot) {
 	}
 	s.historyInventoryRevision = snapshot.Revision
 	if !s.historyReconciled {
+		present := make(map[string]bool, len(active))
+		for paneID := range active {
+			present[paneID] = true
+		}
 		s.historyM.Reconcile(present)
 		s.historyReconciled = true
 	}
@@ -2303,7 +2306,7 @@ func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, se
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	s.syncHistoryPanes(s.state.Snapshot())
+	s.syncHistoryPanes()
 	completionContent, err := s.captureTerminalHistory(readCtx, paneID)
 	if err != nil || completionContent == "" {
 		return ""
@@ -3591,7 +3594,7 @@ func (s *Server) publishCurrentInventory(ctx context.Context) error {
 	}
 	if runAgentSideEffects {
 		s.reconcileRecoveredPush(ctx, sideEffectAgents)
-		s.syncHistoryPanes(sideEffectAgents)
+		s.syncHistoryPanes()
 		active := make(map[string]bool, len(sideEffectAgents))
 		for _, agent := range sideEffectAgents {
 			active[agent.PaneID] = true

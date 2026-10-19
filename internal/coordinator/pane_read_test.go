@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -113,6 +114,66 @@ func TestPaneResponseLimitsComposedAndRawRows(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+func TestSharedReadResizeMetadataRemainsReaderLocal(t *testing.T) {
+	for _, ownerLeased := range []bool{false, true} {
+		for _, unsafe := range []bool{false, true} {
+			t.Run(fmt.Sprintf("ownerLeased=%v/unsafe=%v", ownerLeased, unsafe), func(t *testing.T) {
+				state := NewState(testLogger())
+				state.CommitInventory([]*AgentState{{PaneID: "p", TerminalID: "terminal", Agent: "claude", Status: "idle"}}, 0)
+				d := NewDispatcher(nil, state, nil, testLogger())
+				entered, release, joined := make(chan struct{}), make(chan struct{}), make(chan struct{}, 1)
+				var once sync.Once
+				unblock := func() { once.Do(func() { close(release) }) }
+				t.Cleanup(unblock)
+				var reads atomic.Int32
+				options := PaneReadOptions{Physical: true, ResizedRecently: true, FollowerJoined: func() { joined <- struct{}{} },
+					Execute: func(context.Context, PaneReadRequest, func(context.Context, PaneReadRequest) (herdr.PaneRead, error)) (PaneReadResult, error) {
+						reads.Add(1)
+						close(entered)
+						<-release
+						return PaneReadResult{Read: herdr.PaneRead{Content: []byte("raw")}, Response: map[string]any{"resize_settling": unsafe}}, nil
+					}}
+				results := make(chan map[string]any, 2)
+				read := func(leased bool, lines int) {
+					message := map[string]any{"pane_id": "p", "format": "ansi", "lines": lines}
+					if leased {
+						message["terminal_columns"] = 40
+					}
+					response, _ := d.HandleReadPaneWithOptions(context.Background(), message, options)
+					results <- response
+				}
+				go read(ownerLeased, 100)
+				select {
+				case <-entered:
+				case <-time.After(time.Second):
+					t.Fatal("owner did not enter")
+				}
+				go read(!ownerLeased, 500)
+				select {
+				case <-joined:
+				case <-time.After(time.Second):
+					t.Fatal("follower did not join")
+				}
+				unblock()
+				for range 2 {
+					select {
+					case response := <-results:
+						want := unsafe || response["viewport_only"] == true
+						if got, _ := response["resize_settling"].(bool); got != want {
+							t.Fatalf("reader metadata=%+v want settling=%v", response, want)
+						}
+					case <-time.After(time.Second):
+						t.Fatal("shared reader did not finish")
+					}
+				}
+				if reads.Load() != 1 {
+					t.Fatalf("underlying reads=%d", reads.Load())
+				}
+			})
 		}
 	}
 }

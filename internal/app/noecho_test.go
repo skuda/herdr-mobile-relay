@@ -25,7 +25,7 @@ func TestReadPaneResponseFlagsNoEchoPromptOnMergedContent(t *testing.T) {
 		"type": "pane_content", "pane_id": "pane-1", "format": "ansi",
 		"content": "$ sudo dnf upgrade\n[sudo] password for cv: ",
 	}
-	s.syncHistoryPanes(s.state.Snapshot())
+	s.syncHistoryPanes()
 	raw := response["content"].(string)
 	installPaneReadFixture(t, s, func(context.Context) (string, error) { return raw, nil })
 	response = s.readPaneResponse(context.Background(), map[string]any{"pane_id": "pane-1", "lines": 100, "format": "ansi"})

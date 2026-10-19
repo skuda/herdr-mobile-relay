@@ -2046,7 +2046,7 @@ func TestReadPaneResponsePreservesHistoryForUnknownViewportOnlyRead(t *testing.T
 		"content": "current 1\ncurrent 2", "format": "ansi",
 		"truncated": false, "viewport_only": true,
 	}
-	s.syncHistoryPanes(s.state.Snapshot())
+	s.syncHistoryPanes()
 	raw := response["content"].(string)
 	installPaneReadFixture(t, s, func(context.Context) (string, error) { return raw, nil })
 	response = s.readPaneResponse(context.Background(), map[string]any{"pane_id": "pane-1", "lines": 100, "format": "ansi", "terminal_columns": 59})
@@ -3325,7 +3325,7 @@ func TestBackgroundClaudeHistoryCaptureDoesNotRequirePhoneRead(t *testing.T) {
 	s.state.CommitInventory([]*coordinator.AgentState{{
 		PaneID: "pane-1", Agent: "Claude Code", Status: "working",
 	}}, s.state.RevisionCounter())
-	s.syncHistoryPanes(s.state.Snapshot())
+	s.syncHistoryPanes()
 
 	s.scheduleHistoryCapture(context.Background(), "pane-1")
 	deadline := time.Now().Add(5 * time.Second)
@@ -3351,7 +3351,7 @@ func TestRemovedPaneHistoryIsDiscarded(t *testing.T) {
 	s.historyCaptureMu.Unlock()
 
 	s.state.CommitInventory(nil, s.state.RevisionCounter())
-	s.syncHistoryPanes(nil)
+	s.syncHistoryPanes()
 
 	s.historyCaptureMu.Lock()
 	_, active := s.historyActive["pane-1"]
@@ -3385,7 +3385,7 @@ func TestFirstInventoryReconcilesHistoryFromEarlierProcess(t *testing.T) {
 		Agent:  "Claude Code",
 		Status: "working",
 	}}, restarted.state.RevisionCounter())
-	restarted.syncHistoryPanes(restarted.state.Snapshot())
+	restarted.syncHistoryPanes()
 
 	files, err := filepath.Glob(filepath.Join(cfg.CacheDir, "claude-history", "*.json"))
 	if err != nil {

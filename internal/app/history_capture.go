@@ -42,7 +42,8 @@ func (s *Server) readPaneResponse(ctx context.Context, message map[string]any) m
 	physical, leaseRevision := s.physicalHistorySource(agent)
 	response, _ := s.dispatcher.HandleReadPaneWithOptions(ctx, message, coordinator.PaneReadOptions{
 		Physical: physical, SourceRevision: leaseRevision,
-		Execute: s.executeHistoryRead,
+		Execute:         s.executeHistoryRead,
+		ResizedRecently: s.paneSizeM != nil && s.paneSizeM.ResizedWithin(paneID, paneResizeSettleWindow),
 	})
 	if target, ok := message["target"]; ok {
 		response["target"] = target
@@ -78,16 +79,19 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 	token.leaseRevision = leaseRevision
 	var handle *panesize.HistoryRead
 	var geometryErr error
-	if s.paneSizeM != nil && s.paneSizeM.Available() && agent != nil && isClaudeLike(agent.Agent) && agent.TerminalID != "" {
+	captureShape := request.Format == "ansi" && (request.Physical || !request.Resized)
+	if captureShape && s.paneSizeM != nil && s.paneSizeM.Available() && agent.TerminalID != "" {
 		handle, geometryErr = s.paneSizeM.BeginHistoryRead(ctx, request.PaneID, agent.TerminalID)
 		if handle != nil {
 			defer handle.Close()
 		}
 	}
 	retainedUnsafe := s.paneSizeM != nil && s.paneSizeM.HistoryReadUnsafe(request.PaneID, token.identity.terminalID)
-	s.historyPendingMu.Lock()
-	token.pendingSequence = s.pendingReadStartedLocked(request.PaneID, token.identity)
-	s.historyPendingMu.Unlock()
+	if captureShape {
+		s.historyPendingMu.Lock()
+		token.pendingSequence = s.pendingReadStartedLocked(request.PaneID, token.identity)
+		s.historyPendingMu.Unlock()
+	}
 	read, err := readContent(ctx, request)
 	if err != nil {
 		return coordinator.PaneReadResult{}, err
@@ -108,8 +112,7 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		Capture: coordinator.PaneReadCapture{Sequence: token.sequence, TerminalID: token.identity.terminalID, Generation: token.identity.generation}}
 	if handle != nil && geometryErr != nil {
 		response["resize_settling"] = true
-	} else if request.Resized && s.paneSizeM != nil && s.paneSizeM.ResizedWithin(request.PaneID, paneResizeSettleWindow) {
-		response["resize_settling"] = true
+
 	}
 	interaction, _ := response["interaction"].(*question.Interaction)
 	eligible := agent != nil && isClaudeLike(agent.Agent) && request.Format == "ansi" &&

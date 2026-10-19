@@ -2330,8 +2330,7 @@ func sameConversationTuple(left, right *coordinator.AgentState) bool {
 		left.SessionID == right.SessionID
 }
 func isClaudeLike(agent string) bool {
-	lower := strings.ToLower(agent)
-	return strings.Contains(lower, "claude") || strings.Contains(lower, "qoder")
+	return coordinator.IsClaudeLike(agent)
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {

@@ -128,7 +128,7 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 	}
 	context := history.SnapshotContext{TerminalID: token.identity.terminalID, ReadSource: history.SourceLegacy,
 		GeometryEpoch: token.geometry.Epoch, LeaseRevision: token.leaseRevision,
-		Columns: token.geometry.Columns, Rows: token.geometry.Rows}
+		Columns: token.geometry.Columns, Rows: token.geometry.Rows, NoScrollback: agent.UsesNoScrollbackHistory()}
 	if request.Physical {
 		context.ReadSource = history.SourceRecent
 	}

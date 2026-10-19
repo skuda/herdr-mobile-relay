@@ -1241,6 +1241,39 @@ func TestFailedLegacyGeometrySampleRetainsRestoreSettleFence(t *testing.T) {
 	}
 }
 
+func TestLegacyHistoryUnknownSampleKeepsEpoch(t *testing.T) {
+	s, f, _ := captureServer(t, false)
+	page := capturePage("A", "B", "C")
+	executeCapture(t, s, page, false)
+	f.mu.Lock()
+	columns := f.size.Columns
+	f.size.Columns = 0
+	f.mu.Unlock()
+	executeCapture(t, s, page, false)
+	f.mu.Lock()
+	f.size.Columns = columns
+	f.mu.Unlock()
+	result := executeCapture(t, s, page, false)
+	if got := s.historyM.Content("pane-1", 0); got != page || result.Response["content"] != page {
+		t.Fatalf("failed geometry sample duplicated legacy page: %q", got)
+	}
+}
+
+func TestScrollbackMetricGrowthDuringReadRemainsEligible(t *testing.T) {
+	s, _, _ := captureServer(t, false)
+	agent, _ := s.state.Agent("pane-1")
+	agent.ScrollMaxOffset = 10
+	s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+	result, err := s.executeHistoryRead(context.Background(), captureRequest(s, false), func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error) {
+		agent.ScrollMaxOffset = 20
+		s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+		return herdr.PaneRead{Content: []byte(capturePage("A", "B"))}, nil
+	})
+	if err != nil || !result.Capture.Admitted {
+		t.Fatalf("scrollback growth rejected capture: admitted=%v error=%v", result.Capture.Admitted, err)
+	}
+}
+
 func TestHistoryLegacyAdmissionWithUnknownGeometry(t *testing.T) {
 	s, f, _ := captureServer(t, false)
 	f.mu.Lock()

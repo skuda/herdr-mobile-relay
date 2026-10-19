@@ -172,7 +172,7 @@ func (p *Poller) poll(ctx context.Context) {
 	for index := range inv.Panes {
 		pane := &inv.Panes[index]
 		pane.Scroll = nil
-		if current, ok := paneByID[pane.ID]; ok && pane.ID != "" && pane.TerminalID != "" && pane.TerminalID == current.TerminalID {
+		if current, ok := paneByID[pane.ID]; ok && sameScrollTerminal(pane.ID, pane.TerminalID, current.TerminalID) {
 			pane.Scroll = current.Scroll
 		}
 	}

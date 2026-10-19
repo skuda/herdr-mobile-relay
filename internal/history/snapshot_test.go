@@ -398,6 +398,7 @@ func TestFirstRuntimeAdmissionFencesIdenticalNumericEpoch(t *testing.T) {
 		first := NewManager(dir)
 		ctx := physicalContext(1, 40)
 		ctx.ReadSource = source
+		ctx.NoScrollback = true
 		first.MergeSnapshot("p", snapshotPage("A", "B", "old"), ctx)
 		first.SaveAll()
 		restarted := NewManager(dir)

@@ -20,6 +20,7 @@ type SnapshotContext struct {
 	LeaseRevision uint64
 	Columns       int
 	Rows          int
+	NoScrollback  bool
 }
 
 type SnapshotAdmission struct {
@@ -59,8 +60,16 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		m.states[paneID] = state
 		delete(m.lastSave, paneID)
 	}
-	boundary := state.loaded || state.SnapshotVersion != snapshotVersion ||
-		state.ReadSource != context.ReadSource || state.GeometryEpoch != context.GeometryEpoch ||
+	geometryBoundary := context.ReadSource == SourceRecent || context.NoScrollback
+	if context.GeometryEpoch == 0 && state.ReadSource == context.ReadSource {
+		context.GeometryEpoch, context.Columns, context.Rows = state.GeometryEpoch, state.Columns, state.Rows
+	}
+	legacyUpgrade := context.ReadSource == SourceLegacy && !context.NoScrollback && state.SnapshotVersion == 0
+	if legacyUpgrade {
+		state.SegmentStart, state.LiveStart = 0, len(state.History)
+	}
+	boundary := geometryBoundary && state.loaded || state.SnapshotVersion != snapshotVersion && !legacyUpgrade ||
+		state.ReadSource != context.ReadSource || geometryBoundary && state.GeometryEpoch != context.GeometryEpoch ||
 		state.LeaseRevision != context.LeaseRevision
 	if boundary {
 		state.SegmentStart = len(state.History)

@@ -62,8 +62,16 @@ func (a *AgentState) UsesNoScrollbackHistory() bool {
 	if a == nil || !a.ScrollMetricsKnown || a.ScrollMaxOffset != 0 {
 		return false
 	}
-	lower := strings.ToLower(a.Agent)
+	return IsClaudeLike(a.Agent)
+}
+
+func IsClaudeLike(agent string) bool {
+	lower := strings.ToLower(agent)
 	return strings.Contains(lower, "claude") || strings.Contains(lower, "qoder")
+}
+
+func sameScrollTerminal(paneID, terminalID, previousTerminalID string) bool {
+	return paneID != "" && terminalID != "" && terminalID == previousTerminalID
 }
 
 type StatusTransition struct {
@@ -494,7 +502,7 @@ func (s *State) commitTopologyLocked(agents []*AgentState, baseRev int64) {
 		cp.ScrollMetricsKnown = false
 		cp.ScrollMaxOffset = 0
 		existing, exists := s.agents[incoming.PaneID]
-		if exists && cp.PaneID != "" && cp.TerminalID != "" && cp.TerminalID == existing.TerminalID {
+		if exists && sameScrollTerminal(cp.PaneID, cp.TerminalID, existing.TerminalID) {
 			cp.ScrollMetricsKnown = existing.ScrollMetricsKnown
 			cp.ScrollMaxOffset = existing.ScrollMaxOffset
 		}
@@ -645,7 +653,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		s.applyBlockedCycleLocked(&cp, existing)
 		attentionChanged := !blockedDetailsEqual(existing, &cp)
 
-		if !exists || existing.ScrollMetricsKnown != cp.ScrollMetricsKnown || existing.ScrollMaxOffset != cp.ScrollMaxOffset {
+		if !exists || existing.UsesNoScrollbackHistory() != cp.UsesNoScrollbackHistory() {
 			s.scrollMetricsRev[incoming.PaneID] = s.revCounter
 		}
 		if !exists || existing.Status != cp.Status || existing.Name != cp.Name || existing.Cwd != cp.Cwd ||

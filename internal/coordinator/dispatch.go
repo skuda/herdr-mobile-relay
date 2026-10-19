@@ -108,6 +108,7 @@ type PaneReadResult struct {
 type PaneReadOptions struct {
 	Physical       bool
 	SourceRevision uint64
+	FollowerJoined func()
 	Execute        func(context.Context, PaneReadRequest, func(context.Context, PaneReadRequest) (herdr.PaneRead, error)) (PaneReadResult, error)
 }
 
@@ -1244,6 +1245,9 @@ func (d *Dispatcher) handleReadPane(ctx context.Context, message map[string]any,
 		call.followers++
 	}
 	d.readMu.Unlock()
+	if !owner && options.FollowerJoined != nil {
+		options.FollowerJoined()
+	}
 	if owner {
 		executeRead := func(ctx context.Context, request PaneReadRequest) (herdr.PaneRead, error) {
 			if request.Physical {

@@ -53,6 +53,46 @@ func capturePage(body ...string) string {
 	return strings.Join(append(body, "f1", "f2", "f3", "f4", "f5", "f6"), "\n")
 }
 
+type historyCaptureOutcome struct {
+	result coordinator.PaneReadResult
+	err    error
+}
+
+func startHistoryCapture(s *Server, raw string, physical bool) <-chan historyCaptureOutcome {
+	done := make(chan historyCaptureOutcome, 1)
+	go func() {
+		result, err := s.executeHistoryRead(context.Background(), captureRequest(s, physical),
+			func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error) {
+				return herdr.PaneRead{Content: []byte(raw)}, nil
+			})
+		done <- historyCaptureOutcome{result, err}
+	}()
+	return done
+}
+
+func awaitHistorySignal[T any](t *testing.T, signal <-chan T, description string) T {
+	t.Helper()
+	select {
+	case value := <-signal:
+		return value
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+		var zero T
+		return zero
+	}
+}
+
+func awaitHistoryCaptureStart(t *testing.T, entered <-chan struct{}, done <-chan historyCaptureOutcome) {
+	t.Helper()
+	select {
+	case <-entered:
+	case outcome := <-done:
+		t.Fatalf("capture returned before sampling barrier: error=%v capture=%+v", outcome.err, outcome.result.Capture)
+	case <-time.After(3 * time.Second):
+		t.Fatal("capture did not reach sampling barrier")
+	}
+}
+
 func executeCapture(t *testing.T, s *Server, raw string, physical bool) coordinator.PaneReadResult {
 	t.Helper()
 	result, err := s.executeHistoryRead(context.Background(), captureRequest(s, physical),
@@ -250,7 +290,12 @@ func TestTrailingCaptureSurvivesInflightIntervalSettleAndReadError(t *testing.T)
 	s.captureHistoryTick(s.historyNow())
 	advance(4 * time.Second)
 	_, _, _ = s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 70, 20)
+	last := s.historyLast["pane-1"]
 	s.captureHistoryTick(s.historyNow())
+	waitHistoryCapture(t, s)
+	if s.historyLast["pane-1"] != last {
+		t.Fatal("deferral changed last capture time")
+	}
 	if s.historyPending["pane-1"].attempts != 0 {
 		t.Fatal("deferral consumed a read attempt")
 	}
@@ -428,13 +473,16 @@ func TestSharedReadPendingAcknowledgement(t *testing.T) {
 			if mode != "created after sample" {
 				pendingDeparture(s, 10)
 			}
-			entered, release := make(chan struct{}), make(chan struct{})
+			entered, release, joined := make(chan struct{}), make(chan struct{}), make(chan struct{}, 2)
+			var enteredOnce, releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(unblock)
 			s.dispatcher = coordinator.NewDispatcher(nil, s.state, nil, s.logger)
 			var reads atomic.Int32
-			options := coordinator.PaneReadOptions{Execute: func(ctx context.Context, request coordinator.PaneReadRequest, _ func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error)) (coordinator.PaneReadResult, error) {
+			options := coordinator.PaneReadOptions{FollowerJoined: func() { joined <- struct{}{} }, Execute: func(ctx context.Context, request coordinator.PaneReadRequest, _ func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error)) (coordinator.PaneReadResult, error) {
 				reads.Add(1)
 				return s.executeHistoryRead(ctx, request, func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error) {
-					close(entered)
+					enteredOnce.Do(func() { close(entered) })
 					<-release
 					if mode == "cancelled" {
 						return herdr.PaneRead{}, context.Canceled
@@ -452,7 +500,7 @@ func TestSharedReadPendingAcknowledgement(t *testing.T) {
 				results <- capture
 			}
 			go read()
-			<-entered
+			awaitHistorySignal(t, entered, "owner read start")
 			if mode == "created after sample" {
 				pendingDeparture(s, 10)
 			}
@@ -461,11 +509,13 @@ func TestSharedReadPendingAcknowledgement(t *testing.T) {
 			}
 			go read()
 			go read()
-			time.Sleep(20 * time.Millisecond)
-			close(release)
+			for range 2 {
+				awaitHistorySignal(t, joined, "follower attachment")
+			}
+			unblock()
 			var first coordinator.PaneReadCapture
 			for index := range 3 {
-				capture := <-results
+				capture := awaitHistorySignal(t, results, "shared capture result")
 				if index == 0 {
 					first = capture
 				} else if capture != first {
@@ -771,16 +821,28 @@ func TestHistoryReadRejectsScrollMetricCycle(t *testing.T) {
 	}
 }
 
+func TestAsyncHistoryCaptureReturnsClosedError(t *testing.T) {
+	s, _, _ := captureServer(t, true)
+	s.historyClosed = true
+	outcome := awaitHistorySignal(t, startHistoryCapture(s, capturePage("A", "B"), true), "closed capture result")
+	if !errors.Is(outcome.err, context.Canceled) {
+		t.Fatalf("closed capture error=%v", outcome.err)
+	}
+}
+
 func TestFinishedReadPublishesOldEpochAfterLaterResize(t *testing.T) {
 	s, _, advance := captureServer(t, true)
-	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan coordinator.PaneReadResult, 1)
-	s.historyReadFinishedObserver = func(historyReadToken) { close(entered); <-release }
-	go func() { done <- executeCapture(t, s, capturePage("old A", "old B"), true) }()
-	<-entered
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enteredOnce, releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	s.historyReadFinishedObserver = func(historyReadToken) { enteredOnce.Do(func() { close(entered) }); <-release }
+	done := startHistoryCapture(s, capturePage("old A", "old B"), true)
+	awaitHistoryCaptureStart(t, entered, done)
 	_, _, _ = s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 70, 20)
-	close(release)
-	if result := <-done; !result.Capture.Admitted {
-		t.Fatal("finished old epoch was rejected")
+	unblock()
+	if outcome := awaitHistorySignal(t, done, "finished old epoch"); outcome.err != nil || !outcome.result.Capture.Admitted {
+		t.Fatalf("finished old epoch was rejected: error=%v capture=%+v", outcome.err, outcome.result.Capture)
 	}
 	s.historyReadFinishedObserver = nil
 	advance(4 * time.Second)
@@ -819,7 +881,9 @@ func TestSingleFlightOwnerAdmitsOnceForSeveralFollowers(t *testing.T) {
 		}
 	})
 	physical, revision := s.physicalHistorySource(captureRequest(s, true).Agent)
-	options := coordinator.PaneReadOptions{Physical: physical, SourceRevision: revision, Execute: s.executeHistoryRead}
+	joined := make(chan struct{}, 5)
+	options := coordinator.PaneReadOptions{Physical: physical, SourceRevision: revision, Execute: s.executeHistoryRead,
+		FollowerJoined: func() { joined <- struct{}{} }}
 	type readResult struct {
 		response map[string]any
 		capture  coordinator.PaneReadCapture
@@ -835,18 +899,16 @@ func TestSingleFlightOwnerAdmitsOnceForSeveralFollowers(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("owner did not start")
 	}
-	started := make(chan struct{}, 5)
 	for range 5 {
-		go func() { started <- struct{}{}; read() }()
+		go read()
 	}
 	for range 5 {
-		<-started
+		awaitHistorySignal(t, joined, "follower attachment")
 	}
-	time.Sleep(20 * time.Millisecond)
 	unblock()
 	var owner coordinator.PaneReadCapture
 	for index := range 6 {
-		result := <-results
+		result := awaitHistorySignal(t, results, "shared read result")
 		if result.response["error"] != nil {
 			t.Fatalf("shared read failed: %+v", result.response)
 		}
@@ -926,7 +988,8 @@ func TestSingleFlightFollowerCannotRelabelOlderSnapshot(t *testing.T) {
 	if !on {
 		t.Fatal("fixture does not have physical source")
 	}
-	options := coordinator.PaneReadOptions{Physical: true, SourceRevision: revision,
+	joined := make(chan struct{}, 1)
+	options := coordinator.PaneReadOptions{Physical: true, SourceRevision: revision, FollowerJoined: func() { joined <- struct{}{} },
 		Execute: func(ctx context.Context, request coordinator.PaneReadRequest, _ func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error)) (coordinator.PaneReadResult, error) {
 			if request.Lines != 1000 {
 				t.Errorf("owner capture count=%d", request.Lines)
@@ -960,20 +1023,14 @@ func TestSingleFlightFollowerCannotRelabelOlderSnapshot(t *testing.T) {
 	if !newer.Capture.Admitted || newer.Capture.Sequence != 2 {
 		t.Fatalf("background C capture=%+v", newer.Capture)
 	}
-	followerStarted := make(chan struct{})
 	go func() {
-		close(followerStarted)
 		response, capture := s.dispatcher.HandleReadPaneWithOptions(context.Background(), message(), options)
 		followerDone <- callerResult{response, capture}
 	}()
-	<-followerStarted
-	select {
-	case <-followerDone:
-		t.Fatal("follower returned before owner release")
-	case <-time.After(20 * time.Millisecond):
-	}
+	awaitHistorySignal(t, joined, "follower attachment")
 	release()
-	owner, follower := <-ownerDone, <-followerDone
+	owner := awaitHistorySignal(t, ownerDone, "owner response")
+	follower := awaitHistorySignal(t, followerDone, "follower response")
 	if ownerCalls.Load() != 1 || owner.capture.Sequence != 1 || follower.capture != owner.capture || follower.response["content"] != pageP {
 		t.Fatalf("owner=%+v follower=%+v underlying calls=%d", owner.capture, follower.capture, ownerCalls.Load())
 	}
@@ -990,20 +1047,23 @@ func TestSingleFlightFollowerCannotRelabelOlderSnapshot(t *testing.T) {
 
 func TestNewerArchivedReadRejectsOlderFinishedCompletion(t *testing.T) {
 	s, _, _ := captureServer(t, true)
-	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan coordinator.PaneReadResult, 1)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enteredOnce, releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
 	s.historyReadFinishedObserver = func(token historyReadToken) {
 		if token.sequence == 1 {
-			close(entered)
+			enteredOnce.Do(func() { close(entered) })
 			<-release
 		}
 	}
-	go func() { done <- executeCapture(t, s, capturePage("old A", "old B"), true) }()
-	<-entered
+	done := startHistoryCapture(s, capturePage("old A", "old B"), true)
+	awaitHistoryCaptureStart(t, entered, done)
 	newer := executeCapture(t, s, capturePage("new A", "new B"), true)
-	close(release)
-	older := <-done
-	if !newer.Capture.Admitted || older.Capture.Admitted || older.Capture.Sequence >= newer.Capture.Sequence {
-		t.Fatalf("older=%+v newer=%+v", older.Capture, newer.Capture)
+	unblock()
+	older := awaitHistorySignal(t, done, "older finished completion")
+	if older.err != nil || !newer.Capture.Admitted || older.result.Capture.Admitted || older.result.Capture.Sequence >= newer.Capture.Sequence {
+		t.Fatalf("older=%+v error=%v newer=%+v", older.result.Capture, older.err, newer.Capture)
 	}
 	if got := s.historyM.Content("pane-1", 0); got != capturePage("new A", "new B") {
 		t.Fatalf("stale publication changed history: %q", got)

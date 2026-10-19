@@ -262,8 +262,9 @@ and a five-actual-attempt bound. Native Conversation responses do not clear a
 separate pending terminal request. Dirty history has a scheduled save deadline:
 the first save is due immediately, later changes are due at the last successful
 save plus `SaveInterval=10s`, and write failures retain dirty state for retry.
-Shutdown closes admission, joins capture/persistence work, and saves admitted
-state. A crash before a successful save can still lose recent samples.
+Shutdown closes admission, joins capture/persistence work, and saves dirty
+state without waiting for its deadline. Clean loaded caches remain unchanged.
+A crash before a successful save can still lose recent samples.
 
 Physical and no-scrollback history becomes a frozen prefix at its first
 runtime admission after restart, even if numeric PTY epochs and lease revisions

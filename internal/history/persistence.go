@@ -26,7 +26,7 @@ func (m *Manager) flush(now time.Time, force bool) error {
 	m.mu.Lock()
 	var jobs []persistenceJob
 	for paneID, state := range m.states {
-		if !force && (!state.dirty || now.Before(state.saveDue)) {
+		if !state.dirty || !force && now.Before(state.saveDue) {
 			continue
 		}
 		snapshot := *state

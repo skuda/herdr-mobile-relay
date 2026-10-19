@@ -50,6 +50,68 @@ func TestDirtyHistoryFlushesAtSaveDeadlineWithoutNewFrames(t *testing.T) {
 	}
 }
 
+func TestSaveAllPreservesUnadmittedOldFormatCache(t *testing.T) {
+	for _, load := range []string{"rejected preview", "empty admission"} {
+		t.Run(load, func(t *testing.T) {
+			root := t.TempDir()
+			m := NewManager(root)
+			data := []byte(`{"history":["A","B","C"],"footer":[],"stale_refusals":0,"last_hash":""}`)
+			if err := os.WriteFile(m.stateFile("p"), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy}
+			page := snapshotPage("A", "B", "C")
+			if load == "rejected preview" {
+				if _, accepted := m.PreviewSnapshot("p", page, ctx); accepted {
+					t.Fatal("preview unexpectedly accepted the terminal identity")
+				}
+			} else if _, _, admission := m.AdmitSnapshot("p", "", ctx, 0); admission.Admitted {
+				t.Fatal("empty snapshot was admitted")
+			}
+			if err := m.SaveAll(); err != nil {
+				t.Fatal(err)
+			}
+			saved, err := os.ReadFile(m.stateFile("p"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(saved) != string(data) {
+				t.Errorf("SaveAll changed unadmitted old-format cache: got %s, want %s", saved, data)
+			}
+			restarted := NewManager(root)
+			if got := restarted.MergeSnapshot("p", page, ctx); got != page {
+				t.Fatalf("scrollback restart duplicated old-format body: %q", got)
+			}
+		})
+	}
+}
+
+func TestSaveAllWritesDirtyStateBeforeDeadline(t *testing.T) {
+	root := t.TempDir()
+	m := NewManager(root)
+	now := time.Unix(10000, 0)
+	m.now = func() time.Time { return now }
+	m.Merge("p", snapshotPage("A", "B"))
+	if err := m.FlushDue(now); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Second)
+	page := snapshotPage("B", "C")
+	want := m.Merge("p", page)
+	if state := m.states["p"]; !state.dirty || !state.saveDue.After(now) {
+		t.Fatalf("expected dirty state with future save deadline: %+v", state)
+	}
+	if err := m.SaveAll(); err != nil {
+		t.Fatal(err)
+	}
+	if m.states["p"].dirty {
+		t.Fatal("SaveAll left the saved state dirty")
+	}
+	if got := NewManager(root).Content("p", 0); got != want {
+		t.Fatalf("SaveAll missed the future-deadline mutation: got %q, want %q", got, want)
+	}
+}
+
 func TestPersistenceReportsChangedFailureAndRecovery(t *testing.T) {
 	m := NewManager(t.TempDir())
 	m.Merge("p", snapshotPage("A", "B"))

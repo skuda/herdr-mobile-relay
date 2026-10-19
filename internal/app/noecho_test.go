@@ -28,7 +28,7 @@ func TestReadPaneResponseFlagsNoEchoPromptOnMergedContent(t *testing.T) {
 	s.syncHistoryPanes()
 	raw := response["content"].(string)
 	installPaneReadFixture(t, s, func(context.Context) (string, error) { return raw, nil })
-	response = s.readPaneResponse(context.Background(), map[string]any{"pane_id": "pane-1", "lines": 100, "format": "ansi"})
+	response = fitPaneContentResponse(s.readPaneResponse(context.Background(), map[string]any{"pane_id": "pane-1", "lines": 100, "format": "ansi"}))
 
 	merged, ok := response["content"].(string)
 	if !ok || !strings.HasSuffix(strings.TrimSpace(merged), "[sudo] password for cv:") {
@@ -54,7 +54,7 @@ func TestReadPaneResponseMarksOrdinaryFramesAsEchoing(t *testing.T) {
 	}
 	raw := response["content"].(string)
 	installPaneReadFixture(t, s, func(context.Context) (string, error) { return raw, nil })
-	response = s.readPaneResponse(context.Background(), map[string]any{"pane_id": "pane-2", "lines": 100, "format": "ansi"})
+	response = fitPaneContentResponse(s.readPaneResponse(context.Background(), map[string]any{"pane_id": "pane-2", "lines": 100, "format": "ansi"}))
 
 	if response["no_echo"] != false {
 		t.Fatalf("no_echo = %#v, want false", response["no_echo"])

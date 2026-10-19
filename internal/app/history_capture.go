@@ -7,7 +7,6 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
-	"github.com/0cv/herdr-mobile-relay/internal/noecho"
 	"github.com/0cv/herdr-mobile-relay/internal/panesize"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
@@ -22,7 +21,6 @@ type historyReadToken struct {
 	paneID          string
 	identity        historyIdentity
 	sequence        uint64
-	physical        bool
 	leaseRevision   uint64
 	geometry        panesize.HistoryGeometry
 	pendingSequence uint64
@@ -48,7 +46,7 @@ func (s *Server) readPaneResponse(ctx context.Context, message map[string]any) m
 	if target, ok := message["target"]; ok {
 		response["target"] = target
 	}
-	return fitPaneContentResponse(response)
+	return response
 }
 
 func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.PaneReadRequest,
@@ -63,7 +61,7 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		}
 		return coordinator.PaneReadResult{Read: read, Response: s.classifyRawPane(request.PaneID, string(read.Content), request.Format)}, nil
 	}
-	token := historyReadToken{paneID: request.PaneID, physical: request.Physical}
+	token := historyReadToken{paneID: request.PaneID}
 	if agent != nil {
 		token.identity = historyIdentity{terminalID: agent.TerminalID, generation: request.Generation}
 	}
@@ -190,11 +188,6 @@ func (s *Server) classifyRawPane(paneID, content, format string) map[string]any 
 			s.state.RecordCustomAnswer(paneID, interaction.Question, text)
 		}
 		question.FillCustomAnswers(interaction, s.state.CustomAnswers(paneID))
-	}
-	prompt, secret := noecho.Match(content)
-	response["no_echo"] = secret
-	if secret {
-		response["no_echo_prompt"] = prompt
 	}
 	return response
 }

@@ -10,6 +10,20 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/panesize"
 )
 
+func TestPaneReadDefersNoEchoUntilFinalFitting(t *testing.T) {
+	s, _, _ := captureServer(t, false)
+	installPaneReadFixture(t, s, func(context.Context) (string, error) { return "[sudo] password for cv:", nil })
+	response := s.readPaneResponse(context.Background(), map[string]any{"pane_id": "pane-1", "format": "ansi"})
+	if _, exists := response["no_echo"]; exists {
+		t.Fatal("intermediate pane response computed no-echo before final fitting")
+	}
+	response["target"] = "final target"
+	response = fitPaneContentResponse(response)
+	if response["no_echo"] != true {
+		t.Fatal("final fitting omitted no-echo state")
+	}
+}
+
 func TestRejectedWatchRetryStopsAfterStableRead(t *testing.T) {
 	s, _, advance := captureServer(t, true)
 	executeCapture(t, s, capturePage("archive A", "archive B"), true)

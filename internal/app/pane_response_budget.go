@@ -13,11 +13,8 @@ const PaneResponseBudgetBytes = transport.MaxOutboundMessageBytes - 64*1024
 
 // paneResponseFits reserves the fingerprint and watch acknowledgement before encoding.
 func paneResponseFits(response map[string]any) bool {
-	candidate := make(map[string]any, len(response)+3)
-	for key, value := range response {
-		candidate[key] = value
-	}
-	candidate["content_fingerprint"] = "0123456789abcdef"
+	candidate := cloneStringMap(response)
+	candidate["content_fingerprint"] = paneFingerprint("")
 	candidate["ack_required"] = true
 	encoded, err := json.Marshal(candidate)
 	return err == nil && len(encoded) <= PaneResponseBudgetBytes
@@ -28,7 +25,6 @@ func fittedPaneDelta(response map[string]any, base string, segments []panedelta.
 	if paneResponseFits(delta) {
 		return delta
 	}
-	response = fitPaneContentResponse(response)
 	response["ack_required"] = true
 	return response
 }

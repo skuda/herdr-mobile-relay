@@ -1215,7 +1215,7 @@ func (d *Dispatcher) handleReadPane(ctx context.Context, message map[string]any,
 		return map[string]any{"type": "pane_content", "pane_id": "", "content": "", "format": "text"}, PaneReadCapture{}
 	}
 	d.handleAcknowledge(stringValue(message, "request_id"), paneID)
-	lines := min(10000, max(1, intValue(message["lines"], 30)))
+	lines := min(history.MaxLines, max(1, intValue(message["lines"], 30)))
 	format := stringValue(message, "format")
 	if format != "ansi" {
 		format = "text"
@@ -1296,10 +1296,7 @@ func (d *Dispatcher) handleReadPane(ctx context.Context, message map[string]any,
 	}
 	limited := content
 	if call.result.Capture.Admitted || call.result.Composed {
-		rows := strings.Split(content, "\n")
-		if len(rows) > lines {
-			limited = strings.Join(rows[len(rows)-lines:], "\n")
-		}
+		limited, _ = history.LimitSnapshotContent(content, lines)
 	} else {
 		limited = string(capPaneContentLines([]byte(content), lines))
 	}

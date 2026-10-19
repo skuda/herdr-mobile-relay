@@ -147,6 +147,10 @@ func (state *PaneState) setSnapshotContext(context SnapshotContext) {
 	state.Columns, state.Rows = context.Columns, context.Rows
 }
 
+func LimitSnapshotContent(content string, limit int) (string, bool) {
+	return limitSnapshotLines(strings.Split(content, "\n"), limit)
+}
+
 func limitSnapshotLines(lines []string, limit int) (string, bool) {
 	clipped := limit > 0 && len(lines) > limit
 	if clipped {

@@ -144,7 +144,12 @@ type Server struct {
 	paneWatchMu sync.Mutex
 	paneWatches map[string]*paneWatch
 
+	// Lock order: historyCaptureMu -> historyPendingMu. Admission and discard
+	// hold historyCaptureMu; pending bookkeeping does not perform file I/O.
 	historyCaptureMu         sync.Mutex
+	historyPendingMu         sync.Mutex
+	historyPendingActive     map[string]historyIdentity
+	historyPendingClosed     bool
 	historyInflight          map[string]bool
 	historyLast              map[string]time.Time
 	historyActive            map[string]historyIdentity
@@ -1556,6 +1561,9 @@ func canonicalHTTPPath(raw string) bool {
 func (s *Server) drainLifecycleWork() {
 	s.historyCaptureMu.Lock()
 	s.historyClosed = true
+	s.historyPendingMu.Lock()
+	s.historyPendingClosed = true
+	s.historyPendingMu.Unlock()
 	s.historyCaptureMu.Unlock()
 	s.state.SetOnTransition(nil)
 	s.state.SetOnStatusTransition(nil)
@@ -2205,6 +2213,8 @@ func (s *Server) syncHistorySnapshot(snapshot coordinator.InventorySnapshot) {
 	for paneID, identity := range active {
 		s.historyActive[paneID] = identity
 	}
+	s.historyPendingMu.Lock()
+	s.historyPendingActive = active
 	for paneID, pending := range s.historyPending {
 		if pending.revision > snapshot.Revision {
 			continue
@@ -2216,6 +2226,7 @@ func (s *Server) syncHistorySnapshot(snapshot coordinator.InventorySnapshot) {
 			pending.identity = identity
 		}
 	}
+	s.historyPendingMu.Unlock()
 	s.historyCaptureMu.Unlock()
 	if s.paneSizeM != nil {
 		for paneID, terminalID := range forgotten {

@@ -23,18 +23,18 @@ type pendingHistoryCapture struct {
 
 // enqueueHistoryTransition records accepted departures without coordinator lookups or pane reads.
 func (s *Server) enqueueHistoryTransition(event coordinator.StatusTransition) {
-	s.historyCaptureMu.Lock()
-	defer s.historyCaptureMu.Unlock()
-	if s.historyClosed {
+	if event.OldStatus != "working" && event.OldStatus != "blocked" || event.NewStatus == "working" || event.NewStatus == "blocked" {
+		return
+	}
+	s.historyPendingMu.Lock()
+	defer s.historyPendingMu.Unlock()
+	if s.historyPendingClosed {
 		return
 	}
 	if event.Revision <= s.historyStatusRevision[event.PaneID] {
 		return
 	}
-	if active, ok := s.historyActive[event.PaneID]; ok && (event.Generation < active.generation || event.Generation == active.generation && active.terminalID != event.TerminalID) {
-		return
-	}
-	if event.OldStatus != "working" && event.OldStatus != "blocked" || event.NewStatus == "working" || event.NewStatus == "blocked" {
+	if active, ok := s.historyPendingActive[event.PaneID]; ok && (event.Generation < active.generation || event.Generation == active.generation && active.terminalID != event.TerminalID) {
 		return
 	}
 	s.historyStatusRevision[event.PaneID] = event.Revision
@@ -58,16 +58,20 @@ func (s *Server) captureHistoryTick(now time.Time) {
 			candidates[agent.PaneID] = true
 		}
 	}
-	s.historyCaptureMu.Lock()
+	var expired []string
+	s.historyPendingMu.Lock()
 	for paneID, pending := range s.historyPending {
 		if now.Sub(pending.queued) >= trailingCaptureLifetime || pending.attempts >= trailingCaptureAttempts {
 			delete(s.historyPending, paneID)
-			s.logger.Warn("trailing pane capture expired", "pane_id", paneID)
+			expired = append(expired, paneID)
 			continue
 		}
 		candidates[paneID] = true
 	}
-	s.historyCaptureMu.Unlock()
+	s.historyPendingMu.Unlock()
+	for _, paneID := range expired {
+		s.logger.Warn("trailing pane capture expired", "pane_id", paneID)
+	}
 	for paneID := range candidates {
 		s.scheduleHistoryCapture(context.Background(), paneID)
 	}

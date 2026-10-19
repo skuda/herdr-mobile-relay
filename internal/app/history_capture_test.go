@@ -821,9 +821,54 @@ func TestHistoryReadRejectsScrollMetricCycle(t *testing.T) {
 	}
 }
 
+func TestHistoryBookkeepingDoesNotWaitForPublication(t *testing.T) {
+	for _, operation := range []string{"status transition", "non-Claude read"} {
+		t.Run(operation, func(t *testing.T) {
+			s, _, _ := captureServer(t, false)
+			s.state.SetOnStatusTransition(s.enqueueHistoryTransition)
+			if operation == "non-Claude read" {
+				agent, _ := s.state.Agent("pane-1")
+				agent.Agent = "codex"
+				s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+				s.syncHistoryPanes(s.state.Snapshot())
+			}
+			s.historyCaptureMu.Lock()
+			var once sync.Once
+			release := func() { once.Do(s.historyCaptureMu.Unlock) }
+			t.Cleanup(release)
+			done := make(chan error, 1)
+			go func() {
+				if operation == "status transition" {
+					s.state.CommitEvent("pane-1", "idle", 1)
+					done <- nil
+					return
+				}
+				result, err := s.executeHistoryRead(context.Background(), captureRequest(s, false), func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error) {
+					return herdr.PaneRead{Content: []byte("codex raw")}, nil
+				})
+				if err == nil && (result.Response["content"] != "codex raw" || result.Capture.Sequence != 0) {
+					err = fmt.Errorf("non-Claude history bookkeeping: %+v", result)
+				}
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				release()
+				awaitHistorySignal(t, done, "blocked bookkeeping cleanup")
+				t.Fatal("history bookkeeping waited for publication mutex")
+			}
+			release()
+		})
+	}
+}
+
 func TestAsyncHistoryCaptureReturnsClosedError(t *testing.T) {
 	s, _, _ := captureServer(t, true)
-	s.historyClosed = true
+	s.historyPendingClosed = true
 	outcome := awaitHistorySignal(t, startHistoryCapture(s, capturePage("A", "B"), true), "closed capture result")
 	if !errors.Is(outcome.err, context.Canceled) {
 		t.Fatalf("closed capture error=%v", outcome.err)

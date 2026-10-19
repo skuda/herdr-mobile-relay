@@ -55,18 +55,25 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 ) (coordinator.PaneReadResult, error) {
 	scrollMetricsRevision := s.state.ScrollMetricsRevision(request.PaneID)
 	agent := request.Agent
+	if agent == nil || !isClaudeLike(agent.Agent) {
+		read, err := readContent(ctx, request)
+		if err != nil {
+			return coordinator.PaneReadResult{}, err
+		}
+		return coordinator.PaneReadResult{Read: read, Response: s.classifyRawPane(request.PaneID, string(read.Content), request.Format)}, nil
+	}
 	token := historyReadToken{paneID: request.PaneID, physical: request.Physical}
 	if agent != nil {
 		token.identity = historyIdentity{terminalID: agent.TerminalID, generation: request.Generation}
 	}
-	s.historyCaptureMu.Lock()
-	if s.historyClosed {
-		s.historyCaptureMu.Unlock()
+	s.historyPendingMu.Lock()
+	if s.historyPendingClosed {
+		s.historyPendingMu.Unlock()
 		return coordinator.PaneReadResult{}, context.Canceled
 	}
 	s.historySequence++
 	token.sequence = s.historySequence
-	s.historyCaptureMu.Unlock()
+	s.historyPendingMu.Unlock()
 	physicalAtStart, leaseRevision := s.physicalHistorySource(agent)
 	token.leaseRevision = leaseRevision
 	var handle *panesize.HistoryRead
@@ -78,9 +85,9 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		}
 	}
 	retainedUnsafe := s.paneSizeM != nil && s.paneSizeM.HistoryReadUnsafe(request.PaneID, token.identity.terminalID)
-	s.historyCaptureMu.Lock()
+	s.historyPendingMu.Lock()
 	token.pendingSequence = s.pendingReadStartedLocked(request.PaneID, token.identity)
-	s.historyCaptureMu.Unlock()
+	s.historyPendingMu.Unlock()
 	read, err := readContent(ctx, request)
 	if err != nil {
 		return coordinator.PaneReadResult{}, err
@@ -144,7 +151,9 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		response["content"] = content
 		result.Capture.Admitted = true
 		s.historyArchived[request.PaneID] = token.sequence
+		s.historyPendingMu.Lock()
 		s.acknowledgeHistoryLocked(token)
+		s.historyPendingMu.Unlock()
 	}
 	return result, nil
 }

@@ -181,9 +181,11 @@ func (m *Manager) BeginHistoryRead(ctx context.Context, paneID, terminalID strin
 		return nil, ErrClosed
 	}
 	var identity terminalIdentity
-	if cached := m.historyGeometry[paneID]; cached != nil && cached.identity.terminalID == terminalID {
-		cached.forgotten = false
+	cached := m.historyGeometry[paneID]
+	if cached != nil && cached.identity.terminalID == terminalID {
 		identity = cached.identity
+	} else {
+		cached = nil
 	}
 	m.mu.Unlock()
 
@@ -203,6 +205,23 @@ func (m *Manager) BeginHistoryRead(ctx context.Context, paneID, terminalID strin
 		return nil, gone("history terminal was replaced")
 	}
 	terminal, err := m.openValidated(opCtx, paneID, &identity, capture)
+	if err != nil && cached != nil && errors.Is(err, ErrTerminalGone) {
+		m.mu.Lock()
+		current := m.historyGeometry[paneID] == cached
+		if current {
+			delete(m.historyGeometry, paneID)
+		}
+		m.mu.Unlock()
+		if current {
+			identity, err = m.lookupIdentity(opCtx, paneID)
+			if err == nil && identity.terminalID != terminalID {
+				err = gone("history terminal was replaced")
+			}
+			if err == nil {
+				terminal, err = m.openValidated(opCtx, paneID, &identity, true)
+			}
+		}
+	}
 	if err != nil {
 		m.historyUnknown(paneID, terminalID)
 		return nil, err
@@ -212,6 +231,11 @@ func (m *Manager) BeginHistoryRead(ctx context.Context, paneID, terminalID strin
 		m.mu.Unlock()
 		_ = terminal.Close()
 		return nil, ErrClosed
+	}
+	if current := m.historyGeometry[paneID]; current != nil && current != cached && current.identity != identity {
+		m.mu.Unlock()
+		_ = terminal.Close()
+		return nil, ErrHistoryReadUnsafe
 	}
 	state := m.historyStateLocked(paneID, identity)
 	revision := state.geometry.Revision

@@ -555,6 +555,23 @@ func TestForgetHistoryPaneRetainsResizeAndSettleFence(t *testing.T) {
 	}
 }
 
+func TestHistoryReadRefreshesCachedRespawnIdentity(t *testing.T) {
+	f := newFixture(t)
+	f.addPane("p", 100, "/dev/pts/1", 1)
+	stale := historyRead(t, f, "p")
+	f.herdr.update("p", func(p *fakePane) { p.shellPID = 200 })
+	f.ttys.set(200, "/dev/pts/2")
+	f.ops.put("/dev/pts/2", &fakeDevice{rdev: 2, char: true, size: Winsize{Columns: 90, Rows: 30}})
+	fresh, err := f.m.BeginHistoryRead(context.Background(), "p", "terminal-p")
+	if err != nil {
+		t.Fatalf("cached respawn identity did not refresh: %v", err)
+	}
+	if geometry := finishSafe(t, fresh); geometry.Columns != 90 {
+		t.Fatalf("fresh geometry=%+v", geometry)
+	}
+	finishUnsafe(t, stale)
+}
+
 func TestForgottenHistoryGeometryReapedAfterSettling(t *testing.T) {
 	for _, phase := range []string{"settling", "in progress"} {
 		t.Run(phase, func(t *testing.T) {

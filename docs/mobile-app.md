@@ -302,15 +302,15 @@ This is sampled history, not a complete transcript. Source changes start
 segments for each pane. Lease changes, observed PTY changes, and relay restarts
 start segments for physical and known-zero no-scrollback contexts. These
 boundaries can repeat one page. Panes with scrollback keep legacy matching
-across leases, PTY resizes, and relay restarts. Sampling gaps and the three-second
-resize-settling pause can lose output. The six-row footer split is a heuristic;
-up to three content-tail rows before trailing blank padding can change in place
-without archiving their old text. Retained desktop rows can wrap unevenly. PTY
-epochs do not detect emulator-grid or pixel-only changes, and a narrower Herdr
-grid can clip rows. The absence of an older-history notice does not establish
-that omitted samples or replaced tails were retained. For direct reads, an
-unchanged-content response can keep an earlier truncation notice until a content
-change or watch frame updates it.
+across leases, PTY resizes, and relay restarts. Sampling gaps and the
+three-second resize-settling pause can lose output. The six-row footer split is
+a heuristic; up to three content-tail rows before trailing blank padding can
+change in place without archiving their old text. Retained desktop rows can
+wrap unevenly. PTY epochs do not detect emulator-grid or pixel-only changes,
+and a narrower Herdr grid can clip rows. The absence of an older-history notice
+does not establish that omitted samples or replaced tails were retained. For
+direct reads, an unchanged-content response can keep an earlier truncation
+notice until a content change or watch frame updates it.
 
 Footer updates refresh without a body change. Dirty admitted pages save on a
 deadline even after output stops. Physical and no-scrollback history starts a

@@ -177,8 +177,9 @@ boundary and a settling pause.
 While the gate and heuristic qualify, display, background, and completion
 fallback captures request ANSI `recent` with `PhysicalCaptureLines=1000`.
 A non-leasing reader of the same pane uses that source too. Reader preferences
-of 100, 500, 1,000, or 10,000 rows limit the response after archival; they do not
-change the physical capture shape. The retained body is bounded by `MaxLines=10000`.
+of 100, 500, 1,000, or 10,000 rows limit the response after archival; they do
+not change the physical capture shape. The retained body is bounded by
+`MaxLines=10000`.
 
 Before lease activation and after restore cleanup, Claude reads return to
 `ReadPane` (`recent-unwrapped`) and the legacy active-segment matcher. Qoder

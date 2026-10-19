@@ -50,6 +50,37 @@ func TestFullscreenLegacyRetainsResizeAndRestartBoundaries(t *testing.T) {
 	}
 }
 
+func TestScrollbackLegacyInvalidSnapshotKeepsFrozenPrefix(t *testing.T) {
+	for name, metadata := range map[string]string{
+		"unknown version":      `"snapshot_version":99,"read_source":"legacy","live_start":3`,
+		"invalid offsets":      `"snapshot_version":1,"read_source":"legacy","segment_start":-1,"live_start":3`,
+		"unknown source":       `"snapshot_version":1,"read_source":"unknown","live_start":3`,
+		"version zero source":  `"read_source":"legacy"`,
+		"version zero segment": `"segment_start":1`,
+		"version zero live":    `"live_start":3`,
+		"version zero epoch":   `"geometry_epoch":1`,
+		"version zero lease":   `"lease_revision":1`,
+		"version zero columns": `"columns":80`,
+		"version zero rows":    `"rows":24`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := NewManager(t.TempDir())
+			data := []byte(`{"history":["A","B","retained"],"terminal_id":"terminal-1",` + metadata + `}`)
+			if err := os.WriteFile(m.stateFile("p"), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy}
+			page := snapshotPage("A", "B", "new")
+			for range 2 {
+				assertSnapshotContent(t, m.MergeSnapshot("p", page, ctx), "A", "B", "retained", "A", "B", "new")
+				if state := m.states["p"]; state.SegmentStart != 3 {
+					t.Fatalf("invalid metadata reopened the frozen prefix: %+v", state)
+				}
+			}
+		})
+	}
+}
+
 func TestScrollbackLegacyMatchesAcrossLeaseRevisions(t *testing.T) {
 	for _, oldFormat := range []bool{false, true} {
 		for _, resize := range []bool{false, true} {

@@ -38,6 +38,7 @@ type PaneState struct {
 	LiveStart       int      `json:"live_start,omitempty"`
 
 	loaded          bool
+	snapshotInvalid bool
 	dirty           bool
 	mutationVersion uint64
 	saveDue         time.Time

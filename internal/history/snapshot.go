@@ -85,7 +85,7 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 	if context.GeometryEpoch == 0 && state.ReadSource == context.ReadSource {
 		context.GeometryEpoch, context.Columns, context.Rows = state.GeometryEpoch, state.Columns, state.Rows
 	}
-	legacyUpgrade := context.ReadSource == SourceLegacy && !context.NoScrollback && state.SnapshotVersion == 0
+	legacyUpgrade := context.ReadSource == SourceLegacy && !context.NoScrollback && state.SnapshotVersion == 0 && !state.snapshotInvalid
 	if legacyUpgrade {
 		state.SegmentStart, state.LiveStart = 0, len(state.History)
 	}
@@ -140,6 +140,7 @@ func (state *PaneState) snapshotContext() SnapshotContext {
 
 func (state *PaneState) setSnapshotContext(context SnapshotContext) {
 	state.SnapshotVersion = snapshotVersion
+	state.snapshotInvalid = false
 	if context.TerminalID != "" {
 		state.TerminalID = context.TerminalID
 	}
@@ -167,11 +168,15 @@ func trimSnapshotState(state *PaneState) {
 }
 
 func validateSnapshotState(state *PaneState) {
+	legacyFormat := state.SnapshotVersion == 0 && state.ReadSource == "" &&
+		state.SegmentStart == 0 && state.LiveStart == 0 && state.GeometryEpoch == 0 &&
+		state.LeaseRevision == 0 && state.Columns == 0 && state.Rows == 0
 	if state.SnapshotVersion == snapshotVersion &&
 		(state.ReadSource == SourceRecent || state.ReadSource == SourceLegacy) &&
 		state.SegmentStart >= 0 && state.SegmentStart <= state.LiveStart && state.LiveStart <= len(state.History) {
 		return
 	}
+	state.snapshotInvalid = !legacyFormat
 	state.SnapshotVersion = 0
 	state.ReadSource = SourceLegacy
 	state.GeometryEpoch, state.LeaseRevision = 0, 0

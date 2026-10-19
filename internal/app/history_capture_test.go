@@ -1472,6 +1472,31 @@ func TestHistorySameTerminalDiscoveryKeepsArchive(t *testing.T) {
 	}
 }
 
+func TestViewportReadResizeFallbackSamplesAfterContent(t *testing.T) {
+	for _, format := range []string{"text", "ansi"} {
+		t.Run(format, func(t *testing.T) {
+			s, _, _ := captureServer(t, true)
+			agent, _ := s.state.Agent("pane-1")
+			agent.ScrollMaxOffset = 10
+			s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+			if s.paneSizeM.ResizedWithin("pane-1", paneResizeSettleWindow) {
+				t.Fatal("fixture started inside the resize settle window")
+			}
+			raw := capturePage("visible A", "visible B")
+			installPaneReadFixture(t, s, func(ctx context.Context) (string, error) {
+				_, _, err := s.paneSizeM.Acquire(ctx, "owner", "pane-1", 70, 20)
+				return raw, err
+			})
+			response := s.readPaneResponse(context.Background(), map[string]any{
+				"pane_id": "pane-1", "format": format, "lines": 100, "terminal_columns": 70,
+			})
+			if response["error"] != nil || response["content"] != raw || response["viewport_only"] != true || response["resize_settling"] != true {
+				t.Fatalf("read missed resize during content capture: %+v", response)
+			}
+		})
+	}
+}
+
 func TestInlineAndUnsupportedLeaseReadsRemainRaw(t *testing.T) {
 	for _, mode := range []string{"inline", "unknown", "unsupported"} {
 		s, _, _ := captureServer(t, true)

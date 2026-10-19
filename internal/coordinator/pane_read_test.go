@@ -130,7 +130,7 @@ func TestSharedReadResizeMetadataRemainsReaderLocal(t *testing.T) {
 				unblock := func() { once.Do(func() { close(release) }) }
 				t.Cleanup(unblock)
 				var reads atomic.Int32
-				options := PaneReadOptions{Physical: true, ResizedRecently: true, FollowerJoined: func() { joined <- struct{}{} },
+				options := PaneReadOptions{Physical: true, ResizedRecently: func() bool { return true }, FollowerJoined: func() { joined <- struct{}{} },
 					Execute: func(context.Context, PaneReadRequest, func(context.Context, PaneReadRequest) (herdr.PaneRead, error)) (PaneReadResult, error) {
 						reads.Add(1)
 						close(entered)

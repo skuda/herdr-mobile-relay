@@ -40,8 +40,10 @@ func (s *Server) readPaneResponse(ctx context.Context, message map[string]any) m
 	physical, leaseRevision := s.physicalHistorySource(agent)
 	response, _ := s.dispatcher.HandleReadPaneWithOptions(ctx, message, coordinator.PaneReadOptions{
 		Physical: physical, SourceRevision: leaseRevision,
-		Execute:         s.executeHistoryRead,
-		ResizedRecently: s.paneSizeM != nil && s.paneSizeM.ResizedWithin(paneID, paneResizeSettleWindow),
+		Execute: s.executeHistoryRead,
+		ResizedRecently: func() bool {
+			return s.paneSizeM != nil && s.paneSizeM.ResizedWithin(paneID, paneResizeSettleWindow)
+		},
 	})
 	if target, ok := message["target"]; ok {
 		response["target"] = target

@@ -478,6 +478,37 @@ describe('terminal rendering', () => {
   });
 
 
+  it('rejects redraw header matches and validates prepends near the visible anchor', () => {
+    const render = (rows: string[]) => renderTerminalContent(rows.join('\n'), 'ansi', true, true, 40).rows;
+    const header = Array.from({ length: 8 }, (_, i) => `header ${i}`);
+    const previous = [...header, ...Array.from({ length: 492 }, (_, i) => i.toString(36).padStart(3, '0'))];
+    const redraw = [...Array.from({ length: 20 }, (_, i) => `redraw ${i}`), ...header, ...previous.slice(28)];
+    expect(renderedRowShift(render(previous), render(redraw), 250)).toBe(0);
+    const archive = [...Array.from({ length: 20 }, (_, i) => `archive ${i}`), ...header, ...Array.from({ length: 22 }, (_, i) => `extra ${i}`)];
+    expect(renderedRowShift(render(previous), render([...archive, ...previous]), 250)).toBe(-50);
+    const repeated = Array.from({ length: 500 }, (_, i) => `row ${i % 10}`);
+    expect(renderedRowShift(render(repeated), render([...header, ...repeated]), 250)).toBe(0);
+  });
+
+  it('detects prepends around short blank and repeated contextual rows', () => {
+    const render = (rows: string[]) => renderTerminalContent(rows.join('\n'), 'ansi', true, true, 40).rows;
+    for (const rows of [
+      ['abc', 'def', 'ghi', 'jkl', 'mno', 'pqr', 'stu', 'vwx'],
+      ['', '', 'context A', '', 'context B', '', 'context C', 'end'],
+      ['same', 'same', 'context A', 'same', 'context B', 'same', 'context C', 'end'],
+    ]) {
+      expect(renderedRowShift(render(rows), render(['archive A', 'archive B', ...rows]))).toBe(-2);
+      expect(renderedRowShift(render(['archive A', 'archive B', ...rows]), render(rows))).toBe(2);
+    }
+  });
+
+  it('detects a three-row crop with the anchor inside a long blank run', () => {
+    const render = (rows: string[]) => renderTerminalContent(rows.join('\n'), 'ansi', true, true, 40).rows;
+    const previous = Array.from({ length: 200 }, (_, index) => index >= 100 && index < 135 ? '' : `log line ${index}`);
+    const current = [...previous.slice(3), 'new A', 'new B', 'new C'];
+    expect(renderedRowShift(render(previous), render(current), 115)).toBe(3);
+  });
+
   it('removes desktop-width decoration after terminal status text', () => {
     const decorated = `\x1b[2m─ Worked for 1m 46s ${'─'.repeat(120)}\x1b[0m`;
     expect(stripAnsi(trimTrailingDecoration(decorated))).toBe('─ Worked for 1m 46s');
@@ -771,29 +802,6 @@ describe('virtual terminal row index', () => {
     expect(range.end - range.start).toBeLessThan(100);
   });
 
-  it('rejects redraw header matches and validates prepends near the visible anchor', () => {
-    const render = (rows: string[]) => renderTerminalContent(rows.join('\n'), 'ansi', true, true, 40).rows;
-    const header = Array.from({ length: 8 }, (_, i) => `header ${i}`);
-    const previous = [...header, ...Array.from({ length: 492 }, (_, i) => i.toString(36).padStart(3, '0'))];
-    const redraw = [...Array.from({ length: 20 }, (_, i) => `redraw ${i}`), ...header, ...previous.slice(28)];
-    expect(renderedRowShift(render(previous), render(redraw), 250)).toBe(0);
-    const archive = [...Array.from({ length: 20 }, (_, i) => `archive ${i}`), ...header, ...Array.from({ length: 22 }, (_, i) => `extra ${i}`)];
-    expect(renderedRowShift(render(previous), render([...archive, ...previous]), 250)).toBe(-50);
-    const repeated = Array.from({ length: 500 }, (_, i) => `row ${i % 10}`);
-    expect(renderedRowShift(render(repeated), render([...header, ...repeated]), 250)).toBe(0);
-  });
-
-  it('detects prepends around short blank and repeated contextual rows', () => {
-    const render = (rows: string[]) => renderTerminalContent(rows.join('\n'), 'ansi', true, true, 40).rows;
-    for (const rows of [
-      ['abc', 'def', 'ghi', 'jkl', 'mno', 'pqr', 'stu', 'vwx'],
-      ['', '', 'context A', '', 'context B', '', 'context C', 'end'],
-      ['same', 'same', 'context A', 'same', 'context B', 'same', 'context C', 'end'],
-    ]) {
-      expect(renderedRowShift(render(rows), render(['archive A', 'archive B', ...rows]))).toBe(-2);
-      expect(renderedRowShift(render(['archive A', 'archive B', ...rows]), render(rows))).toBe(2);
-    }
-  });
   it('maps variable row heights to bounded visible ranges', () => {
     const index = new VirtualTerminalIndex();
     index.reset([10, 20, 30, 40]);

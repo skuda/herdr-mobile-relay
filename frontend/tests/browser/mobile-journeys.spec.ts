@@ -2574,7 +2574,7 @@ async function historyAnchor(page: Page) {
 const historyRows = (count: number) => Array.from({ length: count }, (_, index) => `marker ${String(index).padStart(5, '0')} ${index % 7 ? 'phone row' : 'desktop row '.repeat(12)}`);
 
 test.describe('leased fullscreen history qualification', () => {
-  test('S6-01 accepts long viewport frames and deltas with styled and blank rows', async ({ page }) => {
+  test('accepts long viewport frames and deltas with styled and blank rows', async ({ page }) => {
     await openHistoryLease(page);
     for (const count of [1000, 10000]) {
       const rows = historyRows(count);
@@ -2601,7 +2601,7 @@ test.describe('leased fullscreen history qualification', () => {
     await expect(page.getByRole('status').filter({ hasText: 'Older terminal history is not shown' })).toBeVisible();
   });
 
-  test('S6-02 applies a 40-column shared lease on a wider phone', async ({ page }) => {
+  test('applies a 40-column shared lease on a wider phone', async ({ page }) => {
     await openHistoryLease(page);
     await historyFrame(page, ['X'.repeat(150)]);
     const dimensions = await page.getByRole('log').evaluate((element) => {
@@ -2611,7 +2611,7 @@ test.describe('leased fullscreen history qualification', () => {
     expect(dimensions.row).toBeLessThan(dimensions.viewport * 0.85);
   });
 
-  test('S6-03 estimates four-line offscreen prose at the shared lease width', async ({ page }) => {
+  test('estimates four-line offscreen prose at the shared lease width', async ({ page }) => {
     await openHistoryLease(page);
     await historyFrame(page, Array.from({ length: 1000 }, () => 'X'.repeat(150)));
     const geometry = await page.getByRole('log').evaluate((element) => {
@@ -2623,7 +2623,7 @@ test.describe('leased fullscreen history qualification', () => {
     expect(Math.abs(geometry.total - geometry.lineHeight * 4000) / (geometry.lineHeight * 4000)).toBeLessThan(0.05);
   });
 
-  test('S6-04 follows the bottom across append clipping and height corrections', async ({ page }) => {
+  test('follows the bottom across append clipping and height corrections', async ({ page }) => {
     await openHistoryLease(page);
     const rows = historyRows(1000);
     await historyFrame(page, rows);
@@ -2633,7 +2633,7 @@ test.describe('leased fullscreen history qualification', () => {
     await expect.poll(() => page.getByRole('log').evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
   });
 
-  test('S6-05 preserves a scrolled anchor when archive is prepended after settling', async ({ page }) => {
+  test('preserves a scrolled anchor when archive is prepended after settling', async ({ page }) => {
     await openHistoryLease(page);
     const rows = historyRows(500);
     await historyFrame(page, rows);
@@ -2646,7 +2646,7 @@ test.describe('leased fullscreen history qualification', () => {
     expect(Math.abs((await historyAnchor(page))!.offset - before!.offset)).toBeLessThan(20);
   });
 
-  test('S6-06 preserves contextual three-character blank and repeated anchors', async ({ page }) => {
+  test('preserves contextual three-character blank and repeated anchors', async ({ page }) => {
     await openHistoryLease(page);
     for (const style of ['short', 'blank', 'repeated']) {
       const rows = Array.from({ length: 500 }, (_, index) => style === 'short' ? index.toString(36).padStart(3, '0') : index % 3 ? (style === 'blank' ? '' : 'same') : `context ${index}`);
@@ -2660,7 +2660,7 @@ test.describe('leased fullscreen history qualification', () => {
     }
   });
 
-  test('S6-07 resumes after settled metadata wait expiry release and refocus', async ({ page }) => {
+  test('resumes after settled metadata wait expiry release and refocus', async ({ page }) => {
     await openHistoryLease(page);
     await historyFrame(page, ['stable unleased page']);
     await toggleHistoryLease(page, false);
@@ -2686,7 +2686,7 @@ test.describe('leased fullscreen history qualification', () => {
     await expect(page.getByRole('log')).toContainText('after refocus');
   });
 
-  test('S6-08 keeps box scrollers and shows server clipping notice', async ({ page }) => {
+  test('keeps box scrollers and shows server clipping notice', async ({ page }) => {
     await openHistoryLease(page);
     await historyFrame(page, ['┌' + '─'.repeat(38) + '┐', '│' + 'cell'.padEnd(38) + '│', '│' + 'wide cell'.padEnd(98) + '│', '\u001b[44mnewest styled suffix\u001b[0m'], { truncated: true });
     await expect(page.getByRole('log')).toContainText('newest styled suffix');
@@ -2697,14 +2697,14 @@ test.describe('leased fullscreen history qualification', () => {
     await expect(page.getByRole('status').filter({ hasText: 'Older terminal history is not shown' })).toHaveCount(0);
   });
 
-  test('S6-09 renders displaced rows before one current fixed header', async ({ page }) => {
+  test('renders displaced rows before one current fixed header', async ({ page }) => {
     await openHistoryLease(page);
     await historyFrame(page, ['A', 'B', 'H1', 'H2', 'C', 'D', 'E', 'F', 'G']);
     const rows = await page.locator('[data-terminal-row]').allTextContents();
     expect(rows).toEqual(['A', 'B', 'H1', 'H2', 'C', 'D', 'E', 'F', 'G']);
   });
 
-  test('S6-10 keeps anchors through legacy physical and restored frames', async ({ page }) => {
+  test('keeps anchors through legacy physical and restored frames', async ({ page }) => {
     await openHistoryLease(page);
     await toggleHistoryLease(page, false);
     const rows = Array.from({ length: 500 }, (_, index) => `row ${index.toString().padStart(3, '0')}`);
@@ -2725,7 +2725,7 @@ test.describe('leased fullscreen history qualification', () => {
     await expect(page.getByRole('log')).toContainText('restored latest');
   });
 
-  test('S6-11 keeps row count and scrolled anchor stable during progress redraws', async ({ page }) => {
+  test('keeps row count and scrolled anchor stable during progress redraws', async ({ page }) => {
     await openHistoryLease(page);
     const rows = historyRows(500);
     await historyFrame(page, [...rows, 'spinner 0', 'tip', 'footer']);
@@ -2737,7 +2737,7 @@ test.describe('leased fullscreen history qualification', () => {
     await historyScroll(page, 'bottom'); await expect(page.getByRole('log')).toContainText('spinner 5');
   });
 
-  test('S6-12 shows displaced scroll rows once above the latest progress tail', async ({ page }) => {
+  test('shows displaced scroll rows once above the latest progress tail', async ({ page }) => {
     await openHistoryLease(page);
     await historyFrame(page, ['H1', 'H2', 'A', 'B', 'C', 'D', 'E', 'old spinner']);
     await historyFrame(page, ['A', 'B', 'H1', 'H2', 'C', 'D', 'E', 'F', 'G', 'new spinner', 'footer']);

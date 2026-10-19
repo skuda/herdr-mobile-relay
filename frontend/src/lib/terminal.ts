@@ -839,8 +839,8 @@ export function renderedRowShift(previous: RenderedTerminalRow[], current: Rende
   };
   const anchorMatches = (shift: number) => {
     const anchor = Math.min(previous.length - 1, Math.max(0, anchorIndex ?? Math.floor(previous.length / 2)));
-    const start = Math.max(0, shift, anchor - 4);
-    const count = Math.min(12, previous.length - start, current.length - (start - shift));
+    const start = Math.max(0, shift, anchor - 32);
+    const count = Math.min(64, previous.length - start, current.length - (start - shift));
     return count >= 2 && matches(start, start - shift, count);
   };
   const leadingSize = (rows: RenderedTerminalRow[]) => {

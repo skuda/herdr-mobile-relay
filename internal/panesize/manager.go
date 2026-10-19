@@ -372,6 +372,8 @@ func (m *Manager) Acquire(
 	previous, hadPrevious := state.leases[clientID]
 	if created || state.cleanup != nil && len(state.leases) == 0 {
 		m.historyLeaseChangedLocked(paneID, identity)
+	} else {
+		m.historyStateLocked(paneID, identity)
 	}
 	state.leases[clientID] = lease
 	want := state.leaseTargetLocked(current)

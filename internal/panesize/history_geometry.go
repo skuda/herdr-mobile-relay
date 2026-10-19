@@ -135,7 +135,11 @@ func (m *Manager) historyLeaseChangedLocked(paneID string, identity terminalIden
 
 func (m *Manager) setHistorySize(paneID string, identity terminalIdentity, terminal Terminal, current Winsize, want size) error {
 	m.mu.Lock()
-	state := m.historyStateLocked(paneID, identity)
+	state := m.historyGeometry[paneID]
+	if state == nil || state.identity != identity {
+		state = m.historyStateLocked(paneID, identity)
+		state.forgotten = true
+	}
 	m.observeHistoryLocked(state, current)
 	next, changed := resized(current, want)
 	if !changed {

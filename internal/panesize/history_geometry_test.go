@@ -624,6 +624,43 @@ func TestForgottenHistoryGeometryReapedAfterSettling(t *testing.T) {
 	}
 }
 
+func TestRestoreCleanupPreservesForgottenHistoryGeometry(t *testing.T) {
+	for _, departure := range []string{"settling", "settled", "present"} {
+		t.Run(departure, func(t *testing.T) {
+			f := newFixture(t)
+			f.addPane("p", 100, "/dev/pts/1", 1)
+			f.acquire("owner", "p", 60, 20)
+			if departure == "settled" {
+				f.clock.Advance(HistorySettleWindow)
+			}
+			if departure != "present" {
+				f.m.ForgetHistoryPane("p", "terminal-p")
+			}
+			if err := f.m.Release(context.Background(), "owner", "p", true); err != nil {
+				t.Fatal(err)
+			}
+			if f.state("p") != nil {
+				t.Fatal("restore cleanup retained lease ownership")
+			}
+			if !f.m.HistoryReadUnsafe("p", "terminal-p") {
+				t.Fatal("restore cleanup lost its settle fence")
+			}
+			f.clock.Advance(HistorySettleWindow)
+			f.m.SweepExpired(context.Background())
+			f.m.mu.Lock()
+			remaining := f.m.historyGeometry["p"]
+			f.m.mu.Unlock()
+			if departure == "present" {
+				if remaining == nil {
+					t.Fatal("sweep removed geometry for a present agent")
+				}
+			} else if remaining != nil {
+				t.Fatalf("restore cleanup revived forgotten geometry: %+v", remaining)
+			}
+		})
+	}
+}
+
 func TestReusedForgottenHistoryGeometrySurvivesSweep(t *testing.T) {
 	for _, reuse := range []string{"read", "size change", "state lookup", "failed read"} {
 		t.Run(reuse, func(t *testing.T) {

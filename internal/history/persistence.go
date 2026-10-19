@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"slices"
 	"time"
@@ -55,6 +54,9 @@ func (m *Manager) saveState(job persistenceJob, now time.Time) error {
 	defer m.mu.Unlock()
 	state := m.states[job.paneID]
 	if state != job.instance {
+		if removeErr := os.Remove(m.stateFile(job.paneID) + ".tmp"); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return fmt.Errorf("remove obsolete pane history temporary file: %w", removeErr)
+		}
 		return nil
 	}
 	// Keep the instance check and rename under the mutex used by Discard.
@@ -77,6 +79,11 @@ func (m *Manager) saveState(job persistenceJob, now time.Time) error {
 }
 
 func (m *Manager) RunPersistence(ctx context.Context) {
+	m.RunPersistenceWithReport(ctx, nil)
+}
+
+func (m *Manager) RunPersistenceWithReport(ctx context.Context, report func(error)) {
+	lastFailure := ""
 	for {
 		if ctx.Err() != nil {
 			return
@@ -106,8 +113,16 @@ func (m *Manager) RunPersistence(ctx context.Context) {
 				timer.Stop()
 			}
 		case <-tick:
-			if err := m.FlushDue(m.now()); err != nil {
-				slog.Warn("pane history persistence failed")
+			err := m.FlushDue(m.now())
+			failure := ""
+			if err != nil {
+				failure = err.Error()
+			}
+			if failure != lastFailure {
+				lastFailure = failure
+				if report != nil {
+					report(err)
+				}
 			}
 		}
 	}

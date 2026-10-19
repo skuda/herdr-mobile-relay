@@ -577,7 +577,16 @@ func (s *Server) Run(ctx context.Context) error {
 	s.transitionTasks = newLifecycleTasks(ctx)
 	s.historyTasks = newLifecycleTasks(ctx)
 	s.persistenceTasks = newLifecycleTasks(ctx)
-	s.persistenceTasks.Start(s.historyM.RunPersistence)
+	s.persistenceTasks.Start(func(ctx context.Context) {
+		s.historyM.RunPersistenceWithReport(ctx, func(err error) {
+			if err == nil {
+				s.logger.Info("pane history persistence recovered")
+				return
+			}
+			s.recordSafeError("pane history persistence failed", err)
+			s.logger.Warn("pane history persistence failed", "error", err)
+		})
+	})
 	s.state.SetOnStatusTransition(s.enqueueHistoryTransition)
 	defer s.drainLifecycleWork()
 	if s.uploadM != nil {
@@ -1578,7 +1587,7 @@ func (s *Server) drainLifecycleWork() {
 	}
 	if err := s.historyM.SaveAll(); err != nil {
 		s.recordSafeError("final pane history save failed", err)
-		s.logger.Warn("final pane history save failed")
+		s.logger.Warn("final pane history save failed", "error", err)
 	}
 }
 

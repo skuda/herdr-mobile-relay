@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -45,6 +46,51 @@ func TestDirtyHistoryFlushesAtSaveDeadlineWithoutNewFrames(t *testing.T) {
 	}
 	if got := persistedState(t, m, "p"); strings.Join(got.History, "\n") != "A\nB\nC" || m.states["p"].dirty {
 		t.Fatalf("saved state=%+v", got)
+	}
+}
+
+func TestPersistenceReportsChangedFailureAndRecovery(t *testing.T) {
+	m := NewManager(t.TempDir())
+	m.Merge("p", snapshotPage("A", "B"))
+	var calls atomic.Int32
+	m.writeFile = func(path string, data []byte, mode os.FileMode) error {
+		switch calls.Add(1) {
+		case 1, 2:
+			return errors.New("disk full")
+		case 3:
+			return errors.New("read only")
+		default:
+			return os.WriteFile(path, data, mode)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	reports := make(chan error, 5)
+	go func() { m.RunPersistenceWithReport(ctx, func(err error) { reports <- err }); close(done) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("persistence did not stop")
+		}
+	})
+	for index, text := range []string{"disk full", "read only", ""} {
+		select {
+		case err := <-reports:
+			if text == "" {
+				if err != nil {
+					t.Fatalf("recovery error=%v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), text) {
+				t.Fatalf("report %d error=%v want=%q", index, err, text)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("missing persistence report %d", index)
+		}
+	}
+	if calls.Load() != 4 {
+		t.Fatalf("persistence attempts=%d", calls.Load())
 	}
 }
 
@@ -127,6 +173,9 @@ func TestDiscardOrReplacementFencesQueuedSaveRename(t *testing.T) {
 		}
 		if _, err := os.Stat(m.stateFile("p")); !os.IsNotExist(err) {
 			t.Fatalf("obsolete save recreated file: %v", err)
+		}
+		if _, err := os.Stat(m.stateFile("p") + ".tmp"); !os.IsNotExist(err) {
+			t.Fatalf("obsolete save retained temporary file: %v", err)
 		}
 	}
 }

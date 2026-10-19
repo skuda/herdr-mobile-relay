@@ -188,7 +188,7 @@ func (m *Manager) mergeLegacyBody(state *PaneState, body []string) {
 
 func (m *Manager) mergePhysical(state *PaneState, body []string) {
 	previous := state.History[state.LiveStart:]
-	old, next := normalizeLines(previous), normalizeLines(body)
+	old, next := comparisonBody(previous), comparisonBody(body)
 	archive := state.History[:state.LiveStart]
 	fallback := func() {
 		state.LiveStart = len(state.History)
@@ -213,7 +213,7 @@ func (m *Manager) mergePhysical(state *PaneState, body []string) {
 	}
 	candidates, weak := physicalAlignments(old, next)
 	if len(candidates) > 0 {
-		candidate, conflict := choosePhysicalAlignment(candidates)
+		candidate, conflict := choosePhysicalAlignment(candidates, previous)
 		if conflict {
 			fallback()
 			return
@@ -224,7 +224,7 @@ func (m *Manager) mergePhysical(state *PaneState, body []string) {
 		state.History = append(state.History, body...)
 		return
 	}
-	if !weak && streamingExtension(old, next) {
+	if len(old) > 0 && !weak && streamingExtension(old, next) {
 		state.History = append(archive, body...)
 		return
 	}
@@ -267,7 +267,7 @@ func physicalAlignments(old, next []string) ([]physicalAlignment, bool) {
 					}
 				}
 				if nonempty < 2 {
-					weak = weak || displacement > 0
+					weak = weak || displacement > 0 && nonempty > 0
 					continue
 				}
 				candidates = append(candidates, physicalAlignment{header: header, displacement: displacement, tail: tail})
@@ -277,11 +277,19 @@ func physicalAlignments(old, next []string) ([]physicalAlignment, bool) {
 	return candidates, weak
 }
 
-func choosePhysicalAlignment(candidates []physicalAlignment) (physicalAlignment, bool) {
+func comparisonBody(body []string) []string {
+	rows := normalizeLines(body)
+	for len(rows) > 0 && rows[len(rows)-1] == "" {
+		rows = rows[:len(rows)-1]
+	}
+	return rows
+}
+
+func choosePhysicalAlignment(candidates []physicalAlignment, old []string) (physicalAlignment, bool) {
 	best := candidates[0]
 	for _, candidate := range candidates[1:] {
-		sameRange := best.displacement == 0 && candidate.displacement == 0 ||
-			best.header == candidate.header && best.displacement == candidate.displacement
+		sameRange := best.displacement == candidate.displacement &&
+			slices.Equal(old[best.header:best.header+best.displacement], old[candidate.header:candidate.header+candidate.displacement])
 		if !sameRange {
 			return physicalAlignment{}, true
 		}

@@ -133,18 +133,18 @@ func TestSnapshotTailLongerThanBoundFallsBack(t *testing.T) {
 
 func TestSnapshotEquivalentCandidatesChooseSmallestTailThenDisplacementThenHeader(t *testing.T) {
 	candidates := []physicalAlignment{{header: 2, displacement: 0, tail: 2}, {header: 1, displacement: 0, tail: 1}, {header: 0, displacement: 0, tail: 1}}
-	got, conflict := choosePhysicalAlignment(candidates)
+	got, conflict := choosePhysicalAlignment(candidates, []string{"A", "B", "C", "D"})
 	if conflict || got != (physicalAlignment{header: 0, displacement: 0, tail: 1}) {
 		t.Fatalf("chosen = %+v conflict=%v", got, conflict)
 	}
-	got, conflict = choosePhysicalAlignment([]physicalAlignment{{header: 2, displacement: 2, tail: 2}, {header: 2, displacement: 2, tail: 0}})
+	got, conflict = choosePhysicalAlignment([]physicalAlignment{{header: 2, displacement: 2, tail: 2}, {header: 2, displacement: 2, tail: 0}}, []string{"A", "B", "C", "D"})
 	if conflict || got.tail != 0 {
 		t.Fatalf("chosen displaced alignment = %+v conflict=%v", got, conflict)
 	}
 }
 
 func TestSnapshotConflictingDisplacedRangesFallBack(t *testing.T) {
-	_, conflict := choosePhysicalAlignment([]physicalAlignment{{header: 0, displacement: 2, tail: 0}, {header: 1, displacement: 2, tail: 1}})
+	_, conflict := choosePhysicalAlignment([]physicalAlignment{{header: 0, displacement: 2, tail: 0}, {header: 1, displacement: 2, tail: 1}}, []string{"A", "B", "A", "C", "D"})
 	if !conflict {
 		t.Fatal("different displaced ranges did not conflict")
 	}

@@ -1225,6 +1225,56 @@ func TestLeaseActivationAndRestoreAreSourceBoundaries(t *testing.T) {
 	}
 }
 
+func TestScrollbackLegacyHistoryMatchesAcrossPhoneLeaseCycle(t *testing.T) {
+	s, _, advance := captureServer(t, false)
+	agent, _ := s.state.Agent("pane-1")
+	agent.ScrollMaxOffset = 10
+	s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+	base := history.NewManager(t.TempDir())
+	check := func(stage string, body ...string) coordinator.PaneReadResult {
+		t.Helper()
+		if physical, _ := s.physicalHistorySource(captureRequest(s, false).Agent); physical {
+			t.Fatalf("%s selected physical history for a scrollback pane", stage)
+		}
+		page := capturePage(body...)
+		result := executeCapture(t, s, page, false)
+		want := base.Merge("pane-1", page)
+		if !result.Capture.Admitted || result.Response["content"] != want || s.historyM.Content("pane-1", 0) != want {
+			t.Fatalf("%s: admitted=%v content=%q stored=%q, base Merge=%q", stage, result.Capture.Admitted,
+				result.Response["content"], s.historyM.Content("pane-1", 0), want)
+		}
+		return result
+	}
+	before := check("before lease", "A", "B", "C", "D")
+	crossed, err := s.executeHistoryRead(context.Background(), captureRequest(s, false), func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error) {
+		if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 60, 20); err != nil {
+			return herdr.PaneRead{}, err
+		}
+		return herdr.PaneRead{Content: []byte(capturePage("A", "B", "C", "D", "E"))}, nil
+	})
+	if err != nil || crossed.Capture.Admitted || s.historyM.Content("pane-1", 0) != capturePage("A", "B", "C", "D") {
+		t.Fatalf("read crossing lease acquisition: admitted=%v error=%v stored=%q", crossed.Capture.Admitted, err,
+			s.historyM.Content("pane-1", 0))
+	}
+	advance(4 * time.Second)
+	leased := check("after lease", "A", "B", "C", "D", "E")
+	if leased.Capture.Snapshot.LeaseRevision == before.Capture.Snapshot.LeaseRevision ||
+		leased.Capture.Snapshot.GeometryEpoch == before.Capture.Snapshot.GeometryEpoch {
+		t.Fatalf("lease did not change revision and epoch: before=%+v after=%+v", before.Capture.Snapshot, leased.Capture.Snapshot)
+	}
+	if err := s.paneSizeM.Release(context.Background(), "owner", "pane-1", false); err != nil {
+		t.Fatal(err)
+	}
+	check("release grace", "A", "B", "C", "D", "E")
+	advance(panesize.ReleaseGrace)
+	s.paneSizeM.SweepExpired(context.Background())
+	advance(4 * time.Second)
+	restored := check("after restore cleanup", "A", "B", "C", "D", "E", "F")
+	if restored.Capture.Snapshot.LeaseRevision == leased.Capture.Snapshot.LeaseRevision {
+		t.Fatal("restore cleanup did not change the lease revision")
+	}
+}
+
 func TestFailedLegacyGeometrySampleRetainsRestoreSettleFence(t *testing.T) {
 	s, f, advance := captureServer(t, true)
 	executeCapture(t, s, capturePage("old A", "old B"), true)

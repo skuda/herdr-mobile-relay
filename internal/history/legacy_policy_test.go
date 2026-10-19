@@ -1,6 +1,7 @@
 package history
 
 import (
+	"fmt"
 	"os"
 	"testing"
 )
@@ -12,7 +13,8 @@ func TestLegacyBoundaryPolicyPreservesFrozenPhysicalPrefix(t *testing.T) {
 	ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, GeometryEpoch: 2, LeaseRevision: 2}
 	page := snapshotPage("A", "B", "C")
 	want := snapshotPage("physical A", "physical B", "A", "B", "C")
-	for range 3 {
+	for _, leaseRevision := range []uint64{2, 7, 2} {
+		ctx.LeaseRevision = leaseRevision
 		if got := m.MergeSnapshot("p", page, ctx); got != want {
 			t.Fatalf("legacy matching changed frozen prefix: %q", got)
 		}
@@ -45,6 +47,60 @@ func TestFullscreenLegacyRetainsResizeAndRestartBoundaries(t *testing.T) {
 		}
 		m = NewManager(dir)
 		assertSnapshotContent(t, m.MergeSnapshot("p", page, ctx), "A", "B", "A", "B", "A", "B")
+	}
+}
+
+func TestScrollbackLegacyMatchesAcrossLeaseRevisions(t *testing.T) {
+	for _, oldFormat := range []bool{false, true} {
+		for _, resize := range []bool{false, true} {
+			t.Run(fmt.Sprintf("old_format=%v/resize=%v", oldFormat, resize), func(t *testing.T) {
+				m, base := NewManager(t.TempDir()), NewManager(t.TempDir())
+				if oldFormat {
+					data := []byte(`{"history":["A","B","C","D"],"footer":[],"stale_refusals":0,"last_hash":""}`)
+					for _, manager := range []*Manager{m, base} {
+						if err := os.WriteFile(manager.stateFile("p"), data, 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, GeometryEpoch: 1}
+				for i, leaseRevision := range []uint64{0, 7, 0} {
+					ctx.LeaseRevision = leaseRevision
+					if resize {
+						ctx.GeometryEpoch = uint64(i + 1)
+					}
+					page := snapshotPage([]string{"A", "B", "C", "D", "E", "F"}[:4+i]...)
+					want := base.Merge("p", page)
+					if want != page {
+						t.Fatalf("base merge changed growing page: %q", want)
+					}
+					if got := m.MergeSnapshot("p", page, ctx); got != want {
+						t.Fatalf("lease revision %d: content = %q, base Merge = %q", leaseRevision, got, want)
+					}
+					if got := m.states["p"].LeaseRevision; got != leaseRevision {
+						t.Fatalf("stored lease revision = %d, want %d", got, leaseRevision)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestFullscreenLegacyRetainsLeaseBoundaries(t *testing.T) {
+	m := NewManager(t.TempDir())
+	ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, GeometryEpoch: 1, NoScrollback: true}
+	page := snapshotPage("A", "B")
+	for i, leaseRevision := range []uint64{0, 7, 0} {
+		ctx.LeaseRevision = leaseRevision
+		want := make([]string, 0, 2*(i+1))
+		for range i + 1 {
+			want = append(want, "A", "B")
+		}
+		assertSnapshotContent(t, m.MergeSnapshot("p", page, ctx), want...)
+		if state := m.states["p"]; state.SegmentStart != 2*i || state.LeaseRevision != leaseRevision {
+			t.Fatalf("lease boundary state = %+v", state)
+		}
+		assertSnapshotContent(t, m.MergeSnapshot("p", page, ctx), want...)
 	}
 }
 

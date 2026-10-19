@@ -91,7 +91,7 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 	}
 	boundary := geometryBoundary && state.loaded || state.SnapshotVersion != snapshotVersion && !legacyUpgrade ||
 		state.ReadSource != context.ReadSource || geometryBoundary && state.GeometryEpoch != context.GeometryEpoch ||
-		state.LeaseRevision != context.LeaseRevision
+		geometryBoundary && state.LeaseRevision != context.LeaseRevision
 	if boundary {
 		state.SegmentStart = len(state.History)
 		state.LiveStart = len(state.History)

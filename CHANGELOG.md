@@ -17,7 +17,8 @@ project follows [Semantic Versioning](https://semver.org/).
   contexts. These boundaries can repeat a page. Panes with scrollback keep
   legacy matching across leases, PTY resizes, and relay restarts. Physical
   matching preserves raw rows while updating up to three content-tail rows in
-  place.
+  place. Ignore interior repeated-block matches in the unchanged prefix during
+  physical alignment. Keep page-origin ambiguity checks.
 - Clip oldest response rows so a single composed frame no longer exceeds the
   per-message limit. This includes large unleased history responses; fitting
   content stays unchanged, and a response with no fitting row succeeds with

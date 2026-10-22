@@ -280,6 +280,11 @@ func physicalAlignments(old, next []string) ([]physicalAlignment, bool) {
 		for tail := 0; tail <= min(ReplaceableTailLines, len(old)); tail++ {
 			end := len(old) - tail
 			for displacement := 0; header+displacement < end; displacement++ {
+				// Keep page-origin matches for choosePhysicalAlignment's ambiguity check.
+				// Other displaced matches start at the first changed row.
+				if displacement > 0 && header != 0 && header != prefix {
+					break
+				}
 				span := old[header+displacement : end]
 				if header+len(span) > len(next) || !slices.Equal(span, next[header:header+len(span)]) {
 					continue

@@ -206,7 +206,10 @@ Narrowing Herdr's grid below the PTY width can clip rows without a detected
 geometry change; the shared desktop-garbling limitation remains.
 
 Inside a physical segment, accepted fixed-header alignment archives displaced
-scroll rows. The response places that archive before the raw current page,
+scroll rows. Displacement candidates start at the first changed comparison row,
+with page-origin matches retained for ambiguity checks. Interior repeated blocks
+within the unchanged prefix do not establish scroll movement. The response
+places that archive before the raw current page,
 including its current header, footer, and ANSI styling. The header is not added
 to the displaced region. Comparisons ignore trailing blank padding, but stored
 and displayed pages preserve raw rows. A separate `ReplaceableTailLines=3`

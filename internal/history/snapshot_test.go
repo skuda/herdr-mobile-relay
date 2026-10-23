@@ -501,6 +501,59 @@ func TestFirstRuntimeAdmissionFencesIdenticalNumericEpoch(t *testing.T) {
 	}
 }
 
+func TestUnknownEpochEstablishesBaselineWithoutLaterBoundary(t *testing.T) {
+	for _, mode := range []string{"fresh", "source-change", "restart"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			m := NewManager(root)
+			ctx := physicalContext(7, 54)
+			ctx.NoScrollback = true
+			if mode != "fresh" {
+				m.AdmitSnapshot("p", snapshotPage("old A", "old B"), ctx, 0)
+			}
+			if mode == "restart" {
+				if err := m.SaveAll(); err != nil {
+					t.Fatal(err)
+				}
+				m = NewManager(root)
+			}
+			ctx.ReadSource = SourceLegacy
+			ctx.GeometryEpoch = 0
+			ctx.Columns = 0
+			ctx.Rows = 0
+			m.AdmitSnapshot("p", snapshotPage("current A", "current B"), ctx, 0)
+			state := m.states["p"]
+			before := slices.Clone(state.History)
+			segment := state.SegmentStart
+			ctx.GeometryEpoch = 19
+			ctx.Columns = 100
+			ctx.Rows = 40
+			m.AdmitSnapshot("p", snapshotPage("current A", "current B"), ctx, 0)
+			if state.SegmentStart != segment || !slices.Equal(state.History, before) {
+				t.Fatalf("unknown epoch created a later boundary: segment=%d want=%d history=%q", state.SegmentStart, segment, state.History)
+			}
+		})
+	}
+}
+
+func TestUnknownMetricReadDoesNotConsumeLoadedFence(t *testing.T) {
+	root := t.TempDir()
+	m := NewManager(root)
+	ctx := physicalContext(1, 54)
+	ctx.ReadSource = SourceLegacy
+	m.AdmitSnapshot("p", snapshotPage("A", "B"), ctx, 0)
+	if err := m.SaveAll(); err != nil {
+		t.Fatal(err)
+	}
+	m = NewManager(root)
+	m.AdmitSnapshot("p", snapshotPage("A", "B"), ctx, 0)
+	ctx.NoScrollback = true
+	got, _, _ := m.AdmitSnapshot("p", snapshotPage("A", "B"), ctx, 0)
+	if got != snapshotPage("A", "B", "A", "B") || m.states["p"].SegmentStart != 2 {
+		t.Fatalf("unknown-metric first read consumed restart fence: %q", got)
+	}
+}
+
 func TestSourceGateCycleStartsNewSegmentWithoutIntermediateRead(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 40)

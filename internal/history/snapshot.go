@@ -103,7 +103,7 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		delete(m.lastSave, paneID)
 	}
 	geometryBoundary := context.ReadSource == SourceRecent || context.NoScrollback
-	if context.GeometryEpoch == 0 && state.ReadSource == context.ReadSource {
+	if context.GeometryEpoch == 0 && state.ReadSource == context.ReadSource && !state.loaded {
 		context.GeometryEpoch, context.Columns, context.Rows = state.GeometryEpoch, state.Columns, state.Rows
 	}
 	legacyUpgrade := context.ReadSource == SourceLegacy && !context.NoScrollback && state.SnapshotVersion == 0 && !state.snapshotInvalid
@@ -111,7 +111,7 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		state.SegmentStart, state.LiveStart = 0, len(state.History)
 	}
 	boundary := geometryBoundary && state.loaded || state.SnapshotVersion != snapshotVersion && !legacyUpgrade ||
-		state.ReadSource != context.ReadSource || geometryBoundary && state.GeometryEpoch != context.GeometryEpoch ||
+		state.ReadSource != context.ReadSource || geometryBoundary && state.GeometryEpoch != 0 && context.GeometryEpoch != 0 && state.GeometryEpoch != context.GeometryEpoch ||
 		geometryBoundary && state.LeaseRevision != context.LeaseRevision
 	if boundary {
 		state.SegmentStart = len(state.History)
@@ -119,7 +119,9 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		state.LastHash = ""
 		state.StaleRefusals = 0
 	}
-	state.loaded = false
+	if geometryBoundary {
+		state.loaded = false
+	}
 	state.setSnapshotContext(context)
 	body, footer := splitSnapshot(rawContent)
 	state.Footer = slices.Clone(footer)

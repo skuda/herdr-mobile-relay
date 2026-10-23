@@ -2134,10 +2134,6 @@ func (s *Server) captureHistoryLoop(ctx context.Context) {
 }
 
 func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
-	s.scheduleHistoryCaptureAt(ctx, paneID, s.historyNow())
-}
-
-func (s *Server) scheduleHistoryCaptureAt(ctx context.Context, paneID string, _ time.Time) {
 	if s.historyTasks == nil {
 		return
 	}

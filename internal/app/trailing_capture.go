@@ -75,7 +75,7 @@ func (s *Server) captureHistoryTick(now time.Time) {
 		s.logger.Warn("trailing pane capture expired", "pane_id", paneID)
 	}
 	for paneID := range candidates {
-		s.scheduleHistoryCaptureAt(context.Background(), paneID, now)
+		s.scheduleHistoryCapture(context.Background(), paneID)
 	}
 }
 

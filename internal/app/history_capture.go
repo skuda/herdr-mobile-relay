@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -47,26 +48,39 @@ func (s *Server) readPaneResponse(ctx context.Context, message map[string]any) m
 			return s.paneSizeM != nil && s.paneSizeM.ResizedWithin(paneID, paneResizeSettleWindow)
 		},
 	})
-	if response["error"] == nil {
-		if _, ok := response["interaction"].(*question.Interaction); ok {
-			content, _ := response["content"].(string)
-			agentName := ""
-			if agent != nil {
-				agentName = agent.Agent
-			}
-			response["interaction"] = question.Parse(content, agentName)
-		}
-		if interaction, ok := response["interaction"].(*question.Interaction); ok && interaction != nil {
-			if text := strings.TrimSpace(interaction.Other.Text); text != "" {
-				s.state.RecordCustomAnswer(paneID, interaction.Question, text)
-			}
-			question.FillCustomAnswers(interaction, s.state.CustomAnswers(paneID))
-		}
-	}
+	s.prepareAcceptedPaneInteraction(paneID, response)
 	if target, ok := message["target"]; ok {
 		response["target"] = target
 	}
 	return response
+}
+
+func (s *Server) prepareAcceptedPaneInteraction(paneID string, response map[string]any) {
+	if response["error"] != nil {
+		return
+	}
+	interaction, _ := response["interaction"].(*question.Interaction)
+	if interaction == nil {
+		return
+	}
+	interaction = clonePaneInteraction(interaction)
+	response["interaction"] = interaction
+	if text := strings.TrimSpace(interaction.Other.Text); text != "" {
+		s.state.RecordCustomAnswer(paneID, interaction.Question, text)
+	}
+	question.FillCustomAnswers(interaction, s.state.CustomAnswers(paneID))
+}
+
+func clonePaneInteraction(interaction *question.Interaction) *question.Interaction {
+	if interaction == nil {
+		return nil
+	}
+	clone := *interaction
+	clone.Options = slices.Clone(interaction.Options)
+	for i := range clone.Options {
+		clone.Options[i].Summary = slices.Clone(interaction.Options[i].Summary)
+	}
+	return &clone
 }
 
 func historyContentContext(ctx context.Context, background bool) (context.Context, context.CancelFunc) {

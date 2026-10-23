@@ -1984,3 +1984,77 @@ func TestLegacyOnlyHistoryDoesNotCreatePhysicalMinuteLog(t *testing.T) {
 		t.Fatal("legacy-only admission emitted physical telemetry")
 	}
 }
+
+func TestLimitedPhysicalQuestionKeepsCanonicalInteraction(t *testing.T) {
+	s, _, _ := captureServer(t, true)
+	expected := question.Parse(rejectedCustomAnswerPage, "claude")
+	if expected == nil {
+		t.Fatal("question fixture did not parse")
+	}
+	installPaneReadFixture(t, s, func(context.Context) (string, error) { return rejectedCustomAnswerPage, nil })
+	response := s.readPaneResponse(context.Background(), map[string]any{"pane_id": "pane-1", "format": "ansi", "lines": 4})
+	actual, _ := response["interaction"].(*question.Interaction)
+	if actual == nil {
+		t.Fatalf("limited question lost canonical interaction: attention=%v layout=%v", response["attention_kind"], response["question_layout"])
+	}
+	if actual.ID != expected.ID || actual.Question != expected.Question || len(actual.Options) != len(expected.Options) {
+		t.Fatalf("limited question changed canonical interaction: got=%+v want=%+v", actual, expected)
+	}
+	if response["attention_kind"] != question.AttentionQuestion || response["question_layout"] != true {
+		t.Fatal("question metadata contradicts the canonical interaction")
+	}
+	if response["content"] == rejectedCustomAnswerPage || question.Parse(response["content"].(string), "claude") != nil {
+		t.Fatal("fixture did not clip away question context")
+	}
+}
+
+func TestSharedPaneQuestionReadersOwnNestedInteraction(t *testing.T) {
+	s, _, _ := captureServer(t, true)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var reads atomic.Int32
+	installPaneReadFixture(t, s, func(context.Context) (string, error) {
+		if reads.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return rejectedCustomAnswerPage, nil
+	})
+	results := make(chan map[string]any, 2)
+	joined := make(chan struct{}, 1)
+	physical, revision := s.physicalHistorySource(captureRequest(s, true).Agent)
+	options := coordinator.PaneReadOptions{Physical: physical, SourceRevision: revision, Execute: s.executeHistoryRead, FollowerJoined: func() { joined <- struct{}{} }}
+	read := func() {
+		response, _ := s.dispatcher.HandleReadPaneWithOptions(context.Background(), map[string]any{"pane_id": "pane-1", "format": "ansi", "lines": 4}, options)
+		s.prepareAcceptedPaneInteraction("pane-1", response)
+		results <- response
+	}
+	go read()
+	awaitHistorySignal(t, entered, "question owner read")
+	go read()
+	awaitHistorySignal(t, joined, "question follower join")
+	close(release)
+	first := awaitHistorySignal(t, results, "first question reader")
+	second := awaitHistorySignal(t, results, "second question reader")
+	a, _ := first["interaction"].(*question.Interaction)
+	b, _ := second["interaction"].(*question.Interaction)
+	if a == nil || b == nil {
+		t.Fatal("shared clipped readers lost interaction")
+	}
+	if a == b || &a.Options[0] == &b.Options[0] {
+		t.Fatal("readers share mutable interaction storage")
+	}
+	a.Options[0].Label = "changed first reader"
+	a.Other.Text = "changed note"
+	if b.Options[0].Label == a.Options[0].Label || b.Other.Text == a.Other.Text {
+		t.Fatal("first reader mutated second interaction")
+	}
+}
+func TestPaneInteractionCloneOwnsReviewSummaries(t *testing.T) {
+	original := &question.Interaction{Options: []question.Option{{Label: "Submit", Summary: []question.SummaryEntry{{Question: "Name one outcome", Answer: "custom answer"}}}}}
+	a, b := clonePaneInteraction(original), clonePaneInteraction(original)
+	question.FillCustomAnswers(a, map[string]string{"name one outcome": "first reader answer"})
+	a.Options[0].Summary[0].Answer = "first reader changed"
+	if b.Options[0].Summary[0].Answer != "custom answer" || original.Options[0].Summary[0].Answer != "custom answer" {
+		t.Fatal("review summary clone shares nested state")
+	}
+}

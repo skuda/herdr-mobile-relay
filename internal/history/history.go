@@ -176,17 +176,42 @@ func (m *Manager) applyMatch(state *PaneState, body []string, match seqmatch.Mat
 }
 
 func (state *PaneState) UnmarshalJSON(data []byte) error {
-	type coreState PaneState
+	var core struct {
+		History       []string `json:"history"`
+		Footer        []string `json:"footer"`
+		StaleRefusals int      `json:"stale_refusals"`
+		LastHash      string   `json:"last_hash"`
+	}
+	if err := json.Unmarshal(data, &core); err != nil {
+		return err
+	}
+	*state = PaneState{History: core.History, Footer: core.Footer, StaleRefusals: core.StaleRefusals, LastHash: core.LastHash}
+	type metadataState PaneState
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for _, key := range []string{"history", "footer", "stale_refusals", "last_hash", "held"} {
+		delete(fields, key)
+	}
+	metadata, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	var decoded metadataState
+	if json.Unmarshal(metadata, &decoded) != nil {
+		state.snapshotInvalid = true
+	} else {
+		decoded.History, decoded.Footer = core.History, core.Footer
+		decoded.StaleRefusals, decoded.LastHash = core.StaleRefusals, core.LastHash
+		*state = PaneState(decoded)
+	}
 	var wire struct {
-		*coreState
 		Held json.RawMessage `json:"held"`
 	}
-	decoded := coreState{}
-	wire.coreState = &decoded
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
-	*state = PaneState(decoded)
 	if len(wire.Held) == 0 {
 		return nil
 	}

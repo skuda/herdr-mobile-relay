@@ -96,6 +96,26 @@ func TestHeldDecodeErrorsPreserveCoreAndFence(t *testing.T) {
 	}
 }
 
+func TestOptionalSnapshotMetadataTypesPreserveCoreRows(t *testing.T) {
+	for _, metadata := range []string{`"geometry_epoch":-1`, `"live_start":"3"`, `"terminal_id":7`, `"read_source":{}`, `"snapshot_version":[]`} {
+		m := NewManager(t.TempDir())
+		data := `{"history":["A","B"],"footer":["footer"],"stale_refusals":0,"last_hash":"h",` + metadata + `}`
+		if err := os.WriteFile(m.stateFile("p"), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		state := m.loadState("p")
+		if !slices.Equal(state.History, []string{"A", "B"}) || !slices.Equal(state.Footer, []string{"footer"}) || !state.snapshotInvalid {
+			t.Fatalf("optional metadata reset valid core: history=%q footer=%q invalid=%v", state.History, state.Footer, state.snapshotInvalid)
+		}
+		ctx := physicalContext(1, 54)
+		ctx.ReadSource = SourceLegacy
+		got, _, _ := m.AdmitSnapshot("p", snapshotPage("new1", "new2"), ctx, 0)
+		if got != snapshotPage("A", "B", "new1", "new2") {
+			t.Fatal("bad optional metadata did not retain a frozen prefix")
+		}
+	}
+}
+
 func TestHeldMalformedWholeFileResetsAndUnknownVersionFences(t *testing.T) {
 	for _, test := range []struct {
 		name, data string

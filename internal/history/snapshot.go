@@ -271,7 +271,7 @@ func validateSnapshotState(state *PaneState) {
 	legacyFormat := state.SnapshotVersion == 0 && state.ReadSource == "" &&
 		state.SegmentStart == 0 && state.LiveStart == 0 && state.GeometryEpoch == 0 &&
 		state.LeaseRevision == 0 && state.Columns == 0 && state.Rows == 0
-	validHeld := !state.heldInvalid && heldRowCount(state.Held) <= MaxHeldRows
+	validHeld := !state.heldInvalid && !state.snapshotInvalid && heldRowCount(state.Held) <= MaxHeldRows
 	for _, record := range state.Held {
 		if len(record.Rows) == 0 || record.FirstSeenAt.IsZero() || record.Segment < 0 || record.Position < record.Segment || record.Position > state.LiveStart {
 			validHeld = false

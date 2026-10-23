@@ -120,6 +120,10 @@ func physicalPrivacyPatterns() []*regexp.Regexp {
 	return patterns
 }
 
+func physicalPrivacyMatch(text string, pattern *regexp.Regexp) bool {
+	return pattern.MatchString(text) || pattern.MatchString(NormalizeLine(text))
+}
+
 func TestPhysicalFixturesContainNoEnvironmentText(t *testing.T) {
 	paths, err := filepath.Glob("testdata/physical-*.json")
 	if err != nil {
@@ -142,7 +146,7 @@ func TestPhysicalFixturesContainNoEnvironmentText(t *testing.T) {
 			switch value := value.(type) {
 			case string:
 				for i, pattern := range physicalPrivacyPatterns() {
-					if pattern.MatchString(NormalizeLine(value)) {
+					if physicalPrivacyMatch(value, pattern) {
 						t.Errorf("%s matches environment pattern %d", path, i)
 					}
 				}
@@ -162,17 +166,17 @@ func TestPhysicalFixturesContainNoEnvironmentText(t *testing.T) {
 }
 
 func TestPhysicalPrivacyPatternsPositiveControl(t *testing.T) {
-	for _, text := range []string{"/home/example/project", "/var/tmp/example", "pane-cwd", "model-status", "API Usage Billing", "account example", "Haiku 0.0", "cf-example", "reviewer--example", "w12:p34", "00000000-0000-0000-0000-000000000000"} {
+	for _, text := range []string{"/home/example/project", "/var/tmp/example", "pane-cwd", "model-status", "API Usage Billing", "account example", "Haiku 0.0", "cf-example", "reviewer--example", "w12:p34", "00000000-0000-0000-0000-000000000000", "\x1b]0;/home/example/project\x07safe", "\x1b]8;;file:///home/example/project\x07safe\x1b]8;;\x07"} {
 		found := false
 		for _, pattern := range physicalPrivacyPatterns() {
-			found = found || pattern.MatchString(text)
+			found = found || physicalPrivacyMatch(text, pattern)
 		}
 		if !found {
 			t.Errorf("privacy positive control missed %q", text)
 		}
 	}
 	for _, pattern := range physicalPrivacyPatterns() {
-		if pattern.MatchString("❯ /clear") {
+		if physicalPrivacyMatch("❯ /clear", pattern) {
 			t.Fatal("privacy scan rejects command echo")
 		}
 	}
@@ -280,9 +284,8 @@ func assertPhysicalObservedAnswers(t *testing.T, fixture physicalReplayFixture, 
 	}
 }
 
-func assertPhysicalAnswerContinuations(t *testing.T, fixture physicalReplayFixture, indices []int, stored []string) {
-	t.Helper()
-	observed := make(map[string]bool)
+func physicalObservedAnswerSequence(fixture physicalReplayFixture, indices []int) []string {
+	var observed []string
 	for _, index := range indices {
 		inAnswer := index == 0
 		for _, row := range fixture.body(index) {
@@ -293,21 +296,51 @@ func assertPhysicalAnswerContinuations(t *testing.T, fixture physicalReplayFixtu
 			if text == "" || strings.HasPrefix(text, "❯") {
 				inAnswer = false
 			}
-			if inAnswer && strings.HasPrefix(text, "  ") && !physicalAnswerStart.MatchString(text) {
-				observed[text] = true
+			if !inAnswer || (!strings.HasPrefix(text, "  ") && !strings.HasPrefix(text, "● ")) {
+				continue
+			}
+			text = strings.TrimPrefix(text, "● ")
+			if !slices.Contains(observed, text) {
+				observed = append(observed, text)
 			}
 		}
 	}
-	for row := range observed {
-		count := 0
-		for _, value := range stored {
-			if physicalText(value) == row {
+	var complete []string
+	for _, row := range observed {
+		// An observed strict prefix of a later complete row is an approved
+		// streaming replacement, not a second retained answer row.
+		replaced := false
+		for _, later := range observed {
+			if len(later) > len(row) && strings.HasPrefix(later, row) {
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			complete = append(complete, row)
+		}
+	}
+	return complete
+}
+
+func assertPhysicalAnswerContinuations(t *testing.T, fixture physicalReplayFixture, indices []int, stored []string) {
+	t.Helper()
+	previous := -1
+	for _, row := range physicalObservedAnswerSequence(fixture, indices) {
+		count, position := 0, -1
+		for i, value := range stored {
+			if strings.TrimPrefix(physicalText(value), "● ") == row {
 				count++
+				position = i
 			}
 		}
 		if count != 1 {
-			t.Errorf("observed answer continuation occurs %d times, want once: %q", count, row)
+			t.Errorf("observed complete answer row occurs %d times, want once: %q", count, row)
 		}
+		if position <= previous {
+			t.Errorf("observed answer row is out of order: %q", row)
+		}
+		previous = max(previous, position)
 	}
 }
 
@@ -320,9 +353,7 @@ func TestPhysicalChunk17Replay(t *testing.T) {
 				m, _ := physicalReplay(t, fixture, indices, inserts, nil)
 				state := m.states["p"]
 				assertPhysicalObservedAnswers(t, fixture, indices, state.History)
-				if stride == 1 {
-					assertPhysicalAnswerContinuations(t, fixture, indices, state.History)
-				}
+				assertPhysicalAnswerContinuations(t, fixture, indices, state.History)
 				planet := 0
 				for _, row := range state.History {
 					if strings.TrimSpace(physicalText(row)) == "planet." {
@@ -484,8 +515,24 @@ func TestPhysicalMarkdownReplayAndTableRedraws(t *testing.T) {
 	for name, indices := range map[string][]int{"complete": physicalIndices(0, 26, 1), "table20-21": {20, 21}, "table21-22": {21, 22}} {
 		t.Run(name, func(t *testing.T) {
 			m, _ := physicalReplay(t, fixture, indices, true, nil)
-			if physicalNonblank(physicalHeldRows(t, m.states["p"])) == 0 {
-				t.Fatal("earlier table layouts must remain held")
+			state := m.states["p"]
+			old20, old21 := fixture.body(20)[76:81], fixture.body(21)[74:81]
+			wantHeld := append(slices.Clone(old20), old21...)
+			if name == "table20-21" {
+				wantHeld = old20
+			}
+			if name == "table21-22" {
+				wantHeld = old21
+			}
+			if !slices.Equal(physicalHeldRows(t, state), wantHeld) {
+				t.Errorf("table redraw held raw rows differ: got=%d want=%d", len(physicalHeldRows(t, state)), len(wantHeld))
+			}
+			for _, obsolete := range append(slices.Clone(old20), old21...) {
+				for _, visible := range state.History {
+					if physicalText(visible) == physicalText(obsolete) {
+						t.Errorf("obsolete table layout entered visible history: %q", physicalText(obsolete))
+					}
+				}
 			}
 			if name != "complete" {
 				return
@@ -507,8 +554,12 @@ func TestPhysicalMarkdownReplayAndTableRedraws(t *testing.T) {
 					want = append(want, physicalText(row))
 				}
 			}
-			for _, row := range m.states["p"].History {
-				if slices.Contains(want, physicalText(row)) {
+			answerStarted := false
+			for _, row := range state.History {
+				if strings.Contains(physicalText(row), "● Mountain Lakes") {
+					answerStarted = true
+				}
+				if answerStarted && physicalText(row) != "" {
 					got = append(got, physicalText(row))
 				}
 			}

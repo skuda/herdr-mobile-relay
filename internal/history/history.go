@@ -15,6 +15,7 @@ import (
 
 const (
 	MaxLines        = 10000
+	MaxHeldRows     = 2000
 	FooterLines     = 6
 	CaptureInterval = 4 * time.Second
 	SaveInterval    = 10 * time.Second
@@ -22,23 +23,32 @@ const (
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]|\x1b[>=<]|\x1b\[[\?]?[0-9;]*[hlJKHfG]`)
 
+type HeldRecord struct {
+	Rows        []string  `json:"rows"`
+	Position    int       `json:"position"`
+	Segment     int       `json:"segment"`
+	FirstSeenAt time.Time `json:"first_seen_at"`
+}
+
 type PaneState struct {
-	History         []string `json:"history"`
-	Footer          []string `json:"footer"`
-	StaleRefusals   int      `json:"stale_refusals"`
-	LastHash        string   `json:"last_hash"`
-	SnapshotVersion int      `json:"snapshot_version,omitempty"`
-	TerminalID      string   `json:"terminal_id,omitempty"`
-	ReadSource      string   `json:"read_source,omitempty"`
-	GeometryEpoch   uint64   `json:"geometry_epoch,omitempty"`
-	LeaseRevision   uint64   `json:"lease_revision,omitempty"`
-	Columns         int      `json:"columns,omitempty"`
-	Rows            int      `json:"rows,omitempty"`
-	SegmentStart    int      `json:"segment_start,omitempty"`
-	LiveStart       int      `json:"live_start,omitempty"`
+	History         []string     `json:"history"`
+	Footer          []string     `json:"footer"`
+	StaleRefusals   int          `json:"stale_refusals"`
+	LastHash        string       `json:"last_hash"`
+	SnapshotVersion int          `json:"snapshot_version,omitempty"`
+	TerminalID      string       `json:"terminal_id,omitempty"`
+	ReadSource      string       `json:"read_source,omitempty"`
+	GeometryEpoch   uint64       `json:"geometry_epoch,omitempty"`
+	LeaseRevision   uint64       `json:"lease_revision,omitempty"`
+	Columns         int          `json:"columns,omitempty"`
+	Rows            int          `json:"rows,omitempty"`
+	SegmentStart    int          `json:"segment_start,omitempty"`
+	LiveStart       int          `json:"live_start,omitempty"`
+	Held            []HeldRecord `json:"held,omitempty"`
 
 	loaded          bool
 	snapshotInvalid bool
+	heldInvalid     bool
 	dirty           bool
 	mutationVersion uint64
 	saveDue         time.Time
@@ -163,6 +173,45 @@ func (m *Manager) applyMatch(state *PaneState, body []string, match seqmatch.Mat
 			state.StaleRefusals = 0
 		}
 	}
+}
+
+func (state *PaneState) UnmarshalJSON(data []byte) error {
+	type coreState PaneState
+	var wire struct {
+		*coreState
+		Held json.RawMessage `json:"held"`
+	}
+	decoded := coreState{}
+	wire.coreState = &decoded
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*state = PaneState(decoded)
+	if len(wire.Held) == 0 {
+		return nil
+	}
+	if string(wire.Held) == "null" || json.Unmarshal(wire.Held, &state.Held) != nil || !heldRowsAreStrings(wire.Held) {
+		state.Held = nil
+		state.heldInvalid = true
+	}
+	return nil
+}
+
+func heldRowsAreStrings(data json.RawMessage) bool {
+	var records []struct {
+		Rows []json.RawMessage `json:"rows"`
+	}
+	if json.Unmarshal(data, &records) != nil {
+		return false
+	}
+	for _, record := range records {
+		for _, row := range record.Rows {
+			if len(row) == 0 || row[0] != '"' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (m *Manager) loadState(paneID string) *PaneState {

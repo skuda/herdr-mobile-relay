@@ -31,6 +31,7 @@ func (m *Manager) flush(now time.Time, force bool) error {
 		}
 		snapshot := *state
 		snapshot.History, snapshot.Footer = slices.Clone(state.History), slices.Clone(state.Footer)
+		snapshot.Held = cloneHeldRecords(state.Held)
 		jobs = append(jobs, persistenceJob{paneID: paneID, instance: state, state: snapshot, version: state.mutationVersion})
 	}
 	m.mu.Unlock()

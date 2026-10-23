@@ -28,6 +28,9 @@ type SnapshotAdmission struct {
 	Admitted        bool
 	ContentChanged  bool
 	MetadataChanged bool
+	HeldEvictedRows int
+	HeldExpiredRows int
+	HeldTotalRows   int
 }
 
 // MergeSnapshot retains a page using its source and sampled PTY context.
@@ -50,6 +53,7 @@ func (m *Manager) PreviewSnapshot(paneID, rawContent string, context SnapshotCon
 	}
 	clone := *state
 	clone.History, clone.Footer = slices.Clone(state.History), slices.Clone(state.Footer)
+	clone.Held = cloneHeldRecords(state.Held)
 	m.mu.Unlock()
 	if context.ReadSource == SourceRecent {
 		rows := append(slices.Clone(clone.History[:clone.LiveStart]), strings.Split(rawContent, "\n")...)
@@ -71,6 +75,7 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		return content, clipped, SnapshotAdmission{}
 	}
 	beforeHistory, beforeFooter := slices.Clone(state.History), slices.Clone(state.Footer)
+	beforeHeld := cloneHeldRecords(state.Held)
 	beforeContext := state.snapshotContext()
 	beforeVersion, beforeSegment, beforeLive := state.SnapshotVersion, state.SegmentStart, state.LiveStart
 	beforeHash, beforeRefusals := state.LastHash, state.StaleRefusals
@@ -109,12 +114,14 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		m.mergeLegacySegment(state, body)
 		state.LiveStart = len(state.History)
 	}
-	trimSnapshotState(state)
+	expired := trimSnapshotState(state)
+	evicted := trimHeldCapacity(state)
 	admission := SnapshotAdmission{
+		HeldExpiredRows: expired, HeldEvictedRows: evicted, HeldTotalRows: heldRowCount(state.Held),
 		Admitted:       true,
 		ContentChanged: !slices.Equal(beforeHistory, state.History) || !slices.Equal(beforeFooter, state.Footer),
 		MetadataChanged: beforeContext != state.snapshotContext() || beforeVersion != state.SnapshotVersion ||
-			beforeSegment != state.SegmentStart || beforeLive != state.LiveStart || boundary,
+			beforeSegment != state.SegmentStart || beforeLive != state.LiveStart || boundary || !equalHeldRecords(beforeHeld, state.Held),
 	}
 	if admission.ContentChanged || admission.MetadataChanged || beforeHash != state.LastHash || beforeRefusals != state.StaleRefusals {
 		state.dirty = true
@@ -161,23 +168,104 @@ func limitSnapshotLines(lines []string, limit int) (string, bool) {
 	return strings.Join(lines, "\n"), clipped
 }
 
-func trimSnapshotState(state *PaneState) {
+func cloneHeldRecords(records []HeldRecord) []HeldRecord {
+	clone := slices.Clone(records)
+	for i := range clone {
+		clone[i].Rows = slices.Clone(clone[i].Rows)
+	}
+	return clone
+}
+
+func equalHeldRecords(a, b []HeldRecord) bool {
+	return slices.EqualFunc(a, b, func(a, b HeldRecord) bool {
+		return a.Position == b.Position && a.Segment == b.Segment && a.FirstSeenAt.Equal(b.FirstSeenAt) && slices.Equal(a.Rows, b.Rows)
+	})
+}
+
+func heldRowCount(records []HeldRecord) int {
+	count := 0
+	for _, record := range records {
+		count += len(record.Rows)
+	}
+	return count
+}
+
+func clampHeldPins(state *PaneState) {
+	for i := range state.Held {
+		state.Held[i].Position = min(state.Held[i].Position, state.LiveStart)
+		state.Held[i].Segment = min(state.Held[i].Segment, state.Held[i].Position)
+	}
+}
+
+func appendHeldRows(state *PaneState, rows []string, position, segment int, now time.Time) int {
+	nonblank := false
+	for _, row := range rows {
+		if strings.TrimRight(strings.ReplaceAll(NormalizeLine(row), " ", " "), " \t\n") != "" {
+			nonblank = true
+			break
+		}
+	}
+	if !nonblank {
+		return 0
+	}
+	state.Held = append(state.Held, HeldRecord{Rows: slices.Clone(rows), Position: position, Segment: segment, FirstSeenAt: now.UTC()})
+	return len(rows)
+}
+
+func trimHeldCapacity(state *PaneState) int {
+	removed := max(0, heldRowCount(state.Held)-MaxHeldRows)
+	remaining := removed
+	for len(state.Held) > 0 && remaining >= len(state.Held[0].Rows) {
+		remaining -= len(state.Held[0].Rows)
+		state.Held[0] = HeldRecord{}
+		state.Held = state.Held[1:]
+	}
+	if remaining > 0 {
+		state.Held[0].Rows = slices.Clone(state.Held[0].Rows[remaining:])
+	}
+	return removed
+}
+
+func trimSnapshotState(state *PaneState) int {
 	removed := max(0, len(state.History)-MaxLines)
 	state.History = state.History[removed:]
 	state.SegmentStart = min(len(state.History), max(0, state.SegmentStart-removed))
 	state.LiveStart = min(len(state.History), max(state.SegmentStart, state.LiveStart-removed))
+	expired := 0
+	kept := state.Held[:0]
+	for _, record := range state.Held {
+		if record.Position < removed {
+			expired += len(record.Rows)
+			continue
+		}
+		record.Position -= removed
+		record.Segment = max(0, record.Segment-removed)
+		kept = append(kept, record)
+	}
+	clear(state.Held[len(kept):])
+	state.Held = kept
+	clampHeldPins(state)
+	return expired
 }
 
 func validateSnapshotState(state *PaneState) {
 	legacyFormat := state.SnapshotVersion == 0 && state.ReadSource == "" &&
 		state.SegmentStart == 0 && state.LiveStart == 0 && state.GeometryEpoch == 0 &&
 		state.LeaseRevision == 0 && state.Columns == 0 && state.Rows == 0
-	if state.SnapshotVersion == snapshotVersion &&
+	validHeld := !state.heldInvalid && heldRowCount(state.Held) <= MaxHeldRows
+	for _, record := range state.Held {
+		if len(record.Rows) == 0 || record.FirstSeenAt.IsZero() || record.Segment < 0 || record.Position < record.Segment || record.Position > state.LiveStart {
+			validHeld = false
+		}
+	}
+	if validHeld && state.SnapshotVersion == snapshotVersion &&
 		(state.ReadSource == SourceRecent || state.ReadSource == SourceLegacy) &&
 		state.SegmentStart >= 0 && state.SegmentStart <= state.LiveStart && state.LiveStart <= len(state.History) {
 		return
 	}
-	state.snapshotInvalid = !legacyFormat
+	state.snapshotInvalid = !legacyFormat || !validHeld || len(state.Held) > 0
+	state.Held = nil
+	state.heldInvalid = false
 	state.SnapshotVersion = 0
 	state.ReadSource = SourceLegacy
 	state.GeometryEpoch, state.LeaseRevision = 0, 0

@@ -68,22 +68,16 @@ func physicalNonblank(rows []string) int {
 
 func physicalHeld(t *testing.T, state *PaneState) []physicalHeldView {
 	t.Helper()
-	data, err := json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
+	var records []physicalHeldView
+	for _, record := range state.Held {
+		records = append(records, physicalHeldView{Rows: slices.Clone(record.Rows), Position: record.Position, Segment: record.Segment, FirstSeenAt: record.FirstSeenAt})
 	}
-	var view struct {
-		Held []physicalHeldView `json:"held"`
-	}
-	if err := json.Unmarshal(data, &view); err != nil {
-		t.Fatal(err)
-	}
-	for _, record := range view.Held {
+	for _, record := range records {
 		if len(record.Rows) == 0 || record.FirstSeenAt.IsZero() || record.Segment < 0 || record.Segment > record.Position || record.Position > state.LiveStart {
 			t.Fatalf("invalid held record: rows=%d segment=%d position=%d live=%d timestamp=%v", len(record.Rows), record.Segment, record.Position, state.LiveStart, record.FirstSeenAt)
 		}
 	}
-	return view.Held
+	return records
 }
 
 func physicalHeldRows(t *testing.T, state *PaneState) []string {
@@ -95,8 +89,8 @@ func physicalHeldRows(t *testing.T, state *PaneState) []string {
 	return rows
 }
 
-// S9b adds PaneState.Held. S9c/S9d add admission diagnostics; keep their field
-// spelling isolated here while the test-first commit builds on the old state.
+// S9c/S9d add admission diagnostics; keep their field spelling isolated here
+// while the matcher contract tests build before those slices.
 func physicalDiagnostic(t *testing.T, admission SnapshotAdmission, names ...string) int {
 	t.Helper()
 	value := reflect.ValueOf(admission)

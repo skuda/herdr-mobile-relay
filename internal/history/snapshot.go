@@ -66,15 +66,17 @@ func (m *Manager) PreviewSnapshot(paneID, rawContent string, context SnapshotCon
 		m.mu.Unlock()
 		return rawContent, false
 	}
+	if context.ReadSource == SourceRecent {
+		rows := slices.Clone(state.History[:state.LiveStart])
+		m.mu.Unlock()
+		rows = append(rows, strings.Split(rawContent, "\n")...)
+		content, _ := limitSnapshotLines(rows, 0)
+		return content, true
+	}
 	clone := *state
 	clone.History, clone.Footer = slices.Clone(state.History), slices.Clone(state.Footer)
 	clone.Held = cloneHeldRecords(state.Held)
 	m.mu.Unlock()
-	if context.ReadSource == SourceRecent {
-		rows := append(slices.Clone(clone.History[:clone.LiveStart]), strings.Split(rawContent, "\n")...)
-		content, _ := limitSnapshotLines(rows, 0)
-		return content, true
-	}
 	preview := &Manager{states: map[string]*PaneState{paneID: &clone}, lastSave: make(map[string]time.Time), now: time.Now}
 	content, _, _ := preview.AdmitSnapshot(paneID, rawContent, context, 0)
 	return content, true
@@ -297,22 +299,24 @@ func validateSnapshotState(state *PaneState) {
 }
 
 func (m *Manager) mergeLegacySegment(state *PaneState, body []string) {
-	prefix := slices.Clone(state.History[:state.SegmentStart])
 	active := &PaneState{
 		History: state.History[state.SegmentStart:], LastHash: state.LastHash, StaleRefusals: state.StaleRefusals,
 	}
-	m.mergeLegacyBody(active, body)
+	if !m.mergeLegacyBody(active, body) {
+		return
+	}
+	prefix := slices.Clone(state.History[:state.SegmentStart])
 	state.History = append(prefix, active.History...)
 	state.LastHash, state.StaleRefusals = active.LastHash, active.StaleRefusals
 }
 
-func (m *Manager) mergeLegacyBody(state *PaneState, body []string) {
+func (m *Manager) mergeLegacyBody(state *PaneState, body []string) bool {
 	if len(body) == 0 {
-		return
+		return false
 	}
 	hash := hashLines(body)
 	if hash == state.LastHash && state.StaleRefusals == 0 {
-		return
+		return false
 	}
 	state.LastHash = hash
 	normalized, histNorm := normalizeLines(body), normalizeLines(state.History)
@@ -326,4 +330,5 @@ func (m *Manager) mergeLegacyBody(state *PaneState, body []string) {
 		state.History = append(state.History, body...)
 		state.StaleRefusals = 0
 	}
+	return true
 }

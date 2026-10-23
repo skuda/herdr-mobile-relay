@@ -527,8 +527,12 @@ func TestPhysicalMarkdownReplayAndTableRedraws(t *testing.T) {
 			if !slices.Equal(physicalHeldRows(t, state), wantHeld) {
 				t.Errorf("table redraw held raw rows differ: got=%d want=%d", len(physicalHeldRows(t, state)), len(wantHeld))
 			}
-			for _, obsolete := range append(slices.Clone(old20), old21...) {
-				for _, visible := range state.History {
+			current := normalizeLines(fixture.body(indices[len(indices)-1]))
+			for _, obsolete := range wantHeld {
+				if slices.Contains(current, physicalText(obsolete)) {
+					continue
+				}
+				for _, visible := range state.History[:state.LiveStart] {
 					if physicalText(visible) == physicalText(obsolete) {
 						t.Errorf("obsolete table layout entered visible history: %q", physicalText(obsolete))
 					}

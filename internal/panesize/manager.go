@@ -695,7 +695,7 @@ func (m *Manager) ResizedWithin(paneID string, window time.Duration) bool {
 	return m.now().Sub(state.resizedAt) < window
 }
 
-// lockPane returns the pane's current state with its I/O lock held. A missing
+// lockPane returns the pane's current state with its lease lock held. A missing
 // pane gets an unresolved placeholder, so concurrent first acquisitions of
 // one pane serialize on a single state.
 func (m *Manager) lockPane(ctx context.Context, paneID string) (*paneState, bool, error) {

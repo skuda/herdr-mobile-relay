@@ -1589,9 +1589,7 @@ func TestTextReadDoesNotEnterPhysicalArchive(t *testing.T) {
 	}
 }
 
-// RED: One admitted underlying read increments one class; followers do not
-// double-count; one freeze emits one safe reason log; held eviction reports
-// a count without row text.
+// A held-majority freeze emits one reason log without the supplied page rows.
 func TestHistoryMatcherFreezeLogsSafeReasonOnce(t *testing.T) {
 	s, _, _ := captureServer(t, true)
 	var output bytes.Buffer

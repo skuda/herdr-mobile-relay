@@ -10,8 +10,6 @@ import (
 	"time"
 )
 
-// RED: A held-only mutation is durable metadata; its preview and queued save
-// own independent nested rows; held churn cannot evict transcript.
 func heldWireState(t *testing.T, history []string, live int, held any) *PaneState {
 	t.Helper()
 	wire := map[string]any{

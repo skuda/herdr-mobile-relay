@@ -307,7 +307,8 @@ boundaries can repeat one page. Panes with scrollback keep legacy matching
 across leases, PTY resizes, and relay restarts. Sampling gaps and the
 three-second resize-settling pause can lose output. The six-row footer split is
 a heuristic. Ordered matching archives supported old-coordinate ranges and
-keeps the raw current page. A supported slot or tail of one to three physical
+keeps the raw current page before the reader's row limit and response clipping.
+A supported slot or tail of one to three physical
 rows can change in place when its replacement is at least as large; the old
 values are not archived. Other unresolved rows can remain held and invisible.
 A short `/clear` can replace or hold the exchange under these generic rules;

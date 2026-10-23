@@ -8,8 +8,6 @@ import (
 	"unsafe"
 )
 
-// RED: Each old nonblank row has one accounted outcome; only supported
-// 1–3-physical-row replacement may drop old values before retention trimming.
 func TestPhysicalOutcomeAccountingContract(t *testing.T) {
 	for _, fixture := range physicalCases(t) {
 		t.Run(fixture.Name, func(t *testing.T) { runPhysicalCase(t, fixture) })

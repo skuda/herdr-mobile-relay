@@ -123,7 +123,7 @@ leases with an attempt count, a next-attempt time and a fixed deadline:
 
 - at most 5 attempts, all within 30 s of the moment the last lease ended;
 - backoff 1 s, 2 s, 4 s, 8 s (capped at 10 s) after each failed attempt;
-- waiting for a busy pane's I/O lock and time spent in lookups, open and
+- waiting for a busy pane's lease lock and time spent in lookups, open and
   ioctls count against the 30 s; a delayed sweep keeps the original lease
   expiry as its start time, and an attempt whose next slot would fall past
   the deadline ends the cleanup;
@@ -200,7 +200,8 @@ history segments for each pane. Lease changes, observed PTY changes, and relay
 restarts start segments for physical and known-zero no-scrollback contexts.
 Panes with scrollback keep legacy matching across leases, PTY resizes, and relay
 restarts. Previously frozen physical prefixes remain frozen. A failed geometry
-sample does not fabricate an epoch-zero boundary. A fullscreen boundary can
+sample does not create a geometry boundary; a later known sample establishes
+an unknown epoch's baseline without adding a boundary. A fullscreen boundary can
 repeat one page. An external A→B→A change entirely between samples remains
 undetectable. Emulator-grid or pixel-only changes do not advance this epoch.
 Narrowing Herdr's grid below the PTY width can clip rows without a detected
@@ -225,10 +226,13 @@ Unexplained contraction, disputed occurrences, and reverse-pushed rows become
 held candidates before the discontinuity check. A verified return of the
 current segment's archived suffix retracts that prefix from the displayed archive;
 matching does not search earlier segments. The response is the archive prefix
-followed by the exact raw current page, including its header, footer, and styles.
+followed by the raw current page, including its header, footer, and styles,
+before the reader's row limit and response clipping apply.
 Held rows remain invisible. Their separate 2,000-row ring removes oldest rows in
 append order, including partial records, with eviction counts in logs. History
 prefix trimming can also expire held records whose archive pins fall before it.
+Rows that reappear or retire in a later admission can keep their earlier held
+copies. Those copies remain in the 2,000-row ring and consume its capacity.
 
 A matcher discontinuity freezes the old body once and installs the new raw page.
 The `held_majority` reason requires `H >= 3 && 2*H > N && N >= 8`, where H is newly
@@ -294,17 +298,19 @@ Shutdown closes admission, joins capture/persistence work, and saves dirty
 state without waiting for its deadline. Clean loaded caches remain unchanged.
 A crash before a successful save can still lose recent samples.
 
-Physical and no-scrollback history becomes a frozen prefix at its first
-runtime admission after restart, even if numeric PTY epochs and lease revisions
-repeat. Scrollback legacy reads resume matching, including older-format files.
+Loaded history becomes a frozen prefix at its first physical or known-zero
+no-scrollback admission after restart, even if numeric PTY epochs and lease
+revisions repeat. Earlier scrollback or unknown-metric legacy admissions do
+not consume that restart fence. Scrollback legacy reads resume matching,
+including older-format files.
 Restart fencing does not infer the source or width of rows from older files.
 The shared pane-ID cache layout is unchanged; separate relays still need
 separate cache roots to avoid shared-cache interference.
 
 This release includes a new phone-app build. It estimates leased prose using
 the effective shared width and adjusts short/blank anchors for contextual
-prepends. Use the matching app build; the older 0.22.10 app can receive long
-frames but lacks these frontend corrections. No new history capability or
+prepends. Use the matching app build; published 0.22.11 and older apps lack
+these frontend corrections. No new history capability or
 client-side history merger is introduced.
 
 ## Residual risks

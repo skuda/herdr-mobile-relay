@@ -421,8 +421,8 @@ func TestPhysicalStoredClearAndGapFill(t *testing.T) {
 // clear sent 264, refill 268, grow start/append1 344, appends2..5
 // 345/346/347/349, shrink start 349, shrink done/submit 364,
 // queue first 433, queue second 448, and final marker checks 576.
-// Record 172 (55.360s) injects the chief-classified geometry boundary, 87x149
-// to 82x195. The capture has no PTY sample proving that emulator change.
+// Record 172 (55.360s) assumes an epoch boundary for the observed rewrap,
+// 87x149 to 82x195. The capture has no PTY sample establishing a PTY change.
 // Markdown steps span 07:36:54.864..07:37:09.335; its 27 pages include the
 // table-width redraws 20->21 and 21->22, not a hook-output collapse.
 func TestPhysicalDesktopShapeWindows(t *testing.T) {

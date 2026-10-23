@@ -18,7 +18,8 @@ project follows [Semantic Versioning](https://semver.org/).
   contexts. These boundaries can repeat a page. Panes with scrollback keep
   legacy matching across leases, PTY resizes, and relay restarts. Physical
   matching retires supported rows in old-coordinate order and preserves the
-  exact raw current page. Supported slots or tails of one to three physical rows
+  raw current page before reader-row limits and response clipping. Supported
+  slots or tails of one to three physical rows
   can change in place when the new slot is at least as large; their old values
   are not archived. Unresolved rows stay invisible in a separate 2,000-row
   oldest-first held ring beyond the 10,000 history rows, with removal counts in

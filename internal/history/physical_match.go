@@ -33,9 +33,8 @@ func comparisonBody(body []string) []string {
 	return rows
 }
 
+// physicalConsensus consumes physical comparison rows, not raw terminal rows.
 func physicalConsensus(old, next []string, linear bool) physicalConsensusResult {
-	old = physicalComparisonRows(old)
-	next = physicalComparisonRows(next)
 	oldIndex, newIndex := make(map[string][]int), make(map[string][]int)
 	for i, row := range old {
 		if physicalSubstantive(row) {
@@ -173,9 +172,30 @@ const (
 )
 
 type physicalTransition struct {
-	outcome    []uint8
-	consensus  physicalConsensusResult
-	diagnostic SnapshotAdmission
+	outcome     []uint8
+	consensus   physicalConsensusResult
+	diagnostic  SnapshotAdmission
+	agreedIndex []int
+	header      int
+}
+
+type physicalAnchorRun struct{ oldStart, newStart, end, pairs int }
+
+func (plan *physicalTransition) anchorRun(old, next []string, pair physicalPair) physicalAnchorRun {
+	a, b := pair.Old, pair.Next
+	for a > plan.header && b > plan.header && old[a-1] == next[b-1] && (!physicalSubstantive(old[a-1]) || plan.agreedIndex[a-1] == b-1) {
+		a--
+		b--
+	}
+	end, j, count := a, b, 0
+	for end < len(old) && j < len(next) && old[end] == next[j] && (!physicalSubstantive(old[end]) || plan.agreedIndex[end] == j) {
+		if plan.agreedIndex[end] == j {
+			count++
+		}
+		end++
+		j++
+	}
+	return physicalAnchorRun{a, b, end, count}
 }
 
 func planPhysicalTransition(old, next []string, linear bool) physicalTransition {
@@ -227,25 +247,15 @@ func planPhysicalTransition(old, next []string, linear bool) physicalTransition 
 		result.outcome[header] = physicalMatched
 		header++
 	}
+	result.agreedIndex, result.header = agreed, header
 	// A forward range needs an agreed contiguous anchor and a blank new gap.
 	for _, pair := range result.consensus.agreed {
 		if pair.Old < header {
 			continue
 		}
-		a, b := pair.Old, pair.Next
-		for a > header && b > header && old[a-1] == next[b-1] && (!physicalSubstantive(old[a-1]) || agreed[a-1] == b-1) {
-			a--
-			b--
-		}
-		end, j, count := a, b, 0
-		for end < len(old) && j < len(next) && old[end] == next[j] && (!physicalSubstantive(old[end]) || agreed[end] == j) {
-			if agreed[end] == j {
-				count++
-			}
-			end++
-			j++
-		}
-		if count < 2 {
+		run := result.anchorRun(old, next, pair)
+		a, b, end := run.oldStart, run.newStart, run.end
+		if run.pairs < 2 {
 			continue
 		}
 		supported := b >= header
@@ -388,39 +398,19 @@ func verifiedPhysicalReverse(state *PaneState, old, next []string, plan *physica
 	if state.LiveStart <= state.SegmentStart || plan.diagnostic.Class == "freeze" {
 		return 0
 	}
-	agreed := make([]int, len(old))
-	for i := range agreed {
-		agreed[i] = -1
-	}
+
+	header := plan.header
+	processedEnd := -1
 	for _, pair := range plan.consensus.agreed {
-		agreed[pair.Old] = pair.Next
-	}
-	header := 0
-	for header < min(len(old), len(next)) && old[header] == next[header] && (!physicalSubstantive(old[header]) || agreed[header] == header) {
-		header++
-	}
-	for _, pair := range plan.consensus.agreed {
-		if pair.Old < header || pair.Next-pair.Old < 2 {
+		if pair.Old < header || pair.Old < processedEnd || pair.Next-pair.Old < 2 {
 			continue
 		}
-		a, b := pair.Old, pair.Next
-		for a > header && b > header && old[a-1] == next[b-1] && (!physicalSubstantive(old[a-1]) || agreed[a-1] == b-1) {
-			a--
-			b--
-		}
-		if a != header {
+		run := plan.anchorRun(old, next, pair)
+		processedEnd = run.end
+		if run.oldStart != header || run.pairs < 2 {
 			continue
 		}
-		runPairs := 0
-		for i, j := a, b; i < len(old) && j < len(next) && old[i] == next[j] && (!physicalSubstantive(old[i]) || agreed[i] == j); i, j = i+1, j+1 {
-			if agreed[i] == j {
-				runPairs++
-			}
-		}
-		if runPairs < 2 {
-			continue
-		}
-		k := b - a
+		k := run.newStart - run.oldStart
 		if k > state.LiveStart-state.SegmentStart {
 			return 0
 		}
@@ -428,33 +418,31 @@ func verifiedPhysicalReverse(state *PaneState, old, next []string, plan *physica
 		if !slices.Equal(archived, next[header:header+k]) {
 			return 0
 		}
-		agreement := physicalConsensus(archived, next[header:header+k], true)
-		if len(agreement.agreed) < 2 {
+		substantive := 0
+		for _, row := range archived {
+			if physicalSubstantive(row) {
+				substantive++
+			}
+		}
+		if substantive < 2 {
 			return 0
 		}
-		matches := 0
-		for _, p := range plan.consensus.agreed {
-			if p.Next-p.Old == k {
-				matches++
+		combined := append(slices.Clone(archived), old[header:]...)
+		proof := physicalConsensus(combined, next[header:], true)
+		if proof.budget {
+			return 0
+		}
+		prefixPairs := 0
+		for _, p := range proof.agreed {
+			if p.Old < k && p.Old == p.Next {
+				prefixPairs++
 			}
 		}
-		if matches >= 2 {
-			combined := append(slices.Clone(archived), old[header:]...)
-			proof := physicalConsensus(combined, next[header:], true)
-			if proof.budget {
-				return 0
-			}
-			prefixPairs := 0
-			for _, p := range proof.agreed {
-				if p.Old < k && p.Old == p.Next {
-					prefixPairs++
-				}
-			}
-			if prefixPairs >= 2 {
-				return k
-			}
+		if prefixPairs >= 2 {
+			return k
 		}
 	}
+
 	return 0
 }
 

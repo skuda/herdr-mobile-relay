@@ -219,7 +219,7 @@ func clampHeldPins(state *PaneState) {
 func appendHeldRows(state *PaneState, rows []string, position, segment int, now time.Time) int {
 	nonblank := false
 	for _, row := range rows {
-		if strings.TrimRight(strings.ReplaceAll(NormalizeLine(row), " ", " "), " \t\n") != "" {
+		if physicalComparisonRow(row) != "" {
 			nonblank = true
 			break
 		}

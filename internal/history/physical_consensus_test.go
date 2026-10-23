@@ -138,11 +138,11 @@ func TestPhysicalSparseAndLinearConsensusAgainstOracle(t *testing.T) {
 	for _, old := range pages {
 		for _, next := range pages {
 			wantAgreed, wantFeasible := physicalConsensusOracle(old, next)
-			got := physicalConsensus(old, next, false)
+			got := physicalConsensus(physicalComparisonRows(old), physicalComparisonRows(next), false)
 			if !slices.Equal(got.agreed, wantAgreed) || !slices.Equal(got.feasible, wantFeasible) {
 				t.Fatalf("sparse old=%q next=%q agreed=%v feasible=%v want %v/%v", old, next, got.agreed, got.feasible, wantAgreed, wantFeasible)
 			}
-			fast := physicalConsensus(old, next, true)
+			fast := physicalConsensus(physicalComparisonRows(old), physicalComparisonRows(next), true)
 			if !slices.Equal(fast.agreed, wantAgreed) || !slices.Equal(fast.feasible, wantFeasible) {
 				t.Fatalf("linear old=%q next=%q got=%v/%v want=%v/%v", old, next, fast.agreed, fast.feasible, wantAgreed, wantFeasible)
 			}

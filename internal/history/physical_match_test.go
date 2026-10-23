@@ -51,6 +51,7 @@ func physicalCases(t *testing.T) []physicalCase {
 	return fixture.Cases
 }
 
+// physicalText is an independent oracle for the physical comparison contract.
 func physicalText(row string) string {
 	return strings.TrimRight(strings.ReplaceAll(NormalizeLine(row), " ", " "), " \t\n")
 }

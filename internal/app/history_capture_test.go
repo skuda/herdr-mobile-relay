@@ -2058,3 +2058,29 @@ func TestPaneInteractionCloneOwnsReviewSummaries(t *testing.T) {
 		t.Fatal("review summary clone shares nested state")
 	}
 }
+
+func TestLateHistoryTickCannotBurstWithPromptTick(t *testing.T) {
+	s, _, advance := captureServer(t, false)
+	var reads atomic.Int32
+	installPaneReadFixture(t, s, func(context.Context) (string, error) { reads.Add(1); return capturePage("A", "B"), nil })
+	s.historyTasks = newLifecycleTasks(context.Background())
+	t.Cleanup(s.historyTasks.Stop)
+	base := s.historyNow()
+	advance(3900 * time.Millisecond)
+	s.captureHistoryTick(base)
+	waitHistoryCapture(t, s)
+	advance(100 * time.Millisecond)
+	s.captureHistoryTick(base.Add(history.CaptureInterval))
+	waitHistoryCapture(t, s)
+	s.scheduleHistoryCapture(context.Background(), "pane-1")
+	waitHistoryCapture(t, s)
+	if got := reads.Load(); got != 1 {
+		t.Fatalf("late and prompt tick started %d captures 100ms apart, want one", got)
+	}
+	advance(3 * time.Second)
+	s.scheduleHistoryCapture(context.Background(), "pane-1")
+	waitHistoryCapture(t, s)
+	if got := reads.Load(); got != 2 {
+		t.Fatalf("capture did not resume after actual-time floor: reads=%d", got)
+	}
+}

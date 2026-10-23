@@ -2137,12 +2137,14 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 	s.scheduleHistoryCaptureAt(ctx, paneID, s.historyNow())
 }
 
-func (s *Server) scheduleHistoryCaptureAt(ctx context.Context, paneID string, scheduledAt time.Time) {
+func (s *Server) scheduleHistoryCaptureAt(ctx context.Context, paneID string, _ time.Time) {
 	if s.historyTasks == nil {
 		return
 	}
 	s.historyCaptureMu.Lock()
-	if s.historyClosed || s.historyInflight[paneID] || scheduledAt.Sub(s.historyLast[paneID]) < history.CaptureInterval {
+	scheduledAt := s.historyNow()
+	minimumInterval := history.CaptureInterval - history.CaptureInterval/4
+	if s.historyClosed || s.historyInflight[paneID] || scheduledAt.Sub(s.historyLast[paneID]) < minimumInterval {
 		s.historyCaptureMu.Unlock()
 		return
 	}

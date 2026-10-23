@@ -23,6 +23,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
 	"github.com/0cv/herdr-mobile-relay/internal/panesize"
+	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
 func captureServer(t *testing.T, leased bool) (*Server, *paneSizeFakes, func(time.Duration)) {
@@ -1772,5 +1773,72 @@ func TestHistoryIdentityErrorCannotAdmitOrPreview(t *testing.T) {
 	result := executeCapture(t, s, capturePage("replacement A", "replacement B"), false)
 	if result.Capture.Admitted || result.Composed || result.Response["history_retry"] == true || s.historyM.Content("pane-1", 0) != before {
 		t.Fatalf("identity error admitted or previewed: admitted=%v composed=%v retry=%v", result.Capture.Admitted, result.Composed, result.Response["history_retry"])
+	}
+}
+
+func TestHistoryLayoutOnlyPageKeepsPreviewArchive(t *testing.T) {
+	s, _, _ := captureServer(t, true)
+	executeCapture(t, s, capturePage("archive A", "archive B", "current A", "current B"), true)
+	executeCapture(t, s, capturePage("current A", "current B", "new A", "new B"), true)
+	raw := "partial dialog\n6. Chat about this"
+	if !question.LayoutHint(raw) || question.Parse(raw, "claude") != nil {
+		t.Fatal("fixture is not layout-only")
+	}
+	result := executeCapture(t, s, raw, true)
+	if result.Capture.Admitted || !result.Composed || result.Response["content"] != "archive A\narchive B\n"+raw {
+		t.Fatalf("layout-only preview=%+v", result)
+	}
+}
+func TestHistorySameTerminalGenerationLagKeepsPreviewArchive(t *testing.T) {
+	s, _, _ := captureServer(t, true)
+	executeCapture(t, s, capturePage("archive A", "archive B", "current A", "current B"), true)
+	executeCapture(t, s, capturePage("current A", "current B", "new A", "new B"), true)
+	s.historyCaptureMu.Lock()
+	identity := s.historyActive["pane-1"]
+	identity.generation--
+	s.historyActive["pane-1"] = identity
+	s.historyCaptureMu.Unlock()
+	result := executeCapture(t, s, capturePage("current A", "current B", "new A", "new B"), true)
+	if result.Capture.Admitted || !result.Composed || !strings.Contains(result.Response["content"].(string), "archive A") {
+		t.Fatal("same-terminal generation lag lost preview archive")
+	}
+}
+
+const rejectedCustomAnswerPage = `
+←  ☒ Existing work  ☒ Work type  ☒ Time budget  ☒ Top outcome  ✔ Submit  →
+
+Roughly how much time do you want to put into this over the weekend?
+
+❯ 1. A few focused hours
+     One short session, keep scope tight
+  2. Half a day
+     One solid block
+  3. Most of the weekend ✔
+     Multiple sessions
+  4. Just exploring / no fixed budget
+     Casual
+  5. Private typed answer
+  6. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+`
+
+func TestRejectedPaneReadDoesNotRecordCustomAnswer(t *testing.T) {
+	s, _, _ := captureServer(t, false)
+	if parsed := question.Parse(rejectedCustomAnswerPage, "claude"); parsed == nil || parsed.Other.Text != "Private typed answer" {
+		t.Fatal("custom-answer fixture did not parse")
+	}
+	installPaneReadFixture(t, s, func(context.Context) (string, error) {
+		agent, _ := s.state.Agent("pane-1")
+		agent.TerminalID = "replacement"
+		s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+		return rejectedCustomAnswerPage, nil
+	})
+	response := s.readPaneResponse(context.Background(), map[string]any{"pane_id": "pane-1", "format": "ansi", "lines": 100})
+	if response["error"] == nil {
+		t.Fatal("fixture read was not rejected")
+	}
+	if len(s.state.CustomAnswers("pane-1")) != 0 {
+		t.Fatal("rejected response recorded a custom answer")
 	}
 }

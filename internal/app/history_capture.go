@@ -47,6 +47,22 @@ func (s *Server) readPaneResponse(ctx context.Context, message map[string]any) m
 			return s.paneSizeM != nil && s.paneSizeM.ResizedWithin(paneID, paneResizeSettleWindow)
 		},
 	})
+	if response["error"] == nil {
+		if _, ok := response["interaction"].(*question.Interaction); ok {
+			content, _ := response["content"].(string)
+			agentName := ""
+			if agent != nil {
+				agentName = agent.Agent
+			}
+			response["interaction"] = question.Parse(content, agentName)
+		}
+		if interaction, ok := response["interaction"].(*question.Interaction); ok && interaction != nil {
+			if text := strings.TrimSpace(interaction.Other.Text); text != "" {
+				s.state.RecordCustomAnswer(paneID, interaction.Question, text)
+			}
+			question.FillCustomAnswers(interaction, s.state.CustomAnswers(paneID))
+		}
+	}
 	if target, ok := message["target"]; ok {
 		response["target"] = target
 	}
@@ -66,9 +82,7 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		return coordinator.PaneReadResult{Read: read, Response: s.classifyRawPane(request.PaneID, string(read.Content), request.Format)}, nil
 	}
 	token := historyReadToken{paneID: request.PaneID}
-	if agent != nil {
-		token.identity = historyIdentity{terminalID: agent.TerminalID, generation: request.Generation}
-	}
+	token.identity = historyIdentity{terminalID: agent.TerminalID, generation: request.Generation}
 	s.historyPendingMu.Lock()
 	if s.historyPendingClosed {
 		s.historyPendingMu.Unlock()
@@ -102,17 +116,23 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		token.geometry, geometryErr = handle.Finish()
 	}
 	current, exists := s.state.Agent(request.PaneID)
-	identityCurrent := exists && current.TerminalID == token.identity.terminalID && s.state.Generation(request.PaneID) == token.identity.generation
+	terminalCurrent := exists && current.TerminalID == token.identity.terminalID
 	if handle == nil && (errors.Is(geometryErr, panesize.ErrTerminalGone) || errors.Is(geometryErr, panesize.ErrHistoryReadUnsafe)) {
-		identityCurrent = false
+		terminalCurrent = false
 	}
+	identityCurrent := terminalCurrent && s.state.Generation(request.PaneID) == token.identity.generation
 	physicalNow, revisionNow := s.physicalHistorySource(current)
 	if handle != nil {
 		physicalNow, revisionNow = token.geometry.Leased && current != nil && current.UsesNoScrollbackHistory(), token.geometry.LeaseRevision
 	}
 	stablePolicy := physicalNow == physicalAtStart && revisionNow == token.leaseRevision && request.Physical == physicalAtStart &&
-		s.state.ScrollMetricsRevision(request.PaneID) == scrollMetricsRevision && agent != nil && current != nil && agent.UsesNoScrollbackHistory() == current.UsesNoScrollbackHistory()
-	response := s.classifyRawPane(request.PaneID, string(read.Content), request.Format)
+		s.state.ScrollMetricsRevision(request.PaneID) == scrollMetricsRevision && current != nil && agent.UsesNoScrollbackHistory() == current.UsesNoScrollbackHistory()
+	raw := string(read.Content)
+	layoutHint := question.LayoutHint(raw)
+	response := map[string]any{"content": raw, "format": request.Format}
+	if !request.Background {
+		response = s.classifyRawPane(request.PaneID, raw, request.Format)
+	}
 	result := coordinator.PaneReadResult{Read: read, Response: response,
 		Capture: coordinator.PaneReadCapture{Sequence: token.sequence, TerminalID: token.identity.terminalID, Generation: token.identity.generation}}
 	if handle != nil && geometryErr != nil {
@@ -120,8 +140,8 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 
 	}
 	interaction, _ := response["interaction"].(*question.Interaction)
-	eligible := agent != nil && isClaudeLike(agent.Agent) && request.Format == "ansi" &&
-		len(read.Content) > 0 && interaction == nil && !question.LayoutHint(string(read.Content)) &&
+	eligible := request.Format == "ansi" &&
+		len(read.Content) > 0 && interaction == nil && !layoutHint &&
 		identityCurrent && stablePolicy && ctx.Err() == nil && s.state.ContentRevision(request.PaneID) == request.ContentRevision
 	if request.Physical {
 		eligible = eligible && handle != nil && geometryErr == nil && token.geometry.Known && token.geometry.Leased
@@ -131,21 +151,21 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		}
 		eligible = eligible && !request.Resized && !retainedUnsafe && (handle == nil || geometryErr == nil)
 	}
-	context := history.SnapshotContext{TerminalID: token.identity.terminalID, ReadSource: history.SourceLegacy,
+	snapshotContext := history.SnapshotContext{TerminalID: token.identity.terminalID, ReadSource: history.SourceLegacy,
 		GeometryEpoch: token.geometry.Epoch, LeaseRevision: token.leaseRevision,
 		Columns: token.geometry.Columns, Rows: token.geometry.Rows, NoScrollback: agent.UsesNoScrollbackHistory()}
 	if request.Physical {
-		context.ReadSource = history.SourceRecent
+		snapshotContext.ReadSource = history.SourceRecent
 	}
 	preview := func() {
-		if !captureShape || interaction != nil || question.LayoutHint(string(read.Content)) || !identityCurrent || len(read.Content) == 0 {
+		if !captureShape || interaction != nil || !terminalCurrent || len(read.Content) == 0 {
 			return
 		}
 		active, ok := s.historyActive[request.PaneID]
-		if !ok || active != token.identity {
+		if !ok || active.terminalID != token.identity.terminalID {
 			return
 		}
-		if content, composed := s.historyM.PreviewSnapshot(request.PaneID, string(read.Content), context); composed {
+		if content, composed := s.historyM.PreviewSnapshot(request.PaneID, raw, snapshotContext); composed {
 			response["content"] = content
 			result.Composed = true
 		}
@@ -157,7 +177,7 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		s.historyCaptureMu.Unlock()
 		return result, nil
 	}
-	result.Capture.Snapshot = context
+	result.Capture.Snapshot = snapshotContext
 	result.Capture.PendingSequence = token.pendingSequence
 	if s.historyReadFinishedObserver != nil {
 		s.historyReadFinishedObserver(token)
@@ -175,7 +195,7 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		preview()
 		return result, nil
 	}
-	content, _, admission := s.historyM.AdmitSnapshot(request.PaneID, string(read.Content), context, 0)
+	content, _, admission := s.historyM.AdmitSnapshot(request.PaneID, raw, snapshotContext, 0)
 	if s.historyAdmissionObserver != nil {
 		s.historyAdmissionObserver(token, admission)
 	}
@@ -198,12 +218,6 @@ func (s *Server) classifyRawPane(paneID, content, format string) map[string]any 
 	response := map[string]any{"content": content, "attention_kind": classification.Kind,
 		"prompt": classification.Prompt, "command": classification.Command, "options": classification.Options,
 		"interaction": classification.Interaction, "question_layout": classification.QuestionLayout, "format": format}
-	if interaction := classification.Interaction; interaction != nil {
-		if text := strings.TrimSpace(interaction.Other.Text); text != "" {
-			s.state.RecordCustomAnswer(paneID, interaction.Question, text)
-		}
-		question.FillCustomAnswers(interaction, s.state.CustomAnswers(paneID))
-	}
 	return response
 }
 
@@ -215,7 +229,7 @@ func (s *Server) captureTerminalHistory(ctx context.Context, paneID string) (str
 		lines = history.PhysicalCaptureLines
 	}
 	request := coordinator.PaneReadRequest{PaneID: paneID, Agent: agent, Generation: s.state.Generation(paneID),
-		ContentRevision: s.state.ContentRevision(paneID), Format: "ansi", Lines: lines, Physical: physical}
+		ContentRevision: s.state.ContentRevision(paneID), Format: "ansi", Lines: lines, Physical: physical, Background: true}
 	result, err := s.executeHistoryRead(ctx, request, func(ctx context.Context, request coordinator.PaneReadRequest) (herdr.PaneRead, error) {
 		if request.Physical {
 			return s.herdrC.ReadPaneRecent(ctx, paneID, request.Lines, "ansi")

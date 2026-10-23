@@ -88,6 +88,7 @@ type PaneReadRequest struct {
 	Agent           *AgentState
 	Generation      int64
 	ContentRevision int64
+	Background      bool
 }
 
 type PaneReadCapture struct {

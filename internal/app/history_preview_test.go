@@ -31,13 +31,14 @@ func TestRejectedWatchRetryStopsAfterStableRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := executeCapture(t, s, capturePage("current A", "current B"), true)
-	frame := &paneWatchFrame{classificationAgent: "claude", historyRetry: result.Response["history_retry"] == true}
+	frame := &paneWatchFrame{classificationAgent: "claude", resizeSettling: result.Response["resize_settling"] == true, historyRetry: result.Response["history_retry"] == true}
 	if !paneWatchNeedsFrameRead("same", "same", frame, "claude") {
 		t.Fatal("transient rejection did not request unchanged-probe retry")
 	}
 	advance(panesize.HistorySettleWindow)
 	result = executeCapture(t, s, capturePage("current A", "current B"), true)
 	frame.historyRetry = result.Response["history_retry"] == true
+	frame.resizeSettling = result.Response["resize_settling"] == true
 	if !result.Capture.Admitted || paneWatchNeedsFrameRead("same", "same", frame, "claude") {
 		t.Fatal("settled admission retained watch retry")
 	}

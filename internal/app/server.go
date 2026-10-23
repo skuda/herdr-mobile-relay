@@ -2152,8 +2152,6 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 			delete(s.historyInflight, paneID)
 			s.historyCaptureMu.Unlock()
 		}()
-		readCtx, cancel := context.WithTimeout(taskCtx, 3*time.Second)
-		defer cancel()
 		if s.historyCaptureDeferred(paneID) {
 			return
 		}
@@ -2161,7 +2159,7 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 		s.historyLast[paneID] = scheduledAt
 		s.historyCaptureMu.Unlock()
 		s.syncHistoryPanes()
-		_, _ = s.captureTerminalHistory(readCtx, paneID)
+		_, _ = s.captureTerminalHistory(taskCtx, paneID)
 	})
 	if started {
 		return
@@ -2317,10 +2315,8 @@ func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, se
 	if response := s.latestConversationResponse(agent, cwd, sessionID, contexts...); response != "" {
 		return response
 	}
-	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
 	s.syncHistoryPanes()
-	completionContent, err := s.captureTerminalHistory(readCtx, paneID)
+	completionContent, err := s.captureTerminalHistory(ctx, paneID)
 	if err != nil || completionContent == "" {
 		return ""
 	}

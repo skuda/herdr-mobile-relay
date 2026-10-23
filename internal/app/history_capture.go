@@ -69,13 +69,22 @@ func (s *Server) readPaneResponse(ctx context.Context, message map[string]any) m
 	return response
 }
 
+func historyContentContext(ctx context.Context, background bool) (context.Context, context.CancelFunc) {
+	if background {
+		return context.WithTimeout(ctx, 3*time.Second)
+	}
+	return ctx, func() {}
+}
+
 func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.PaneReadRequest,
 	readContent func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error),
 ) (coordinator.PaneReadResult, error) {
 	scrollMetricsRevision := s.state.ScrollMetricsRevision(request.PaneID)
 	agent := request.Agent
 	if agent == nil || !isClaudeLike(agent.Agent) {
-		read, err := readContent(ctx, request)
+		contentCtx, cancel := historyContentContext(ctx, request.Background)
+		defer cancel()
+		read, err := readContent(contentCtx, request)
 		if err != nil {
 			return coordinator.PaneReadResult{}, err
 		}
@@ -108,7 +117,9 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		token.pendingSequence = s.pendingReadStartedLocked(request.PaneID, token.identity)
 		s.historyPendingMu.Unlock()
 	}
-	read, err := readContent(ctx, request)
+	contentCtx, cancel := historyContentContext(ctx, request.Background)
+	defer cancel()
+	read, err := readContent(contentCtx, request)
 	if err != nil {
 		return coordinator.PaneReadResult{}, err
 	}
@@ -169,7 +180,9 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 			response["content"] = content
 			result.Composed = true
 		}
-		response["history_retry"] = true
+		if !(request.Physical && geometryErr != nil) {
+			response["history_retry"] = true
+		}
 	}
 	if !eligible {
 		s.historyCaptureMu.Lock()

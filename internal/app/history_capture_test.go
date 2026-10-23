@@ -1842,3 +1842,85 @@ func TestRejectedPaneReadDoesNotRecordCustomAnswer(t *testing.T) {
 		t.Fatal("rejected response recorded a custom answer")
 	}
 }
+
+type delayedBudgetHistoryProvider struct{ *paneSizeFakes }
+
+func (p *delayedBudgetHistoryProvider) PaneGet(ctx context.Context, paneID string) (*herdr.Pane, error) {
+	timer := time.NewTimer(30 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return p.paneSizeFakes.PaneGet(ctx, paneID)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+func TestBackgroundHistoryContentGetsIndependentBudget(t *testing.T) {
+	s, f, _ := captureServer(t, false)
+	s.paneSizeM = panesize.NewManagerWith(&delayedBudgetHistoryProvider{f}, f, f, s.historyNow, nil)
+	request := captureRequest(s, false)
+	request.Background = true
+	_, err := s.executeHistoryRead(context.Background(), request, func(ctx context.Context, _ coordinator.PaneReadRequest) (herdr.PaneRead, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) < 2900*time.Millisecond {
+			t.Errorf("content budget after validation=%v deadline=%v", time.Until(deadline), ok)
+		}
+		return herdr.PaneRead{Content: []byte(capturePage("A", "B"))}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+func TestPhysicalGeometryFailureDoesNotRequestPollRetry(t *testing.T) {
+	s, f, _ := captureServer(t, true)
+	executeCapture(t, s, capturePage("A", "B"), true)
+	f.mu.Lock()
+	f.size.Columns = 0
+	f.mu.Unlock()
+	result := executeCapture(t, s, capturePage("A", "B"), true)
+	if result.Capture.Admitted || result.Response["history_retry"] == true {
+		t.Fatal("failed geometry sample requested unbounded poll retry")
+	}
+}
+
+func TestNonClaudeBackgroundReadHasContentDeadline(t *testing.T) {
+	s, _, _ := captureServer(t, false)
+	request := captureRequest(s, false)
+	request.Background = true
+	request.Agent.Agent = "codex"
+	_, err := s.executeHistoryRead(context.Background(), request, func(ctx context.Context, _ coordinator.PaneReadRequest) (herdr.PaneRead, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > 3*time.Second || time.Until(deadline) < 2900*time.Millisecond {
+			t.Errorf("non-Claude background deadline=%v remaining=%s", ok, time.Until(deadline))
+		}
+		return herdr.PaneRead{Content: []byte("answer")}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+type boundedHistoryProvider struct {
+	*paneSizeFakes
+	t *testing.T
+}
+
+func (p *boundedHistoryProvider) PaneGet(ctx context.Context, paneID string) (*herdr.Pane, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) > 3*time.Second || time.Until(deadline) < 2*time.Second {
+		p.t.Errorf("geometry validation lacks existing three-second bound: deadline=%v remaining=%s", ok, time.Until(deadline))
+	}
+	return p.paneSizeFakes.PaneGet(ctx, paneID)
+}
+func TestClaudeGeometryValidationKeepsPaneSizeOperationBound(t *testing.T) {
+	s, f, _ := captureServer(t, false)
+	s.paneSizeM = panesize.NewManagerWith(&boundedHistoryProvider{f, t}, f, f, s.historyNow, nil)
+	request := captureRequest(s, false)
+	request.Background = true
+	_, err := s.executeHistoryRead(context.Background(), request, func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error) {
+		return herdr.PaneRead{Content: []byte(capturePage("A", "B"))}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

@@ -374,8 +374,9 @@ func TestPhysicalChunk17IsolatedTransitions(t *testing.T) {
 		old, next     int
 		retired, held []int
 	}{
-		{1, 2, []int{0, 1, 2, 3}, []int{72}}, {12, 13, []int{0, 1, 2, 3, 4}, nil},
-		{13, 14, []int{1, 2, 3}, nil}, {15, 16, []int{0, 1, 2, 3, 4}, nil},
+		// The supported blank-boundary union includes row 5 at 12->13 and 15->16.
+		{1, 2, []int{0, 1, 2, 3}, []int{72}}, {12, 13, []int{0, 1, 2, 3, 4, 5}, nil},
+		{13, 14, []int{1, 2, 3}, nil}, {15, 16, []int{0, 1, 2, 3, 4, 5}, nil},
 	} {
 		t.Run(fmt.Sprintf("%d-%d", test.old, test.next), func(t *testing.T) {
 			m, _ := physicalReplay(t, fixture, []int{test.old, test.next}, false, nil)

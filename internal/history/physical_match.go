@@ -262,15 +262,23 @@ func planPhysicalTransition(old, next []string, linear bool) physicalTransition 
 			}
 		}
 		if supported {
-			for i := header; i < a; i++ {
+			retireEnd := a
+			// Equal leading blanks admit later anchor boundaries with the same
+			// substantive support. Retain their old-coordinate union once.
+			for i, j := a, b; i < end && old[i] == "" && next[j] == ""; i, j = i+1, j+1 {
+				retireEnd = i + 1
+			}
+			for i := header; i < retireEnd; i++ {
 				if hasSub {
 					result.outcome[i] = physicalRetired
 				} else if old[i] != "" {
 					result.outcome[i] = physicalHeldOutcome
 				}
 			}
-			for i, j := a, b; i < end; i, j = i+1, j+1 {
-				result.outcome[i] = physicalMatched
+			for i := a; i < end; i++ {
+				if result.outcome[i] != physicalRetired {
+					result.outcome[i] = physicalMatched
+				}
 			}
 		}
 		break
@@ -284,12 +292,12 @@ func planPhysicalTransition(old, next []string, linear bool) physicalTransition 
 		for a < b && result.outcome[a] == physicalRetired {
 			a++
 		}
-		for a < b && c < e && old[a] == next[c] && (!physicalSubstantive(old[a]) || !feasible[a]) {
+		for a < b && c < e && result.outcome[a] != physicalRetired && old[a] == next[c] && (!physicalSubstantive(old[a]) || !feasible[a]) {
 			result.outcome[a] = physicalMatched
 			a++
 			c++
 		}
-		for a < b && c < e && old[b-1] == next[e-1] && (!physicalSubstantive(old[b-1]) || !feasible[b-1]) {
+		for a < b && c < e && result.outcome[b-1] != physicalRetired && old[b-1] == next[e-1] && (!physicalSubstantive(old[b-1]) || !feasible[b-1]) {
 			b--
 			e--
 			result.outcome[b] = physicalMatched
@@ -380,19 +388,39 @@ func verifiedPhysicalReverse(state *PaneState, old, next []string, plan *physica
 	if state.LiveStart <= state.SegmentStart || plan.diagnostic.Class == "freeze" {
 		return 0
 	}
-	header := 0
-	for _, pair := range plan.consensus.agreed {
-		if pair.Old == header && pair.Next == header {
-			header++
-		} else {
-			break
-		}
+	agreed := make([]int, len(old))
+	for i := range agreed {
+		agreed[i] = -1
 	}
 	for _, pair := range plan.consensus.agreed {
-		if pair.Old != header || pair.Next-pair.Old < 2 {
+		agreed[pair.Old] = pair.Next
+	}
+	header := 0
+	for header < min(len(old), len(next)) && old[header] == next[header] && (!physicalSubstantive(old[header]) || agreed[header] == header) {
+		header++
+	}
+	for _, pair := range plan.consensus.agreed {
+		if pair.Old < header || pair.Next-pair.Old < 2 {
 			continue
 		}
-		k := pair.Next - pair.Old
+		a, b := pair.Old, pair.Next
+		for a > header && b > header && old[a-1] == next[b-1] && (!physicalSubstantive(old[a-1]) || agreed[a-1] == b-1) {
+			a--
+			b--
+		}
+		if a != header {
+			continue
+		}
+		runPairs := 0
+		for i, j := a, b; i < len(old) && j < len(next) && old[i] == next[j] && (!physicalSubstantive(old[i]) || agreed[i] == j); i, j = i+1, j+1 {
+			if agreed[i] == j {
+				runPairs++
+			}
+		}
+		if runPairs < 2 {
+			continue
+		}
+		k := b - a
 		if k > state.LiveStart-state.SegmentStart {
 			return 0
 		}

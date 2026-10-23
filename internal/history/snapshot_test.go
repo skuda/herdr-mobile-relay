@@ -139,6 +139,23 @@ func TestSnapshotTailLongerThanBoundStaysHeld(t *testing.T) {
 	}
 }
 
+func TestSnapshotChangedTailMajorityFreezesAtMinimumEight(t *testing.T) {
+	m := NewManager(t.TempDir())
+	ctx := physicalContext(1, 40)
+	old := []string{"A", "B", "C", "old1", "old2", "old3", "old4", "old5"}
+	next := []string{"A", "B", "C", "new1", "new2", "new3", "new4", "new5"}
+	m.AdmitSnapshot("p", snapshotPage(old...), ctx, 0)
+	got, _, d := m.AdmitSnapshot("p", snapshotPage(next...), ctx, 0)
+	state := m.states["p"]
+	if d.Class != "freeze" || d.Reason != "held_majority" || d.HeldNonblank != 5 || d.OldNonblank != 8 {
+		t.Fatalf("changed-tail diagnostic=%+v", d)
+	}
+	if !slices.Equal(state.History[:state.LiveStart], old) || len(state.Held) != 0 {
+		t.Fatal("majority changed tail did not freeze the old body once")
+	}
+	assertSnapshotContent(t, got, append(slices.Clone(old), next...)...)
+}
+
 // Replaces TestSnapshotEquivalentCandidatesChooseSmallestTailThenDisplacementThenHeader.
 func TestSnapshotConsensusDoesNotChooseDisputedOccurrence(t *testing.T) {
 	result := physicalConsensus([]string{"A", "B", "A"}, []string{"A", "B"}, true)
@@ -205,8 +222,12 @@ func TestSnapshotReverseMovementHoldsPushedRows(t *testing.T) {
 			}
 			m.MergeSnapshot("p", snapshotPage(old...), ctx)
 			assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), next...)
-			if len(physicalHeldRows(t, m.states["p"])) < 2 {
-				t.Fatal("reverse-pushed F,G were not held")
+			wantHeld := []string{"F", "G"}
+			if tail {
+				wantHeld = append(wantHeld, "new spinner")
+			}
+			if !slices.Equal(physicalHeldRows(t, m.states["p"]), wantHeld) {
+				t.Fatalf("reverse residue=%q, want %q", physicalHeldRows(t, m.states["p"]), wantHeld)
 			}
 		}
 	}

@@ -65,6 +65,59 @@ func TestPhysicalVerifiedReverseWithHeaderAndCompetingOverlap(t *testing.T) {
 	}
 }
 
+func TestPhysicalReverseRetainsPhysicalHeaderAndBlankFirstDiagonal(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		old, next []string
+	}{
+		{"blank-header", []string{"H1", "", "H2", "C", "D", "E", "F", "G"}, []string{"H1", "", "H2", "A", "B", "C", "D", "E"}},
+		{"punctuation-header", []string{"H1", "---", "H2", "C", "D", "E", "F", "G"}, []string{"H1", "---", "H2", "A", "B", "C", "D", "E"}},
+		{"blank-first-diagonal", []string{"H1", "H2", "", "C", "D", "E", "F", "G"}, []string{"H1", "H2", "A", "B", "", "C", "D", "E"}},
+		{"blank-first-without-header", []string{"", "C", "D", "E", "F", "G"}, []string{"A", "B", "", "C", "D", "E"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := NewManager(t.TempDir())
+			ctx := physicalContext(1, 54)
+			m.AdmitSnapshot("p", snapshotPage(test.old...), ctx, 0)
+			state := m.states["p"]
+			state.History = append([]string{"A", "B"}, state.History...)
+			state.LiveStart = 2
+			got, _, d := m.AdmitSnapshot("p", snapshotPage(test.next...), ctx, 0)
+			if d.RetractedRows != 2 || state.LiveStart != 0 || len(state.History[:state.LiveStart]) != 0 {
+				t.Errorf("reverse archive=%q live=%d retracted=%d, want empty archive and two retracted rows", state.History[:state.LiveStart], state.LiveStart, d.RetractedRows)
+			}
+			if !slices.Equal(physicalHeldRows(t, state), []string{"F", "G"}) {
+				t.Errorf("reverse held=%q, want F,G", physicalHeldRows(t, state))
+			}
+			if got != snapshotPage(test.next...) || !slices.Equal(state.History, test.next) {
+				t.Error("reverse composition does not equal exact new body")
+			}
+		})
+	}
+}
+
+func TestPhysicalForwardBlankBoundaryUnionOnce(t *testing.T) {
+	m := NewManager(t.TempDir())
+	ctx := physicalContext(1, 54)
+	m.AdmitSnapshot("p", snapshotPage("A", "B", "", "C", "D"), ctx, 0)
+	for _, body := range [][]string{{"", "C", "D", "E", "F"}, {"C", "D", "E", "F", "G"}} {
+		got, _, d := m.AdmitSnapshot("p", snapshotPage(body...), ctx, 0)
+		state := m.states["p"]
+		if !slices.Equal(state.History[:state.LiveStart], []string{"A", "B", ""}) {
+			t.Errorf("archived boundary=%q, want A,B and separator blank once", state.History[:state.LiveStart])
+		}
+		if got != snapshotPage(append([]string{"A", "B", ""}, body...)...) {
+			t.Error("forward response lost blank-boundary layout")
+		}
+		if len(state.Held) != 0 || d.Class == "freeze" {
+			t.Error("supported blank-boundary scroll created residue or freeze")
+		}
+	}
+	if !slices.Equal(m.states["p"].History, []string{"A", "B", "", "C", "D", "E", "F", "G"}) {
+		t.Fatal("final stored layout lost or repeated the separator")
+	}
+}
+
 func TestPhysicalSparseAndLinearConsensusAgainstOracle(t *testing.T) {
 	alphabet := []string{"A", "B", "", "{", " "}
 	var pages [][]string

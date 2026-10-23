@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1085,7 +1086,9 @@ func TestSingleFlightFollowerCannotRelabelOlderSnapshot(t *testing.T) {
 	if sequence != 2 || archived != 2 || follower.capture.PendingSequence != 0 {
 		t.Fatalf("follower changed admission bookkeeping: sequence=%d archived=%d pending=%d", sequence, archived, follower.capture.PendingSequence)
 	}
-	if got := s.historyM.Content("pane-1", 0); got != "P A\nP B\n"+pageQ {
+	// The old assertion required an unsupported whole-page P prefix. A2 replaces
+	// this two-row body in place; the follower still cannot replace Q with P.
+	if got := s.historyM.Content("pane-1", 0); got != pageQ {
 		t.Fatalf("follower replaced Q with P: %q", got)
 	}
 }
@@ -1337,12 +1340,13 @@ func TestHistoryLegacyAdmissionWithUnknownGeometry(t *testing.T) {
 
 func TestPaneWatchPublishesSettledHistoryWithUnchangedProbe(t *testing.T) {
 	s, _, _ := captureServer(t, true)
-	executeCapture(t, s, capturePage("old A", "old B"), true)
+	// Use a supported forward archive, not the old divergent-page fallback.
+	executeCapture(t, s, capturePage("old A", "old B", "keep C", "keep D"), true)
 	acknowledged := &paneWatchFrame{resizeSettling: true}
 	if !paneWatchNeedsFrameRead("same", "same", acknowledged, "claude") {
 		t.Fatal("unchanged probe skipped settled full read")
 	}
-	result := executeCapture(t, s, capturePage("new A", "new B"), true)
+	result := executeCapture(t, s, capturePage("keep C", "keep D", "new A", "new B"), true)
 	if !result.Capture.Admitted || !strings.Contains(result.Response["content"].(string), "old A") {
 		t.Fatal("settled read did not attach history")
 	}
@@ -1367,7 +1371,8 @@ func TestOtherRelayPTYResizeDoesNotEnablePhysicalSource(t *testing.T) {
 	}
 }
 
-func TestDifferentKeySamplingInversionTakesConservativeFallback(t *testing.T) {
+// Replaces TestDifferentKeySamplingInversionTakesConservativeFallback's frozen Q prefix.
+func TestDifferentKeySamplingInversionHoldsPushedRows(t *testing.T) {
 	s, _, _ := captureServer(t, true)
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan coordinator.PaneReadResult, 1)
 	request := captureRequest(s, true)
@@ -1397,7 +1402,21 @@ func TestDifferentKeySamplingInversionTakesConservativeFallback(t *testing.T) {
 	if !first.Capture.Admitted || !second.Capture.Admitted || first.Capture.Sequence >= second.Capture.Sequence {
 		t.Fatal("inversion fixture did not admit increasing start order")
 	}
-	want := capturePage("H1", "H2", "C", "D", "E", "F", "G", "H1", "H2", "A", "B", "C", "D", "E")
+	want := capturePage("H1", "H2", "A", "B", "C", "D", "E")
+	if err := s.historyM.SaveAll(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(s.cfg.CacheDir, "claude-history", "pane-1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retained history.PaneState
+	if err := json.Unmarshal(data, &retained); err != nil {
+		t.Fatal(err)
+	}
+	if len(retained.Held) != 1 || !slices.Equal(retained.Held[0].Rows, []string{"F", "G"}) {
+		t.Fatalf("inversion held rows=%+v", retained.Held)
+	}
 	if got := s.historyM.Content("pane-1", 0); got != want {
 		t.Fatalf("reverse sampling deleted prior page: %q", got)
 	}

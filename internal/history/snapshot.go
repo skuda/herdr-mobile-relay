@@ -25,12 +25,26 @@ type SnapshotContext struct {
 }
 
 type SnapshotAdmission struct {
-	Admitted        bool
-	ContentChanged  bool
-	MetadataChanged bool
-	HeldEvictedRows int
-	HeldExpiredRows int
-	HeldTotalRows   int
+	Admitted         bool
+	ContentChanged   bool
+	MetadataChanged  bool
+	HeldEvictedRows  int
+	HeldExpiredRows  int
+	HeldTotalRows    int
+	Class            string
+	Reason           string
+	MatchPath        string
+	MatchedNonblank  int
+	RetiredNonblank  int
+	ReplacedNonblank int
+	HeldNonblank     int
+	OldNonblank      int
+	RetiredRows      int
+	ReplacedRows     int
+	HeldAddedRows    int
+	RetractedRows    int
+	RetractionCount  int
+	DPPairs          int
 }
 
 // MergeSnapshot retains a page using its source and sampled PTY context.
@@ -108,21 +122,23 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 	state.setSnapshotContext(context)
 	body, footer := splitSnapshot(rawContent)
 	state.Footer = slices.Clone(footer)
+	admission := SnapshotAdmission{Class: "legacy"}
 	if context.ReadSource == SourceRecent {
-		m.mergePhysical(state, body)
+		admission = m.mergePhysical(state, body)
+		if boundary {
+			admission.Class = "boundary"
+		}
 	} else {
 		m.mergeLegacySegment(state, body)
 		state.LiveStart = len(state.History)
 	}
 	expired := trimSnapshotState(state)
 	evicted := trimHeldCapacity(state)
-	admission := SnapshotAdmission{
-		HeldExpiredRows: expired, HeldEvictedRows: evicted, HeldTotalRows: heldRowCount(state.Held),
-		Admitted:       true,
-		ContentChanged: !slices.Equal(beforeHistory, state.History) || !slices.Equal(beforeFooter, state.Footer),
-		MetadataChanged: beforeContext != state.snapshotContext() || beforeVersion != state.SnapshotVersion ||
-			beforeSegment != state.SegmentStart || beforeLive != state.LiveStart || boundary || !equalHeldRecords(beforeHeld, state.Held),
-	}
+	admission.HeldExpiredRows, admission.HeldEvictedRows, admission.HeldTotalRows = expired, evicted, heldRowCount(state.Held)
+	admission.Admitted = true
+	admission.ContentChanged = !slices.Equal(beforeHistory, state.History) || !slices.Equal(beforeFooter, state.Footer)
+	admission.MetadataChanged = beforeContext != state.snapshotContext() || beforeVersion != state.SnapshotVersion ||
+		beforeSegment != state.SegmentStart || beforeLive != state.LiveStart || boundary || !equalHeldRecords(beforeHeld, state.Held)
 	if admission.ContentChanged || admission.MetadataChanged || beforeHash != state.LastHash || beforeRefusals != state.StaleRefusals {
 		state.dirty = true
 		state.mutationVersion++
@@ -303,139 +319,4 @@ func (m *Manager) mergeLegacyBody(state *PaneState, body []string) {
 		state.History = append(state.History, body...)
 		state.StaleRefusals = 0
 	}
-}
-
-func (m *Manager) mergePhysical(state *PaneState, body []string) {
-	previous := state.History[state.LiveStart:]
-	old, next := comparisonBody(previous), comparisonBody(body)
-	archive := state.History[:state.LiveStart]
-	fallback := func() {
-		state.LiveStart = len(state.History)
-		state.History = append(state.History, body...)
-	}
-	state.LastHash = hashLines(body)
-	state.StaleRefusals = 0
-	if len(previous) == 0 || slices.Equal(old, next) {
-		state.History = append(archive, body...)
-		return
-	}
-	if len(next) < len(old) && slices.Equal(old[:len(next)], next) {
-		fallback()
-		return
-	}
-	reverse, _ := physicalAlignments(next, old)
-	for _, candidate := range reverse {
-		if candidate.displacement > 0 {
-			fallback()
-			return
-		}
-	}
-	candidates, weak := physicalAlignments(old, next)
-	if len(candidates) > 0 {
-		candidate, conflict := choosePhysicalAlignment(candidates, previous)
-		if conflict {
-			fallback()
-			return
-		}
-		displaced := slices.Clone(previous[candidate.header : candidate.header+candidate.displacement])
-		state.History = append(archive, displaced...)
-		state.LiveStart = len(state.History)
-		state.History = append(state.History, body...)
-		return
-	}
-	if len(old) > 0 && !weak && streamingExtension(old, next) {
-		state.History = append(archive, body...)
-		return
-	}
-	fallback()
-}
-
-// physicalAlignment excludes tail rows from old-page matching and archives its displaced range.
-type physicalAlignment struct {
-	header       int
-	displacement int
-	tail         int
-}
-
-func physicalAlignments(old, next []string) ([]physicalAlignment, bool) {
-	prefix := 0
-	for prefix < min(len(old), len(next)) && old[prefix] == next[prefix] {
-		prefix++
-	}
-	var candidates []physicalAlignment
-	weak := false
-	for header := 0; header <= prefix; header++ {
-		for tail := 0; tail <= min(ReplaceableTailLines, len(old)); tail++ {
-			end := len(old) - tail
-			for displacement := 0; header+displacement < end; displacement++ {
-				// Keep page-origin matches for choosePhysicalAlignment's ambiguity check.
-				// Other displaced matches start at the first changed row.
-				if displacement > 0 && header != 0 && header != prefix {
-					break
-				}
-				span := old[header+displacement : end]
-				if header+len(span) > len(next) || !slices.Equal(span, next[header:header+len(span)]) {
-					continue
-				}
-				if displacement == 0 {
-					newTail := len(next) - header - len(span)
-					if tail == 0 || len(old) != len(next) || newTail <= 0 || newTail > ReplaceableTailLines ||
-						slices.Equal(old[end:], next[header+len(span):]) {
-						continue
-					}
-				}
-				nonempty := 0
-				for _, row := range span {
-					if row != "" {
-						nonempty++
-					}
-				}
-				if nonempty < 2 {
-					weak = weak || displacement > 0 && nonempty > 0
-					continue
-				}
-				candidates = append(candidates, physicalAlignment{header: header, displacement: displacement, tail: tail})
-			}
-		}
-	}
-	return candidates, weak
-}
-
-func comparisonBody(body []string) []string {
-	rows := normalizeLines(body)
-	for len(rows) > 0 && rows[len(rows)-1] == "" {
-		rows = rows[:len(rows)-1]
-	}
-	return rows
-}
-
-func choosePhysicalAlignment(candidates []physicalAlignment, old []string) (physicalAlignment, bool) {
-	best := candidates[0]
-	for _, candidate := range candidates[1:] {
-		sameRange := best.displacement == candidate.displacement &&
-			slices.Equal(old[best.header:best.header+best.displacement], old[candidate.header:candidate.header+candidate.displacement])
-		if !sameRange {
-			return physicalAlignment{}, true
-		}
-		if candidate.tail < best.tail || candidate.tail == best.tail &&
-			(candidate.displacement < best.displacement || candidate.displacement == best.displacement && candidate.header < best.header) {
-			best = candidate
-		}
-	}
-	return best, false
-}
-
-func streamingExtension(old, next []string) bool {
-	if len(next) >= len(old) && slices.Equal(old, next[:len(old)]) {
-		return true
-	}
-	if len(old) != len(next) || len(old) == 0 {
-		return false
-	}
-	last := len(old) - 1
-	for last >= 0 && old[last] == "" {
-		last--
-	}
-	return last >= 0 && slices.Equal(old[:last], next[:last]) && slices.Equal(old[last+1:], next[last+1:]) &&
-		len(next[last]) > len(old[last]) && strings.HasPrefix(next[last], old[last])
 }

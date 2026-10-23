@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -89,37 +88,23 @@ func physicalHeldRows(t *testing.T, state *PaneState) []string {
 	return rows
 }
 
-// S9c/S9d add admission diagnostics; keep their field spelling isolated here
-// while the matcher contract tests build before those slices.
 func physicalDiagnostic(t *testing.T, admission SnapshotAdmission, names ...string) int {
 	t.Helper()
-	value := reflect.ValueOf(admission)
+	values := map[string]int{"MatchedNonblank": admission.MatchedNonblank, "RetiredNonblank": admission.RetiredNonblank, "ReplacedNonblank": admission.ReplacedNonblank, "HeldNonblank": admission.HeldNonblank, "OldNonblank": admission.OldNonblank, "RetractedRows": admission.RetractedRows, "ReplacedRows": admission.ReplacedRows}
 	for _, name := range names {
-		field := value.FieldByName(name)
-		if field.IsValid() && field.CanInt() {
-			return int(field.Int())
-		}
-		if field.IsValid() && field.CanUint() {
-			return int(field.Uint())
+		if value, ok := values[name]; ok {
+			return value
 		}
 	}
-	t.Fatalf("A2 diagnostic unavailable: %s", strings.Join(names, "/"))
+	t.Fatalf("unknown diagnostic %s", strings.Join(names, "/"))
 	return 0
 }
 
 func physicalAssertReason(t *testing.T, admission SnapshotAdmission, want string) {
 	t.Helper()
-	value := reflect.ValueOf(admission)
-	for _, name := range []string{"Reason", "FreezeReason"} {
-		field := value.FieldByName(name)
-		if field.IsValid() && field.Kind() == reflect.String {
-			if field.String() != want {
-				t.Errorf("freeze reason=%q, want %q", field.String(), want)
-			}
-			return
-		}
+	if admission.Reason != want {
+		t.Errorf("freeze reason=%q, want %q", admission.Reason, want)
 	}
-	t.Fatal("A2 diagnostic unavailable: Reason/FreezeReason")
 }
 
 func physicalRowsAt(rows []string, indices []int) []string {
@@ -325,8 +310,6 @@ func TestPhysicalNBSPComparisonPreservesRawAndLegacyBytes(t *testing.T) {
 		}
 	}
 }
-
-type physicalPair struct{ Old, Next int }
 
 // Enumerate distinct optimal occurrence mappings, not edit paths. This small
 // oracle deliberately uses exponential work and never runs on captured pages.

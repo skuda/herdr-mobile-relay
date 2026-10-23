@@ -32,17 +32,23 @@ func TestSnapshotBottomPaddingEquivalentCandidates(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 40)
 	m.MergeSnapshot("p", snapshotPage(old...), ctx)
-	want := "\n" + snapshotPage(next...)
+	// Replaces the old blank-only displacement archival assertion: a blank-only
+	// retired prefix needs no archive under A2.
+	want := snapshotPage(next...)
 	if got := m.MergeSnapshot("p", snapshotPage(next...), ctx); got != want {
 		t.Fatalf("equivalent blank displacement copied page: got=%q want=%q", got, want)
 	}
 }
 
-func TestSnapshotOrderedDisplacementConflictFallsBack(t *testing.T) {
+// Replaces TestSnapshotOrderedDisplacementConflictFallsBack's whole-page copy.
+func TestSnapshotOrderedDisplacementConflictHoldsMissingRows(t *testing.T) {
 	old := []string{"A", "B", "A", "C", "D"}
 	next := []string{"A", "C", "D", "E", "F"}
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 40)
 	m.MergeSnapshot("p", snapshotPage(old...), ctx)
-	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), append(old, next...)...)
+	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), next...)
+	if !slices.Equal(physicalHeldRows(t, m.states["p"]), []string{"A", "B", "A"}) {
+		t.Fatalf("unmatched prefix held rows = %q", physicalHeldRows(t, m.states["p"]))
+	}
 }

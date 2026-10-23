@@ -49,7 +49,11 @@ func TestSnapshotServesArchiveAndExactCurrentRawPage(t *testing.T) {
 	m.MergeSnapshot("p", snapshotPage("old A", "old B", "old C", "old D"), ctx)
 	raw := "\x1b[44mnew A\x1b[0m\nnew B\n\nnew C\n\x1b[31mf1\x1b[0m\nf2\nf3\nf4\nf5\nf6\n"
 	got := m.MergeSnapshot("p", raw, ctx)
-	if want := "old A\nold B\nold C\nold D\n" + raw; got != want {
+	// Replaces the old mandatory fallback prefix with separately held residue.
+	if !slices.Equal(physicalHeldRows(t, m.states["p"]), []string{"old A", "old B", "old C", "old D"}) {
+		t.Fatal("old raw body was not held")
+	}
+	if want := raw; got != want {
 		t.Fatalf("composition = %q, want %q", got, want)
 	}
 }
@@ -122,38 +126,42 @@ func TestSnapshotScrollWithChangedProgressTailArchivesDisplacedRowsOnce(t *testi
 	}
 }
 
-func TestSnapshotTailLongerThanBoundFallsBack(t *testing.T) {
+// Replaces TestSnapshotTailLongerThanBoundFallsBack's whole-page fallback assertion.
+func TestSnapshotTailLongerThanBoundStaysHeld(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 40)
 	old := []string{"A", "B", "old1", "old2", "old3", "old4"}
 	next := []string{"A", "B", "new1", "new2", "new3", "new4"}
 	m.MergeSnapshot("p", snapshotPage(old...), ctx)
-	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), append(old, next...)...)
-}
-
-func TestSnapshotEquivalentCandidatesChooseSmallestTailThenDisplacementThenHeader(t *testing.T) {
-	candidates := []physicalAlignment{{header: 2, displacement: 0, tail: 2}, {header: 1, displacement: 0, tail: 1}, {header: 0, displacement: 0, tail: 1}}
-	got, conflict := choosePhysicalAlignment(candidates, []string{"A", "B", "C", "D"})
-	if conflict || got != (physicalAlignment{header: 0, displacement: 0, tail: 1}) {
-		t.Fatalf("chosen = %+v conflict=%v", got, conflict)
-	}
-	got, conflict = choosePhysicalAlignment([]physicalAlignment{{header: 2, displacement: 2, tail: 2}, {header: 2, displacement: 2, tail: 0}}, []string{"A", "B", "C", "D"})
-	if conflict || got.tail != 0 {
-		t.Fatalf("chosen displaced alignment = %+v conflict=%v", got, conflict)
+	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), next...)
+	if !slices.Equal(physicalHeldRows(t, m.states["p"]), old[2:]) {
+		t.Fatal("unexplained old rows were not held")
 	}
 }
 
-func TestSnapshotConflictingDisplacedRangesFallBack(t *testing.T) {
-	_, conflict := choosePhysicalAlignment([]physicalAlignment{{header: 0, displacement: 2, tail: 0}, {header: 1, displacement: 2, tail: 1}}, []string{"A", "B", "A", "C", "D"})
-	if !conflict {
-		t.Fatal("different displaced ranges did not conflict")
+// Replaces TestSnapshotEquivalentCandidatesChooseSmallestTailThenDisplacementThenHeader.
+func TestSnapshotConsensusDoesNotChooseDisputedOccurrence(t *testing.T) {
+	result := physicalConsensus([]string{"A", "B", "A"}, []string{"A", "B"}, true)
+	if !slices.Equal(result.agreed, []physicalPair{{0, 0}, {1, 1}}) {
+		t.Fatalf("mandatory pairs=%v", result.agreed)
 	}
+	disputed := physicalConsensus([]string{"A", "A"}, []string{"A"}, true)
+	if len(disputed.agreed) != 0 || len(disputed.feasible) != 2 {
+		t.Fatal("competing equal-support occurrences were selected")
+	}
+}
+
+// Replaces TestSnapshotConflictingDisplacedRangesFallBack's helper conflict and page copy.
+func TestSnapshotEqualPrefixTimerReplacesMiddle(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 40)
 	old := []string{"A", "B", "A", "B", "A", "B", "old"}
 	next := []string{"A", "B", "A", "B", "A", "B", "new"}
 	m.MergeSnapshot("p", snapshotPage(old...), ctx)
-	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), append(old, next...)...)
+	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), next...)
+	if m.states["p"].LiveStart != 0 || len(m.states["p"].Held) != 0 {
+		t.Fatal("timer update grew archive or holds")
+	}
 }
 
 func TestSnapshotStreamingExtensionKeepsArchive(t *testing.T) {
@@ -171,16 +179,21 @@ func TestSnapshotStreamingExtensionKeepsArchive(t *testing.T) {
 	}
 }
 
-func TestSnapshotStrictlyShorterPageRetainsPreviousBody(t *testing.T) {
+// Replaces TestSnapshotStrictlyShorterPageRetainsPreviousBody's whole-page fallback assertion.
+func TestSnapshotStrictlyShorterPageHoldsContraction(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 40)
 	old := []string{"A", "B", "C", "D", "E"}
 	next := []string{"A", "B"}
 	m.MergeSnapshot("p", snapshotPage(old...), ctx)
-	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), append(old, next...)...)
+	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), next...)
+	if !slices.Equal(physicalHeldRows(t, m.states["p"]), old[2:]) {
+		t.Fatal("unexplained old rows were not held")
+	}
 }
 
-func TestSnapshotReverseMovementFallsBackWithoutDeletingPriorPage(t *testing.T) {
+// Replaces TestSnapshotReverseMovementFallsBackWithoutDeletingPriorPage's mandatory page copy.
+func TestSnapshotReverseMovementHoldsPushedRows(t *testing.T) {
 	for _, header := range [][]string{nil, {"H1", "H2"}} {
 		for _, tail := range []bool{false, true} {
 			m := NewManager(t.TempDir())
@@ -191,27 +204,38 @@ func TestSnapshotReverseMovementFallsBackWithoutDeletingPriorPage(t *testing.T) 
 				old, next = append(old, "new spinner"), append(next, "old spinner")
 			}
 			m.MergeSnapshot("p", snapshotPage(old...), ctx)
-			assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), append(old, next...)...)
+			assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), next...)
+			if len(physicalHeldRows(t, m.states["p"])) < 2 {
+				t.Fatal("reverse-pushed F,G were not held")
+			}
 		}
 	}
 }
 
-func TestSnapshotAmbiguousRepeatedAlignmentFreezesWholePage(t *testing.T) {
+// Replaces TestSnapshotAmbiguousRepeatedAlignmentFreezesWholePage's whole-page fallback assertion.
+func TestSnapshotAmbiguousRepeatedAlignmentStaysHeldBelowEight(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 40)
 	old := []string{"A", "B", "A", "B", "A", "B"}
 	next := []string{"A", "B", "A", "B", "C", "D"}
 	m.MergeSnapshot("p", snapshotPage(old...), ctx)
-	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), append(old, next...)...)
+	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), next...)
+	if !slices.Equal(physicalHeldRows(t, m.states["p"]), old) {
+		t.Fatal("unexplained old rows were not held")
+	}
 }
 
-func TestSnapshotWeakScrollAnchorDoesNotBecomeStreamingRedraw(t *testing.T) {
+// Replaces TestSnapshotWeakScrollAnchorDoesNotBecomeStreamingRedraw's whole-page fallback assertion.
+func TestSnapshotWeakScrollAnchorHoldsMissingRows(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 40)
 	old := []string{"A", "B", "C", "", ""}
 	next := []string{"C", "", "", "D", "E"}
 	m.MergeSnapshot("p", snapshotPage(old...), ctx)
-	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), append(old, next...)...)
+	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), next...)
+	if !slices.Equal(physicalHeldRows(t, m.states["p"]), old[:2]) {
+		t.Fatal("unexplained old rows were not held")
+	}
 }
 
 func TestSnapshotLegacyMatchingDoesNotSearchFrozenPrefix(t *testing.T) {
@@ -272,7 +296,11 @@ func TestSnapshotBlankOnlyOverlapDoesNotRemoveRows(t *testing.T) {
 		m.MergeSnapshot("p", snapshotPage(old...), ctx)
 		assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(old...), ctx), old...)
 		next := append(make([]string, 35), "new A", "new B")
-		assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), append(slices.Clone(old), next...)...)
+		// Replaces blank-overlap fallback copies with held nonblank accounting.
+		assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage(next...), ctx), next...)
+		if physicalNonblank(old) > 0 && physicalNonblank(physicalHeldRows(t, m.states["p"]))+physicalDiagnostic(t, planPhysicalTransition(comparisonBody(old), comparisonBody(next), true).diagnostic, "ReplacedNonblank") != physicalNonblank(old) {
+			t.Fatal("blank-only overlap removed nonblank old rows outside replacement")
+		}
 	}
 }
 

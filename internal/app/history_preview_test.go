@@ -69,7 +69,8 @@ func TestRejectedHistoryPreviewCannotAttachReplacementArchive(t *testing.T) {
 func TestRejectedHistoryReadComposesWithoutAdmission(t *testing.T) {
 	for _, physical := range []bool{false, true} {
 		s, _, _ := captureServer(t, physical)
-		executeCapture(t, s, capturePage("archive A", "archive B"), physical)
+		// Replaces fallback-generated history with supported forward retirement.
+		executeCapture(t, s, capturePage("archive A", "archive B", "current A", "current B"), physical)
 		executeCapture(t, s, capturePage("current A", "current B"), physical)
 		stored := s.historyM.Content("pane-1", 0)
 		pendingDeparture(s, 10)

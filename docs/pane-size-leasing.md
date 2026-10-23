@@ -266,7 +266,9 @@ The relay skips archival inside or across the three-second settling interval.
 Rows appearing and disappearing during that pause are lost. Bursts larger
 than the sampled page between captures can also leave gaps. The background
 service checks on a four-second tick. Its interval accounting uses scheduling
-time rather than validation completion time. Inflight work, settling, and
+time rather than validation completion time. The scheduler starts captures of
+one pane at least three seconds apart, so small timer jitter does not skip a
+tick and a late tick does not add a second capture. Inflight work, settling, and
 scheduler delays can still defer a capture. Trailing requests add sampling
 opportunities.
 

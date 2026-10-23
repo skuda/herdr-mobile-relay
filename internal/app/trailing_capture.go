@@ -75,21 +75,21 @@ func (s *Server) captureHistoryTick(now time.Time) {
 		s.logger.Warn("trailing pane capture expired", "pane_id", paneID)
 	}
 	for paneID := range candidates {
-		s.scheduleHistoryCapture(context.Background(), paneID)
+		s.scheduleHistoryCaptureAt(context.Background(), paneID, now)
 	}
 }
 
-func (s *Server) pendingReadStartedLocked(paneID string, identity historyIdentity) uint64 {
+func (s *Server) pendingReadStartedLocked(paneID string, identity historyIdentity) (uint64, bool) {
 	pending := s.historyPending[paneID]
 	if pending == nil || pending.identity != identity {
-		return 0
+		return 0, false
 	}
 	if pending.expired(s.historyNow()) {
 		delete(s.historyPending, paneID)
-		return 0
+		return 0, true
 	}
 	pending.attempts++
-	return pending.sequence
+	return pending.sequence, false
 }
 
 func (s *Server) acknowledgeHistoryLocked(token historyReadToken) {

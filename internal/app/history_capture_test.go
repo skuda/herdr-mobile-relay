@@ -1924,3 +1924,53 @@ func TestClaudeGeometryValidationKeepsPaneSizeOperationBound(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestHistoryJitteredTicksKeepOneCapturePerSlot(t *testing.T) {
+	s, _, advance := captureServer(t, false)
+	var reads atomic.Int32
+	installPaneReadFixture(t, s, func(context.Context) (string, error) { reads.Add(1); return capturePage("A", "B"), nil })
+	s.historyTasks = newLifecycleTasks(context.Background())
+	t.Cleanup(s.historyTasks.Stop)
+	base := s.historyNow()
+	for i, jitter := range []time.Duration{300 * time.Millisecond, 100 * time.Millisecond, 400 * time.Millisecond, 50 * time.Millisecond} {
+		tick := base.Add(time.Duration(i) * history.CaptureInterval)
+		advance(tick.Add(jitter).Sub(s.historyNow()))
+		s.captureHistoryTick(tick)
+		waitHistoryCapture(t, s)
+		s.captureHistoryTick(tick)
+		waitHistoryCapture(t, s)
+		if got := reads.Load(); got != int32(i+1) {
+			t.Fatalf("jittered tick %d reads=%d, want %d without skips or bursts", i, got, i+1)
+		}
+	}
+}
+func TestPendingReadExpiryEmitsPaneDiagnostic(t *testing.T) {
+	s, _, advance := captureServer(t, false)
+	var output bytes.Buffer
+	s.logger = slog.New(slog.NewTextHandler(&output, nil))
+	pendingDeparture(s, 10)
+	advance(trailingCaptureLifetime)
+	executeCapture(t, s, capturePage("private page A", "private page B"), false)
+	if !strings.Contains(output.String(), "trailing pane capture expired") || !strings.Contains(output.String(), "pane_id=pane-1") {
+		t.Fatal("read-path expiry omitted bounded diagnostic")
+	}
+	if strings.Contains(output.String(), "private page") {
+		t.Fatal("expiry log exposed content")
+	}
+}
+func TestHistoryStatusRevisionsPruneWithSnapshotProtection(t *testing.T) {
+	s, _, _ := captureServer(t, false)
+	snapshot := s.state.InventorySnapshot()
+	snapshot.Agents = nil
+	s.historyPendingMu.Lock()
+	s.historyStatusRevision["past"] = snapshot.Revision
+	s.historyStatusRevision["future"] = snapshot.Revision + 1
+	s.historyPendingMu.Unlock()
+	s.syncHistorySnapshot(snapshot)
+	if _, ok := s.historyStatusRevision["past"]; ok {
+		t.Fatal("absent pane revision was not pruned")
+	}
+	if _, ok := s.historyStatusRevision["future"]; !ok {
+		t.Fatal("older snapshot pruned a future accepted status revision")
+	}
+}

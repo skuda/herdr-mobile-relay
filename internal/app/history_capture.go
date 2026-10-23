@@ -114,8 +114,12 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 	retainedUnsafe := s.paneSizeM != nil && s.paneSizeM.HistoryReadUnsafe(request.PaneID, token.identity.terminalID)
 	if captureShape {
 		s.historyPendingMu.Lock()
-		token.pendingSequence = s.pendingReadStartedLocked(request.PaneID, token.identity)
+		var expired bool
+		token.pendingSequence, expired = s.pendingReadStartedLocked(request.PaneID, token.identity)
 		s.historyPendingMu.Unlock()
+		if expired {
+			s.logger.Warn("trailing pane capture expired", "pane_id", request.PaneID)
+		}
 	}
 	contentCtx, cancel := historyContentContext(ctx, request.Background)
 	defer cancel()

@@ -2134,16 +2134,19 @@ func (s *Server) captureHistoryLoop(ctx context.Context) {
 }
 
 func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
+	s.scheduleHistoryCaptureAt(ctx, paneID, s.historyNow())
+}
+
+func (s *Server) scheduleHistoryCaptureAt(ctx context.Context, paneID string, scheduledAt time.Time) {
 	if s.historyTasks == nil {
 		return
 	}
 	s.historyCaptureMu.Lock()
-	if s.historyClosed || s.historyInflight[paneID] || s.historyNow().Sub(s.historyLast[paneID]) < history.CaptureInterval {
+	if s.historyClosed || s.historyInflight[paneID] || scheduledAt.Sub(s.historyLast[paneID]) < history.CaptureInterval {
 		s.historyCaptureMu.Unlock()
 		return
 	}
 	s.historyInflight[paneID] = true
-	scheduledAt := s.historyNow()
 	s.historyCaptureMu.Unlock()
 
 	started := s.historyTasks.Start(func(taskCtx context.Context) {
@@ -2229,6 +2232,11 @@ func (s *Server) syncHistorySnapshot(snapshot coordinator.InventorySnapshot) {
 	}
 	s.historyPendingMu.Lock()
 	s.historyPendingActive = active
+	for paneID, revision := range s.historyStatusRevision {
+		if _, exists := active[paneID]; !exists && revision <= snapshot.Revision {
+			delete(s.historyStatusRevision, paneID)
+		}
+	}
 	for paneID, pending := range s.historyPending {
 		if pending.revision > snapshot.Revision {
 			continue

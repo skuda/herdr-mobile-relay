@@ -312,7 +312,7 @@ rows can change in place when its replacement is at least as large; the old
 values are not archived. Other unresolved rows can remain held and invisible.
 A short `/clear` can replace or hold the exchange under these generic rules;
 it does not promise visible retention. Larger unexplained changes can freeze
-the old page once, with a reason log. Retained desktop rows can wrap unevenly.
+the old body once, with a reason log. Retained desktop rows can wrap unevenly.
 PTY epochs do not detect emulator-grid or pixel-only changes, and a narrower
 Herdr grid can clip rows. The absence of an older-history notice does not
 establish that omitted samples, held rows, or replaced slots/tails are visible.

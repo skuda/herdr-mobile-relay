@@ -56,6 +56,9 @@ func TestSnapshotRepeatedBlockLiveFixtureKeepsTailInPlace(t *testing.T) {
 		if !slices.Equal(state.History[state.LiveStart:], body) || got != snapshotPage(body...) {
 			t.Fatalf("frame %d did not retain the exact current page", frame)
 		}
+		if len(physicalHeldRows(t, state)) != 0 {
+			t.Fatalf("frame %d stationary spinner accumulated held rows", frame)
+		}
 	}
 }
 
@@ -69,6 +72,9 @@ func TestSnapshotRepeatedBlockSyntheticKeepsTailInPlace(t *testing.T) {
 	state := m.states["p"]
 	if state.LiveStart != 0 || len(state.History) != len(previous) {
 		t.Fatalf("tail update archived repeated block: live=%d rows=%d, want live=0 rows=%d", state.LiveStart, len(state.History), len(previous))
+	}
+	if len(physicalHeldRows(t, state)) != 0 {
+		t.Fatal("stationary repeated block accumulated held rows")
 	}
 	if !slices.Equal(state.History, next) || got != snapshotPage(next...) {
 		t.Fatal("tail update did not retain the exact current page")
@@ -89,29 +95,28 @@ func TestSnapshotRepeatedBlockScrollArchivesDisplacementOnce(t *testing.T) {
 			t.Fatalf("frame %d displaced rows = %q live=%d, want C,D once and live=2", frame, state.History[:state.LiveStart], state.LiveStart)
 		}
 		assertSnapshotContent(t, got, want...)
+		if len(physicalHeldRows(t, state)) != 0 {
+			t.Fatal("supported repeated-block scroll accumulated held rows")
+		}
 	}
 }
 
-func TestPhysicalAlignmentsRepeatedBlockDoNotConflict(t *testing.T) {
+// Replaces TestPhysicalAlignmentsRepeatedBlockDoNotConflict's candidate tuple
+// assertions with stationary-slot behavior, independent of the old helpers.
+func TestPhysicalRepeatedBlockStationaryOccurrenceAgreement(t *testing.T) {
 	previous, next := repeatedBlockFixture(t)
 	for name, pair := range map[string][2][]string{
 		"forward": {previous, next},
 		"reverse": {next, previous},
 	} {
 		t.Run(name, func(t *testing.T) {
-			old, next := comparisonBody(pair[0]), comparisonBody(pair[1])
-			candidates, _ := physicalAlignments(old, next)
-			if len(candidates) == 0 {
-				t.Fatal("tail replacement has no alignment")
-			}
-			best, conflict := choosePhysicalAlignment(candidates, pair[0])
-			if conflict || best != (physicalAlignment{header: 0, displacement: 0, tail: 1}) {
-				t.Errorf("chosen alignment = %+v conflict=%v, want header=0 displacement=0 tail=1", best, conflict)
-			}
-			for _, candidate := range candidates {
-				if candidate.displacement > 0 {
-					t.Fatalf("repeated block produced spurious displacement: %+v", candidate)
-				}
+			m := NewManager(t.TempDir())
+			ctx := physicalContext(1, 54)
+			m.AdmitSnapshot("p", snapshotPage(pair[0]...), ctx, 0)
+			got, _, _ := m.AdmitSnapshot("p", snapshotPage(pair[1]...), ctx, 0)
+			state := m.states["p"]
+			if state.LiveStart != 0 || len(physicalHeldRows(t, state)) != 0 || got != snapshotPage(pair[1]...) {
+				t.Fatal("interior repeats caused false retirement or held accumulation")
 			}
 		})
 	}

@@ -1,0 +1,1670 @@
+{
+ "schema": 1,
+ "cases": [
+  {
+   "name": "disputed-HABCADE",
+   "old": [
+    "H",
+    "A",
+    "B",
+    "C",
+    "A",
+    "D",
+    "E"
+   ],
+   "next": [
+    "H",
+    "A",
+    "D",
+    "E",
+    "F",
+    "G",
+    "J"
+   ],
+   "archive": [],
+   "held": [
+    1,
+    2,
+    3,
+    4
+   ],
+   "matched": [
+    0,
+    5,
+    6
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "prefix-contraction",
+   "old": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E"
+   ],
+   "next": [
+    "A",
+    "B"
+   ],
+   "archive": [],
+   "held": [
+    2,
+    3,
+    4
+   ],
+   "matched": [
+    0,
+    1
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "disputed-HABCAXDE-majority",
+   "old": [
+    "H",
+    "A",
+    "B",
+    "C",
+    "A",
+    "X",
+    "D",
+    "E"
+   ],
+   "next": [
+    "H",
+    "A",
+    "D",
+    "E",
+    "F",
+    "G",
+    "J",
+    "K"
+   ],
+   "archive": [
+    "H",
+    "A",
+    "B",
+    "C",
+    "A",
+    "X",
+    "D",
+    "E"
+   ],
+   "held": [
+    1,
+    2,
+    3,
+    4,
+    5
+   ],
+   "matched": [
+    0,
+    6,
+    7
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "freeze"
+  },
+  {
+   "name": "disputed-eight-majority",
+   "old": [
+    "A",
+    "B",
+    "A",
+    "B",
+    "A",
+    "B",
+    "A",
+    "B"
+   ],
+   "next": [
+    "A",
+    "B",
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F"
+   ],
+   "archive": [
+    "A",
+    "B",
+    "A",
+    "B",
+    "A",
+    "B",
+    "A",
+    "B"
+   ],
+   "held": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+   ],
+   "matched": [],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "freeze"
+  },
+  {
+   "name": "cleared-tail-is-contraction-not-slot",
+   "old": [
+    "h1",
+    "h2",
+    "old1",
+    "old2",
+    "old3"
+   ],
+   "next": [
+    "h1",
+    "h2",
+    "",
+    "",
+    ""
+   ],
+   "archive": [],
+   "held": [
+    2,
+    3,
+    4
+   ],
+   "matched": [
+    0,
+    1
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "tail-four-physical-two-substantive",
+   "old": [
+    "A",
+    "B",
+    "C",
+    "x1",
+    "---",
+    "---",
+    "x2"
+   ],
+   "next": [
+    "A",
+    "B",
+    "C",
+    "y1",
+    "y2",
+    "y3",
+    "y4"
+   ],
+   "archive": [],
+   "held": [
+    3,
+    4,
+    5,
+    6
+   ],
+   "matched": [
+    0,
+    1,
+    2
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "slot-four-rewrite",
+   "old": [
+    "h1",
+    "h2",
+    "s1",
+    "s2",
+    "s3",
+    "s4",
+    "t1",
+    "t2"
+   ],
+   "next": [
+    "h1",
+    "h2",
+    "r1",
+    "r2",
+    "r3",
+    "r4",
+    "t1",
+    "t2"
+   ],
+   "archive": [],
+   "held": [
+    2,
+    3,
+    4,
+    5
+   ],
+   "matched": [
+    0,
+    1,
+    6,
+    7
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "weak-one-row-anchor",
+   "old": [
+    "A",
+    "B",
+    "C",
+    "",
+    ""
+   ],
+   "next": [
+    "C",
+    "",
+    "",
+    "D",
+    "E"
+   ],
+   "archive": [],
+   "held": [
+    0,
+    1
+   ],
+   "matched": [
+    2
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "disputed-six",
+   "old": [
+    "A",
+    "B",
+    "A",
+    "B",
+    "A",
+    "B"
+   ],
+   "next": [
+    "A",
+    "B",
+    "A",
+    "B",
+    "C",
+    "D"
+   ],
+   "archive": [],
+   "held": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+   ],
+   "matched": [],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "punctuation-has-no-retirement-weight",
+   "old": [
+    "H1",
+    "H2",
+    "{",
+    "}",
+    "[]",
+    "++",
+    "A1",
+    "A2"
+   ],
+   "next": [
+    "H1",
+    "H2",
+    "A1",
+    "A2",
+    "N1",
+    "N2",
+    "N3",
+    "N4"
+   ],
+   "archive": [],
+   "held": [
+    2,
+    3,
+    4,
+    5
+   ],
+   "matched": [
+    0,
+    1,
+    6,
+    7
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "punctuation-cleared-interior",
+   "old": [
+    "H1",
+    "{",
+    "}",
+    "[]",
+    "++",
+    "A1",
+    "A2"
+   ],
+   "next": [
+    "H1",
+    "",
+    "",
+    "",
+    "",
+    "A1",
+    "A2"
+   ],
+   "archive": [
+    "{",
+    "}",
+    "[]",
+    "++"
+   ],
+   "held": [],
+   "matched": [
+    0,
+    5,
+    6
+   ],
+   "retired": [
+    1,
+    2,
+    3,
+    4
+   ],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "forward"
+  },
+  {
+   "name": "tail-four-not-two-row-replacement",
+   "old": [
+    "A",
+    "B",
+    "x1",
+    "",
+    "",
+    "x2"
+   ],
+   "next": [
+    "A",
+    "B",
+    "y1",
+    "y2",
+    "y3",
+    "y4"
+   ],
+   "archive": [],
+   "held": [
+    2,
+    3,
+    4,
+    5
+   ],
+   "matched": [
+    0,
+    1
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "interior-timer-edge-match",
+   "old": [
+    "h1",
+    "h2",
+    "t1",
+    "t2",
+    "t3",
+    "",
+    "timer 4s",
+    "",
+    "---",
+    "❯ ",
+    "st"
+   ],
+   "next": [
+    "h1",
+    "h2",
+    "t1",
+    "t2",
+    "t3",
+    "",
+    "timer 5s",
+    "",
+    "---",
+    "❯ ",
+    "st"
+   ],
+   "archive": [],
+   "held": [],
+   "matched": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    8,
+    9,
+    10
+   ],
+   "retired": [],
+   "replaced": [
+    6
+   ],
+   "seed": [],
+   "epoch": 1,
+   "cls": "replaced"
+  },
+  {
+   "name": "queue-consumption",
+   "old": [
+    "t1",
+    "t2",
+    "t3",
+    "q next job",
+    "q more",
+    "---",
+    "❯ ",
+    "st"
+   ],
+   "next": [
+    "t1",
+    "t2",
+    "t3",
+    "❯ next job",
+    "  more",
+    "---",
+    "❯ ",
+    "st"
+   ],
+   "archive": [],
+   "held": [],
+   "matched": [
+    0,
+    1,
+    2,
+    5,
+    6,
+    7
+   ],
+   "retired": [],
+   "replaced": [
+    3,
+    4
+   ],
+   "seed": [],
+   "epoch": 1,
+   "cls": "replaced"
+  },
+  {
+   "name": "sparse-preview-three-replaced",
+   "old": [
+    "h1",
+    "h2",
+    "Thinking for 9s",
+    "draft one",
+    "draft two"
+   ],
+   "next": [
+    "h1",
+    "h2",
+    "Thought for 9s",
+    "answer one",
+    "answer two"
+   ],
+   "archive": [],
+   "held": [],
+   "matched": [
+    0,
+    1
+   ],
+   "retired": [],
+   "replaced": [
+    2,
+    3,
+    4
+   ],
+   "seed": [],
+   "epoch": 1,
+   "cls": "replaced"
+  },
+  {
+   "name": "sparse-preview-long-held",
+   "old": [
+    "h1",
+    "h2",
+    "draft1",
+    "draft2",
+    "draft3",
+    "draft4",
+    "tail1",
+    "tail2"
+   ],
+   "next": [
+    "h1",
+    "h2",
+    "Thought for 9s",
+    "answer one",
+    "answer two",
+    "tail1",
+    "tail2"
+   ],
+   "archive": [],
+   "held": [
+    2,
+    3,
+    4,
+    5
+   ],
+   "matched": [
+    0,
+    1,
+    6,
+    7
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "sparse-preview-forward",
+   "old": [
+    "draft1",
+    "draft2",
+    "draft3",
+    "draft4",
+    "answer one",
+    "answer two"
+   ],
+   "next": [
+    "answer one",
+    "answer two",
+    "more one",
+    "more two"
+   ],
+   "archive": [
+    "draft1",
+    "draft2",
+    "draft3",
+    "draft4"
+   ],
+   "held": [],
+   "matched": [
+    4,
+    5
+   ],
+   "retired": [
+    0,
+    1,
+    2,
+    3
+   ],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "forward"
+  },
+  {
+   "name": "reverse-without-suffix",
+   "old": [
+    "C",
+    "D",
+    "E",
+    "F",
+    "G"
+   ],
+   "next": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E"
+   ],
+   "archive": [],
+   "held": [
+    3,
+    4
+   ],
+   "matched": [
+    0,
+    1,
+    2
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "reverse-verified-suffix",
+   "old": [
+    "C",
+    "D",
+    "E",
+    "F",
+    "G"
+   ],
+   "next": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E"
+   ],
+   "archive": [],
+   "held": [
+    3,
+    4
+   ],
+   "matched": [
+    0,
+    1,
+    2
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [
+    "A",
+    "B"
+   ],
+   "epoch": 1,
+   "cls": "reverse"
+  },
+  {
+   "name": "reverse-cannot-cross-segment",
+   "old": [
+    "C",
+    "D",
+    "E",
+    "F",
+    "G"
+   ],
+   "next": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E"
+   ],
+   "archive": [
+    "A",
+    "B"
+   ],
+   "held": [
+    3,
+    4
+   ],
+   "matched": [
+    0,
+    1,
+    2
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [
+    "A",
+    "B"
+   ],
+   "epoch": 2,
+   "cls": "held"
+  },
+  {
+   "name": "minimum-height-chrome-contraction",
+   "old": [
+    "answer",
+    "spinner",
+    "Tip: one",
+    "Tip: two"
+   ],
+   "next": [
+    "answer"
+   ],
+   "archive": [],
+   "held": [
+    1,
+    2,
+    3
+   ],
+   "matched": [
+    0
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "turn-end-spinner-tip-contraction",
+   "old": [
+    "h1",
+    "h2",
+    "a1",
+    "a2",
+    "a3",
+    "a4",
+    "a5",
+    "spinner",
+    "Tip: one",
+    "Tip: two"
+   ],
+   "next": [
+    "h1",
+    "h2",
+    "a1",
+    "a2",
+    "a3",
+    "a4",
+    "a5"
+   ],
+   "archive": [],
+   "held": [
+    7,
+    8,
+    9
+   ],
+   "matched": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "fast-scroll-with-held-chrome",
+   "old": [
+    "A0",
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A6",
+    "A7",
+    "A8",
+    "A9",
+    "spinner",
+    "Tip: one",
+    "Tip: two"
+   ],
+   "next": [
+    "A8",
+    "A9"
+   ],
+   "archive": [
+    "A0",
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A6",
+    "A7"
+   ],
+   "held": [
+    10,
+    11,
+    12
+   ],
+   "matched": [
+    8,
+    9
+   ],
+   "retired": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+   ],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "clear-logo3-transcript1",
+   "old": [
+    "logo one",
+    "logo two",
+    "logo three",
+    "transcript 0",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "next": [
+    "logo one",
+    "logo two",
+    "logo three",
+    "❯ /clear",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "archive": [],
+   "held": [],
+   "matched": [
+    0,
+    1,
+    2
+   ],
+   "retired": [],
+   "replaced": [
+    3
+   ],
+   "seed": [],
+   "epoch": 1,
+   "cls": "replaced"
+  },
+  {
+   "name": "clear-logo3-transcript2",
+   "old": [
+    "logo one",
+    "logo two",
+    "logo three",
+    "transcript 0",
+    "transcript 1",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "next": [
+    "logo one",
+    "logo two",
+    "logo three",
+    "❯ /clear",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "archive": [],
+   "held": [
+    3,
+    4
+   ],
+   "matched": [
+    0,
+    1,
+    2
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "clear-logo3-transcript3",
+   "old": [
+    "logo one",
+    "logo two",
+    "logo three",
+    "transcript 0",
+    "transcript 1",
+    "transcript 2",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "next": [
+    "logo one",
+    "logo two",
+    "logo three",
+    "❯ /clear",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "archive": [],
+   "held": [
+    3,
+    4,
+    5
+   ],
+   "matched": [
+    0,
+    1,
+    2
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "clear-logo3-transcript4",
+   "old": [
+    "logo one",
+    "logo two",
+    "logo three",
+    "transcript 0",
+    "transcript 1",
+    "transcript 2",
+    "transcript 3",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "next": [
+    "logo one",
+    "logo two",
+    "logo three",
+    "❯ /clear",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "archive": [],
+   "held": [
+    3,
+    4,
+    5,
+    6
+   ],
+   "matched": [
+    0,
+    1,
+    2
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "clear-logo3-transcript5",
+   "old": [
+    "logo one",
+    "logo two",
+    "logo three",
+    "transcript 0",
+    "transcript 1",
+    "transcript 2",
+    "transcript 3",
+    "transcript 4",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "next": [
+    "logo one",
+    "logo two",
+    "logo three",
+    "❯ /clear",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "archive": [
+    "logo one",
+    "logo two",
+    "logo three",
+    "transcript 0",
+    "transcript 1",
+    "transcript 2",
+    "transcript 3",
+    "transcript 4",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "held": [
+    3,
+    4,
+    5,
+    6,
+    7
+   ],
+   "matched": [
+    0,
+    1,
+    2
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "freeze"
+  },
+  {
+   "name": "clear-logo3-transcript6",
+   "old": [
+    "logo one",
+    "logo two",
+    "logo three",
+    "transcript 0",
+    "transcript 1",
+    "transcript 2",
+    "transcript 3",
+    "transcript 4",
+    "transcript 5",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "next": [
+    "logo one",
+    "logo two",
+    "logo three",
+    "❯ /clear",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "archive": [
+    "logo one",
+    "logo two",
+    "logo three",
+    "transcript 0",
+    "transcript 1",
+    "transcript 2",
+    "transcript 3",
+    "transcript 4",
+    "transcript 5",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "held": [
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+   ],
+   "matched": [
+    0,
+    1,
+    2
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "freeze"
+  },
+  {
+   "name": "held-share-N7-H2",
+   "old": [
+    "kept0",
+    "kept1",
+    "kept2",
+    "kept3",
+    "kept4",
+    "old0",
+    "old1"
+   ],
+   "next": [
+    "kept0",
+    "kept1",
+    "kept2",
+    "kept3",
+    "kept4"
+   ],
+   "archive": [],
+   "held": [
+    5,
+    6
+   ],
+   "matched": [
+    0,
+    1,
+    2,
+    3,
+    4
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "held-share-N7-H3",
+   "old": [
+    "kept0",
+    "kept1",
+    "kept2",
+    "kept3",
+    "old0",
+    "old1",
+    "old2"
+   ],
+   "next": [
+    "kept0",
+    "kept1",
+    "kept2",
+    "kept3"
+   ],
+   "archive": [],
+   "held": [
+    4,
+    5,
+    6
+   ],
+   "matched": [
+    0,
+    1,
+    2,
+    3
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "held-share-N7-H4",
+   "old": [
+    "kept0",
+    "kept1",
+    "kept2",
+    "old0",
+    "old1",
+    "old2",
+    "old3"
+   ],
+   "next": [
+    "kept0",
+    "kept1",
+    "kept2"
+   ],
+   "archive": [],
+   "held": [
+    3,
+    4,
+    5,
+    6
+   ],
+   "matched": [
+    0,
+    1,
+    2
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "held-share-N8-H3",
+   "old": [
+    "kept0",
+    "kept1",
+    "kept2",
+    "kept3",
+    "kept4",
+    "old0",
+    "old1",
+    "old2"
+   ],
+   "next": [
+    "kept0",
+    "kept1",
+    "kept2",
+    "kept3",
+    "kept4"
+   ],
+   "archive": [],
+   "held": [
+    5,
+    6,
+    7
+   ],
+   "matched": [
+    0,
+    1,
+    2,
+    3,
+    4
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "held-share-N8-H4",
+   "old": [
+    "kept0",
+    "kept1",
+    "kept2",
+    "kept3",
+    "old0",
+    "old1",
+    "old2",
+    "old3"
+   ],
+   "next": [
+    "kept0",
+    "kept1",
+    "kept2",
+    "kept3"
+   ],
+   "archive": [],
+   "held": [
+    4,
+    5,
+    6,
+    7
+   ],
+   "matched": [
+    0,
+    1,
+    2,
+    3
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "held"
+  },
+  {
+   "name": "held-share-N8-H5",
+   "old": [
+    "kept0",
+    "kept1",
+    "kept2",
+    "old0",
+    "old1",
+    "old2",
+    "old3",
+    "old4"
+   ],
+   "next": [
+    "kept0",
+    "kept1",
+    "kept2"
+   ],
+   "archive": [
+    "kept0",
+    "kept1",
+    "kept2",
+    "old0",
+    "old1",
+    "old2",
+    "old3",
+    "old4"
+   ],
+   "held": [
+    3,
+    4,
+    5,
+    6,
+    7
+   ],
+   "matched": [
+    0,
+    1,
+    2
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "freeze"
+  },
+  {
+   "name": "held-share-N9-H5",
+   "old": [
+    "kept0",
+    "kept1",
+    "kept2",
+    "kept3",
+    "old0",
+    "old1",
+    "old2",
+    "old3",
+    "old4"
+   ],
+   "next": [
+    "kept0",
+    "kept1",
+    "kept2",
+    "kept3"
+   ],
+   "archive": [
+    "kept0",
+    "kept1",
+    "kept2",
+    "kept3",
+    "old0",
+    "old1",
+    "old2",
+    "old3",
+    "old4"
+   ],
+   "held": [
+    4,
+    5,
+    6,
+    7,
+    8
+   ],
+   "matched": [
+    0,
+    1,
+    2,
+    3
+   ],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "freeze"
+  },
+  {
+   "name": "blank-only-changed",
+   "old": [
+    "",
+    "",
+    ""
+   ],
+   "next": [
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "archive": [],
+   "held": [],
+   "matched": [],
+   "retired": [],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "stationary"
+  },
+  {
+   "name": "cleared-small-slot-precedes-replacement",
+   "old": [
+    "h1",
+    "old one",
+    "old two",
+    "t1",
+    "t2"
+   ],
+   "next": [
+    "h1",
+    "",
+    "",
+    "t1",
+    "t2"
+   ],
+   "archive": [
+    "old one",
+    "old two"
+   ],
+   "held": [],
+   "matched": [
+    0,
+    3,
+    4
+   ],
+   "retired": [
+    1,
+    2
+   ],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "forward"
+  },
+  {
+   "name": "blank-layout-forward-once",
+   "old": [
+    "A",
+    "",
+    "B",
+    "",
+    "C",
+    "D"
+   ],
+   "next": [
+    "C",
+    "D",
+    "E",
+    "F"
+   ],
+   "archive": [
+    "A",
+    "",
+    "B",
+    ""
+   ],
+   "held": [],
+   "matched": [
+    4,
+    5
+   ],
+   "retired": [
+    0,
+    1,
+    2,
+    3
+   ],
+   "replaced": [],
+   "seed": [],
+   "epoch": 1,
+   "cls": "forward"
+  }
+ ]
+}

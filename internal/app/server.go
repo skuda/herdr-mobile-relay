@@ -163,6 +163,7 @@ type Server struct {
 	historyAcknowledgements  uint64
 	historyClosed            bool
 	historyNow               func() time.Time
+	historyCounters          map[string]*historyMinuteCounters
 	persistenceTasks         *lifecycleTasks
 	historyInventoryRevision int64
 	historyReconciled        bool
@@ -2127,6 +2128,7 @@ func (s *Server) captureHistoryLoop(ctx context.Context) {
 			return
 		case now := <-ticker.C:
 			s.captureHistoryTick(now)
+			s.flushHistoryCounters(now)
 		}
 	}
 }
@@ -2220,6 +2222,7 @@ func (s *Server) syncHistorySnapshot(snapshot coordinator.InventorySnapshot) {
 		delete(s.historyActive, paneID)
 		delete(s.historyLast, paneID)
 		delete(s.historyArchived, paneID)
+		delete(s.historyCounters, paneID)
 		s.historyM.Discard(paneID)
 		forgotten[paneID] = previous.terminalID
 	}

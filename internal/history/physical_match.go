@@ -195,6 +195,7 @@ func planPhysicalTransition(old, next []string, linear bool) physicalTransition 
 			}
 		}
 		d.MatchPath = "identical"
+		d.MatchedRows = len(old)
 		return result
 	}
 	result.consensus = physicalConsensus(old, next, linear)
@@ -341,6 +342,7 @@ func planPhysicalTransition(old, next []string, linear bool) physicalTransition 
 		}
 		switch result.outcome[i] {
 		case physicalMatched:
+			d.MatchedRows++
 			if row != "" {
 				d.MatchedNonblank++
 			}

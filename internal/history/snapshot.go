@@ -35,6 +35,7 @@ type SnapshotAdmission struct {
 	Reason           string
 	MatchPath        string
 	MatchedNonblank  int
+	MatchedRows      int
 	RetiredNonblank  int
 	ReplacedNonblank int
 	HeldNonblank     int

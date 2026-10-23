@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
@@ -158,7 +159,13 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		s.historyReadFinishedObserver(token)
 	}
 	s.historyCaptureMu.Lock()
-	defer s.historyCaptureMu.Unlock()
+	var diagnostic *history.SnapshotAdmission
+	defer func() {
+		s.historyCaptureMu.Unlock()
+		if diagnostic != nil {
+			s.logHistoryAdmission(token, *diagnostic)
+		}
+	}()
 	active, ok := s.historyActive[request.PaneID]
 	if !ok || active != token.identity || token.sequence <= s.historyArchived[request.PaneID] || ctx.Err() != nil || s.historyClosed {
 		preview()
@@ -169,6 +176,8 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		s.historyAdmissionObserver(token, admission)
 	}
 	if admission.Admitted {
+		s.recordHistoryAdmissionLocked(token, admission)
+		diagnostic = &admission
 		response["content"] = content
 		result.Capture.Admitted = true
 		s.historyArchived[request.PaneID] = token.sequence
@@ -213,4 +222,107 @@ func (s *Server) captureTerminalHistory(ctx context.Context, paneID string) (str
 		return content, err
 	}
 	return string(result.Read.Content), err
+}
+
+type historyMinuteCounters struct {
+	started                                                                                      time.Time
+	admissions, initial, boundary, stationary, replaced, forward, held, reverse, legacy, freezes int
+	heldMajority, pairBudget                                                                     int
+	matchedRows, retiredRows, replacedRows, heldAddedRows, heldEvictedRows, heldExpiredRows      int
+	retractionEvents, retractedRows, dpPairs, maxDPPairs, currentHeldRows                        int
+}
+
+func (s *Server) recordHistoryAdmissionLocked(token historyReadToken, d history.SnapshotAdmission) {
+	if s.historyCounters == nil {
+		s.historyCounters = make(map[string]*historyMinuteCounters)
+	}
+	counter := s.historyCounters[token.paneID]
+	if counter == nil {
+		counter = &historyMinuteCounters{started: s.historyNow()}
+		s.historyCounters[token.paneID] = counter
+	}
+	counter.admissions++
+	switch d.Class {
+	case "initial":
+		counter.initial++
+	case "boundary":
+		counter.boundary++
+	case "stationary":
+		counter.stationary++
+	case "replaced":
+		counter.replaced++
+	case "forward":
+		counter.forward++
+	case "held":
+		counter.held++
+	case "reverse":
+		counter.reverse++
+	case "legacy":
+		counter.legacy++
+	case "freeze":
+		counter.freezes++
+		if d.Reason == "held_majority" {
+			counter.heldMajority++
+		}
+		if d.Reason == "pair_budget" {
+			counter.pairBudget++
+		}
+	}
+	counter.matchedRows += d.MatchedRows
+	counter.retiredRows += d.RetiredRows
+	counter.replacedRows += d.ReplacedRows
+	counter.heldAddedRows += d.HeldAddedRows
+	counter.heldEvictedRows += d.HeldEvictedRows
+	counter.heldExpiredRows += d.HeldExpiredRows
+	counter.retractionEvents += d.RetractionCount
+	counter.retractedRows += d.RetractedRows
+	counter.dpPairs += d.DPPairs
+	counter.maxDPPairs = max(counter.maxDPPairs, d.DPPairs)
+	counter.currentHeldRows = d.HeldTotalRows
+}
+
+func (s *Server) logHistoryAdmission(token historyReadToken, d history.SnapshotAdmission) {
+	if d.Class == "freeze" {
+		share := 0.0
+		if d.OldNonblank > 0 {
+			share = float64(d.HeldNonblank) / float64(d.OldNonblank)
+		}
+		s.logger.Warn("physical history discontinuity", "pane_id", token.paneID, "sequence", token.sequence, "source", history.SourceRecent,
+			"pty_epoch", token.geometry.Epoch, "lease_revision", token.leaseRevision, "reason", d.Reason,
+			"held_nonblank", d.HeldNonblank, "old_nonblank", d.OldNonblank, "matched_nonblank", d.MatchedNonblank,
+			"replaced_nonblank", d.ReplacedNonblank, "retired_nonblank", d.RetiredNonblank,
+			"matched_rows", d.MatchedRows, "replaced_rows", d.ReplacedRows, "retired_rows", d.RetiredRows, "held_share", share, "dp_pairs", d.DPPairs)
+	}
+	if d.HeldEvictedRows > 0 {
+		s.logger.Warn("physical history held rows removed", "pane_id", token.paneID, "reason", "held_capacity", "held_evicted_rows", d.HeldEvictedRows)
+	}
+	if d.HeldExpiredRows > 0 {
+		s.logger.Warn("physical history held rows removed", "pane_id", token.paneID, "reason", "archive_pin_expiry", "held_expired_rows", d.HeldExpiredRows)
+	}
+}
+
+func (s *Server) flushHistoryCounters(now time.Time) {
+	type report struct {
+		paneID   string
+		counters historyMinuteCounters
+	}
+	var reports []report
+	s.historyCaptureMu.Lock()
+	for paneID, counter := range s.historyCounters {
+		if now.Sub(counter.started) < time.Minute {
+			continue
+		}
+		reports = append(reports, report{paneID, *counter})
+		s.historyCounters[paneID] = &historyMinuteCounters{started: now, currentHeldRows: counter.currentHeldRows}
+	}
+	s.historyCaptureMu.Unlock()
+	for _, report := range reports {
+		c := report.counters
+		s.logger.Info("physical history minute", "pane_id", report.paneID, "admissions", c.admissions,
+			"initial", c.initial, "boundary", c.boundary, "stationary", c.stationary, "replaced", c.replaced, "forward", c.forward, "held", c.held, "reverse", c.reverse, "legacy", c.legacy,
+			"freezes", c.freezes, "held_majority", c.heldMajority, "pair_budget", c.pairBudget,
+			"matched_rows", c.matchedRows, "retired_rows", c.retiredRows, "replaced_rows", c.replacedRows,
+			"held_added_rows", c.heldAddedRows, "held_evicted_rows", c.heldEvictedRows, "held_expired_rows", c.heldExpiredRows, "held_total_rows", c.currentHeldRows,
+			"retraction_events", c.retractionEvents, "retracted_rows", c.retractedRows, "dp_pairs", c.dpPairs, "max_dp_pairs", c.maxDPPairs)
+	}
 }

@@ -1,10 +1,12 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -970,6 +972,9 @@ func TestSingleFlightOwnerAdmitsOnceForSeveralFollowers(t *testing.T) {
 	if s.historyPending["pane-1"] != nil || s.historyM.Content("pane-1", 0) != capturePage("owner A", "owner B") {
 		t.Fatal("shared admission did not retain page and acknowledge request")
 	}
+	if counter := s.historyCounters["pane-1"]; counter == nil || counter.admissions != 1 || counter.boundary != 1 {
+		t.Fatalf("shared followers double-counted class admissions: %+v", counter)
+	}
 }
 
 func TestPaneReadZeroRevisionUsesDistinctUnderlyingSequences(t *testing.T) {
@@ -1579,5 +1584,166 @@ func TestTextReadDoesNotEnterPhysicalArchive(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Herdr error was hidden")
+	}
+}
+
+// RED: One admitted underlying read increments one class; followers do not
+// double-count; one freeze emits one safe reason log; held eviction reports
+// a count without row text.
+func TestHistoryMatcherFreezeLogsSafeReasonOnce(t *testing.T) {
+	s, _, _ := captureServer(t, true)
+	var output bytes.Buffer
+	s.logger = slog.New(slog.NewTextHandler(&output, nil))
+	old := []string{"private-row-a", "private-row-b", "private-row-c", "private-row-d", "private-row-e", "private-row-f", "private-row-g", "private-row-h"}
+	executeCapture(t, s, capturePage(old...), true)
+	executeCapture(t, s, capturePage("new-a", "new-b", "new-c", "new-d"), true)
+	text := output.String()
+	if strings.Count(text, "physical history discontinuity") != 1 || !strings.Contains(text, "reason=held_majority") || !strings.Contains(text, "held_nonblank=8") || !strings.Contains(text, "old_nonblank=8") {
+		t.Fatalf("missing one safe freeze log: %s", text)
+	}
+	for _, row := range append(old, "new-a", "new-b", "new-c", "new-d", "f1", "f2", "f3", "f4", "f5", "f6") {
+		if strings.Contains(text, row) {
+			t.Fatal("freeze log exposed page row text")
+		}
+	}
+}
+
+func TestHistoryMatcherHeldEvictionLogsCountsWithoutRows(t *testing.T) {
+	s, _, _ := captureServer(t, true)
+	var output bytes.Buffer
+	s.logger = slog.New(slog.NewTextHandler(&output, nil))
+	// Rewriting this four-row slot holds its old values without a page freeze.
+	old := []string{"h1", "h2", "private-slot-a", "private-slot-b", "private-slot-c", "private-slot-d", "t1", "t2"}
+	executeCapture(t, s, capturePage(old...), true)
+	for frame := range 502 {
+		body := []string{"h1", "h2", fmt.Sprintf("private-slot-%d-a", frame), fmt.Sprintf("private-slot-%d-b", frame), fmt.Sprintf("private-slot-%d-c", frame), fmt.Sprintf("private-slot-%d-d", frame), "t1", "t2"}
+		executeCapture(t, s, capturePage(body...), true)
+	}
+	text := output.String()
+	if !strings.Contains(text, "reason=held_capacity") || !strings.Contains(text, "held_evicted_rows=4") {
+		t.Fatal("held eviction did not log a physical count")
+	}
+	if strings.Contains(text, "private-slot-") {
+		t.Fatal("held eviction log exposed page row text")
+	}
+	for _, row := range []string{"h1", "h2", "t1", "t2", "f1", "f2", "f3", "f4", "f5", "f6"} {
+		if strings.Contains(text, row) {
+			t.Fatalf("eviction log exposed page row %q", row)
+		}
+	}
+}
+
+func TestHistoryMinuteCountersFlushQuietPaneAndPrune(t *testing.T) {
+	s, _, advance := captureServer(t, true)
+	var output bytes.Buffer
+	s.logger = slog.New(slog.NewTextHandler(&output, nil))
+	executeCapture(t, s, capturePage("A", "B"), true)
+	executeCapture(t, s, capturePage("A", "B"), true)
+	counter := s.historyCounters["pane-1"]
+	if counter.admissions != 2 || counter.boundary != 1 || counter.stationary != 1 || counter.freezes != 0 {
+		t.Fatalf("class counters=%+v", counter)
+	}
+	advance(59 * time.Second)
+	s.flushHistoryCounters(s.historyNow())
+	if output.Len() != 0 {
+		t.Fatal("minute counters flushed before deadline")
+	}
+	advance(time.Second)
+	s.flushHistoryCounters(s.historyNow())
+	if strings.Count(output.String(), "physical history minute") != 1 || !strings.Contains(output.String(), "admissions=2") || !strings.Contains(output.String(), "boundary=1") {
+		t.Fatalf("minute output=%s", output.String())
+	}
+	if s.historyCounters["pane-1"].admissions != 0 {
+		t.Fatal("minute counters did not reset")
+	}
+	advance(time.Minute)
+	s.flushHistoryCounters(s.historyNow())
+	if strings.Count(output.String(), "physical history minute") != 2 {
+		t.Fatal("quiet pane did not flush on the next minute")
+	}
+	s.state.CommitInventory(nil, s.state.RevisionCounter())
+	s.syncHistoryPanes()
+	if len(s.historyCounters) != 0 {
+		t.Fatal("pane disappearance retained counters")
+	}
+}
+
+func TestHistoryCounterFieldsAggregateWithoutDirtyingHistory(t *testing.T) {
+	s, _, advance := captureServer(t, true)
+	var output bytes.Buffer
+	s.logger = slog.New(slog.NewTextHandler(&output, nil))
+	token := historyReadToken{paneID: "pane-1"}
+	s.historyCaptureMu.Lock()
+	s.recordHistoryAdmissionLocked(token, history.SnapshotAdmission{Class: "reverse", MatchedRows: 4, RetiredRows: 2, ReplacedRows: 1, HeldAddedRows: 3, HeldEvictedRows: 4, HeldExpiredRows: 5, HeldTotalRows: 17, RetractionCount: 1, RetractedRows: 2, DPPairs: 9})
+	s.recordHistoryAdmissionLocked(token, history.SnapshotAdmission{Class: "freeze", Reason: "pair_budget", DPPairs: 65537, HeldTotalRows: 17})
+	s.historyCaptureMu.Unlock()
+	advance(time.Minute)
+	s.flushHistoryCounters(s.historyNow())
+	for _, field := range []string{"reverse=1", "freezes=1", "pair_budget=1", "matched_rows=4", "retired_rows=2", "replaced_rows=1", "held_added_rows=3", "held_evicted_rows=4", "held_expired_rows=5", "held_total_rows=17", "retraction_events=1", "retracted_rows=2", "dp_pairs=65546", "max_dp_pairs=65537"} {
+		if !strings.Contains(output.String(), field) {
+			t.Errorf("minute report lacks %s", field)
+		}
+	}
+}
+
+type historyLockProbeHandler struct {
+	server   *Server
+	acquired chan bool
+}
+
+func (h *historyLockProbeHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *historyLockProbeHandler) Handle(context.Context, slog.Record) error {
+	ok := h.server.historyCaptureMu.TryLock()
+	if ok {
+		h.server.historyCaptureMu.Unlock()
+	}
+	h.acquired <- ok
+	return nil
+}
+func (h *historyLockProbeHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *historyLockProbeHandler) WithGroup(string) slog.Handler      { return h }
+
+func TestHistoryLogsRunOutsideCaptureLock(t *testing.T) {
+	s, _, advance := captureServer(t, true)
+	probe := &historyLockProbeHandler{server: s, acquired: make(chan bool, 4)}
+	s.logger = slog.New(probe)
+	executeCapture(t, s, capturePage("a", "b", "c", "d", "e", "f", "g", "h"), true)
+	executeCapture(t, s, capturePage("new-a", "new-b", "new-c", "new-d"), true)
+	if !awaitHistorySignal(t, probe.acquired, "log lock probe") {
+		t.Fatal("freeze logging held capture mutex")
+	}
+	advance(time.Minute)
+	s.flushHistoryCounters(s.historyNow())
+	if !awaitHistorySignal(t, probe.acquired, "log lock probe") {
+		t.Fatal("minute logging held capture mutex")
+	}
+}
+
+func TestHistoryArchiveExpiryAndPairBudgetLogsSafeCounts(t *testing.T) {
+	s, _, _ := captureServer(t, true)
+	var output bytes.Buffer
+	s.logger = slog.New(slog.NewTextHandler(&output, nil))
+	token := historyReadToken{paneID: "pane-1", sequence: 7, leaseRevision: 3}
+	s.logHistoryAdmission(token, history.SnapshotAdmission{Class: "freeze", Reason: "pair_budget", OldNonblank: 257, HeldNonblank: 257, DPPairs: 65537, HeldExpiredRows: 2})
+	text := output.String()
+	for _, field := range []string{"sequence=7", "source=recent", "lease_revision=3", "reason=pair_budget", "held_share=1", "dp_pairs=65537", "reason=archive_pin_expiry", "held_expired_rows=2"} {
+		if !strings.Contains(text, field) {
+			t.Errorf("safe diagnostic lacks %s", field)
+		}
+	}
+	if strings.Contains(text, "held_majority") {
+		t.Fatal("pair budget was mislabeled as held majority")
+	}
+}
+
+func TestHistoryCounterTerminalReplacementPrunesOldMinute(t *testing.T) {
+	s, _, _ := captureServer(t, true)
+	executeCapture(t, s, capturePage("A", "B"), true)
+	agent, _ := s.state.Agent("pane-1")
+	agent.TerminalID = "replacement"
+	s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+	s.syncHistoryPanes()
+	if len(s.historyCounters) != 0 {
+		t.Fatal("terminal replacement retained the old minute")
 	}
 }

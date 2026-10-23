@@ -150,6 +150,13 @@ func TestPhysicalSparseAndLinearConsensusAgainstOracle(t *testing.T) {
 	}
 }
 
+func TestPhysicalLinearPathReportsNoDPWork(t *testing.T) {
+	plan := planPhysicalTransition([]string{"A", "B", "old"}, []string{"A", "B", "new"}, true)
+	if plan.diagnostic.MatchPath != "linear" || plan.diagnostic.DPPairs != 0 {
+		t.Fatalf("linear path DP work=%d", plan.diagnostic.DPPairs)
+	}
+}
+
 func TestRetiredAndHeldRowsOwnTheirStringStorage(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 54)

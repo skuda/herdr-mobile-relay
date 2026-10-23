@@ -217,7 +217,9 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		s.historyAdmissionObserver(token, admission)
 	}
 	if admission.Admitted {
-		s.recordHistoryAdmissionLocked(token, admission)
+		if snapshotContext.ReadSource == history.SourceRecent {
+			s.recordHistoryAdmissionLocked(token, admission)
+		}
 		diagnostic = &admission
 		response["content"] = content
 		result.Capture.Admitted = true

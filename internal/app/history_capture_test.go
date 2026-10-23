@@ -1974,3 +1974,15 @@ func TestHistoryStatusRevisionsPruneWithSnapshotProtection(t *testing.T) {
 		t.Fatal("older snapshot pruned a future accepted status revision")
 	}
 }
+
+func TestLegacyOnlyHistoryDoesNotCreatePhysicalMinuteLog(t *testing.T) {
+	s, _, advance := captureServer(t, false)
+	var output bytes.Buffer
+	s.logger = slog.New(slog.NewTextHandler(&output, nil))
+	executeCapture(t, s, capturePage("A", "B"), false)
+	advance(time.Minute)
+	s.flushHistoryCounters(s.historyNow())
+	if len(s.historyCounters) != 0 || strings.Contains(output.String(), "physical history minute") {
+		t.Fatal("legacy-only admission emitted physical telemetry")
+	}
+}

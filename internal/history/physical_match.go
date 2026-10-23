@@ -219,7 +219,9 @@ func planPhysicalTransition(old, next []string, linear bool) physicalTransition 
 		return result
 	}
 	result.consensus = physicalConsensus(old, next, linear)
-	d.DPPairs = result.consensus.pairs
+	if result.consensus.path != "linear" {
+		d.DPPairs = result.consensus.pairs
+	}
 	d.MatchPath = result.consensus.path
 	if result.consensus.budget {
 		d.Class = "freeze"

@@ -247,6 +247,8 @@ var attentionStatuses = map[string]bool{
 	"blocked": true,
 }
 
+func IsAttentionStatus(status string) bool { return attentionStatuses[status] }
+
 var doneStatuses = map[string]bool{
 	"done":      true,
 	"complete":  true,

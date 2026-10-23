@@ -274,6 +274,10 @@ func (r *HistoryRead) Geometry() HistoryGeometry {
 	return r.start
 }
 
+func historyIntervalUnsafe(geometry HistoryGeometry, at time.Time) bool {
+	return geometry.InProgress || historySettling(geometry, at)
+}
+
 func historySettling(geometry HistoryGeometry, at time.Time) bool {
 	return !geometry.ChangedAt.IsZero() && at.Sub(geometry.ChangedAt) < HistorySettleWindow
 }
@@ -352,14 +356,14 @@ func (m *Manager) HistoryReadUnsafe(paneID, terminalID string) bool {
 	defer m.mu.Unlock()
 	state := m.historyGeometry[paneID]
 	return state != nil && terminalID != "" && state.identity.terminalID == terminalID &&
-		(state.geometry.InProgress || historySettling(state.geometry, m.now()))
+		historyIntervalUnsafe(state.geometry, m.now())
 }
 
 func (m *Manager) ForgetHistoryPane(paneID, terminalID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if state := m.historyGeometry[paneID]; state != nil && terminalID != "" && state.identity.terminalID == terminalID {
-		if state.geometry.InProgress || historySettling(state.geometry, m.now()) {
+		if historyIntervalUnsafe(state.geometry, m.now()) {
 			state.forgotten = true
 			state.geometry.Revision = m.nextHistoryRevisionLocked()
 			return

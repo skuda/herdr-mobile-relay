@@ -3616,7 +3616,7 @@ func (s *Server) publishCurrentInventory(ctx context.Context) error {
 		active := make(map[string]bool, len(sideEffectAgents))
 		for _, agent := range sideEffectAgents {
 			active[agent.PaneID] = true
-			if isClaudeLike(agent.Agent) && (agent.Status == "working" || agent.Status == "blocked") {
+			if isClaudeLike(agent.Agent) && coordinator.IsAttentionStatus(agent.Status) {
 				s.scheduleHistoryCapture(ctx, agent.PaneID)
 			}
 		}

@@ -26,7 +26,7 @@ func (p *pendingHistoryCapture) expired(now time.Time) bool {
 
 // enqueueHistoryTransition records accepted departures without coordinator lookups or pane reads.
 func (s *Server) enqueueHistoryTransition(event coordinator.StatusTransition) {
-	if event.OldStatus != "working" && event.OldStatus != "blocked" || event.NewStatus == "working" || event.NewStatus == "blocked" {
+	if !coordinator.IsAttentionStatus(event.OldStatus) || coordinator.IsAttentionStatus(event.NewStatus) {
 		return
 	}
 	s.historyPendingMu.Lock()
@@ -56,7 +56,7 @@ func (s *Server) captureHistoryTick(now time.Time) {
 	s.syncHistoryPanes()
 	candidates := make(map[string]bool)
 	for _, agent := range agents {
-		if isClaudeLike(agent.Agent) && (agent.Status == "working" || agent.Status == "blocked") {
+		if isClaudeLike(agent.Agent) && coordinator.IsAttentionStatus(agent.Status) {
 			candidates[agent.PaneID] = true
 		}
 	}

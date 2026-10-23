@@ -515,7 +515,7 @@ func (m *Manager) SweepExpired(ctx context.Context) {
 	}
 	now := m.now()
 	for paneID, state := range m.historyGeometry {
-		if state.forgotten && !state.geometry.InProgress && !historySettling(state.geometry, now) {
+		if state.forgotten && !historyIntervalUnsafe(state.geometry, now) {
 			delete(m.historyGeometry, paneID)
 		}
 	}

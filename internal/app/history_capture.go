@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -102,6 +103,9 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 	}
 	current, exists := s.state.Agent(request.PaneID)
 	identityCurrent := exists && current.TerminalID == token.identity.terminalID && s.state.Generation(request.PaneID) == token.identity.generation
+	if handle == nil && (errors.Is(geometryErr, panesize.ErrTerminalGone) || errors.Is(geometryErr, panesize.ErrHistoryReadUnsafe)) {
+		identityCurrent = false
+	}
 	physicalNow, revisionNow := s.physicalHistorySource(current)
 	if handle != nil {
 		physicalNow, revisionNow = token.geometry.Leased && current != nil && current.UsesNoScrollbackHistory(), token.geometry.LeaseRevision

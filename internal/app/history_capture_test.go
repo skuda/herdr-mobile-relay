@@ -567,12 +567,13 @@ func TestReadBeforeInventoryPreservesCachedHistory(t *testing.T) {
 }
 
 func TestStaleHistoryInventoryCannotDiscardReplacementPage(t *testing.T) {
-	s, _, _ := captureServer(t, false)
+	s, f, _ := captureServer(t, false)
 	older := s.state.InventorySnapshot()
 	agent, _ := s.state.Agent("pane-1")
 	agent.TerminalID = "terminal-new"
 	s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
 	s.syncHistoryPanes()
+	s.paneSizeM = panesize.NewManagerWith(&namedHistoryProvider{paneSizeFakes: f, terminalID: "terminal-new"}, f, f, s.historyNow, nil)
 	result := executeCapture(t, s, capturePage("Q A", "Q B"), false)
 	if !result.Capture.Admitted {
 		t.Fatal("replacement Q was not admitted")
@@ -1745,5 +1746,31 @@ func TestHistoryCounterTerminalReplacementPrunesOldMinute(t *testing.T) {
 	s.syncHistoryPanes()
 	if len(s.historyCounters) != 0 {
 		t.Fatal("terminal replacement retained the old minute")
+	}
+}
+
+type namedHistoryProvider struct {
+	*paneSizeFakes
+	terminalID string
+}
+
+func (p *namedHistoryProvider) PaneGet(_ context.Context, paneID string) (*herdr.Pane, error) {
+	return &herdr.Pane{ID: paneID, TerminalID: p.terminalID}, nil
+}
+
+type replacedHistoryProvider struct{ *paneSizeFakes }
+
+func (p *replacedHistoryProvider) PaneGet(_ context.Context, paneID string) (*herdr.Pane, error) {
+	return &herdr.Pane{ID: paneID, TerminalID: "terminal-2"}, nil
+}
+func TestHistoryIdentityErrorCannotAdmitOrPreview(t *testing.T) {
+	s, f, _ := captureServer(t, false)
+	executeCapture(t, s, capturePage("archive A", "archive B", "current A", "current B"), false)
+	executeCapture(t, s, capturePage("current A", "current B"), false)
+	before := s.historyM.Content("pane-1", 0)
+	s.paneSizeM = panesize.NewManagerWith(&replacedHistoryProvider{f}, f, f, s.historyNow, nil)
+	result := executeCapture(t, s, capturePage("replacement A", "replacement B"), false)
+	if result.Capture.Admitted || result.Composed || result.Response["history_retry"] == true || s.historyM.Content("pane-1", 0) != before {
+		t.Fatalf("identity error admitted or previewed: admitted=%v composed=%v retry=%v", result.Capture.Admitted, result.Composed, result.Response["history_retry"])
 	}
 }

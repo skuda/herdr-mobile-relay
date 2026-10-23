@@ -2,7 +2,10 @@ package history
 
 import (
 	"slices"
+	"strings"
 	"testing"
+	"time"
+	"unsafe"
 )
 
 // RED: Each old nonblank row has one accounted outcome; only supported
@@ -144,5 +147,24 @@ func TestPhysicalSparseAndLinearConsensusAgainstOracle(t *testing.T) {
 				t.Fatalf("linear old=%q next=%q got=%v/%v want=%v/%v", old, next, fast.agreed, fast.feasible, wantAgreed, wantFeasible)
 			}
 		}
+	}
+}
+
+func TestRetiredAndHeldRowsOwnTheirStringStorage(t *testing.T) {
+	m := NewManager(t.TempDir())
+	ctx := physicalContext(1, 54)
+	raw := snapshotPage("archive A", "archive B", "anchor C", "anchor D")
+	m.AdmitSnapshot("p", raw, ctx, 0)
+	old := m.states["p"].History[0]
+	m.AdmitSnapshot("p", snapshotPage("anchor C", "anchor D", "new E", "new F"), ctx, 0)
+	if unsafe.StringData(old) == unsafe.StringData(m.states["p"].History[0]) {
+		t.Error("retired row still pins the sampled page string")
+	}
+	state := &PaneState{}
+	page := "held row\n" + strings.Repeat("x", 4096)
+	row := strings.Split(page, "\n")[0]
+	appendHeldRows(state, []string{row}, 0, 0, time.Now())
+	if unsafe.StringData(row) == unsafe.StringData(state.Held[0].Rows[0]) {
+		t.Error("held row still pins the sampled page string")
 	}
 }

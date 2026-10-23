@@ -481,7 +481,7 @@ func (m *Manager) mergePhysical(state *PaneState, body []string) SnapshotAdmissi
 	for i := 0; i < len(old); {
 		switch plan.outcome[i] {
 		case physicalRetired:
-			archive = append(archive, previous[i])
+			archive = append(archive, strings.Clone(previous[i]))
 			pin++
 			i++
 		case physicalHeldOutcome, physicalUnaccounted:

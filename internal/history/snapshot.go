@@ -227,7 +227,11 @@ func appendHeldRows(state *PaneState, rows []string, position, segment int, now 
 	if !nonblank {
 		return 0
 	}
-	state.Held = append(state.Held, HeldRecord{Rows: slices.Clone(rows), Position: position, Segment: segment, FirstSeenAt: now.UTC()})
+	owned := make([]string, len(rows))
+	for i, row := range rows {
+		owned[i] = strings.Clone(row)
+	}
+	state.Held = append(state.Held, HeldRecord{Rows: owned, Position: position, Segment: segment, FirstSeenAt: now.UTC()})
 	return len(rows)
 }
 

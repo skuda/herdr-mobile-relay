@@ -886,8 +886,8 @@
   ) {
     const width = terminalElement?.clientWidth
       || Math.round(window.visualViewport?.width || window.innerWidth);
-    const containerColumns = measuredPaneColumns() || lastLeasedColumns || renderedResizeColumns || 80;
     const leasedColumns = lastLeasedColumns || renderedResizeColumns;
+    const containerColumns = measuredPaneColumns() || leasedColumns || 80;
     const wrappingColumns = resizeLayoutActive && leasedColumns > 0
       ? Math.min(containerColumns, leasedColumns)
       : containerColumns;
@@ -895,7 +895,7 @@
       lastPreserveLayout ? 'preserve' : 'readable',
       resizeLayoutActive ? 'resize' : 'fixed',
       lastPreserveLineEnds ? 'line-ends' : 'wrapped',
-      lastLeasedColumns || renderedResizeColumns,
+      leasedColumns,
       $interfaceSize,
       width,
       wrappingColumns,
@@ -943,7 +943,7 @@
       virtualContentColumns = terminalScreenColumns(
         renderedRows,
         resizeLayoutActive,
-        lastLeasedColumns || renderedResizeColumns,
+        leasedColumns,
       );
     }
     renderVirtualWindow(nextTop, true);

@@ -509,6 +509,21 @@ describe('terminal rendering', () => {
     expect(renderedRowShift(render(previous), render(current), 115)).toBe(3);
   });
 
+  it('keeps a surviving anchor when footer rows change nearby', () => {
+    const render = (rows: string[]) => renderTerminalContent(rows.join('\n'), 'ansi', true, true, 40).rows;
+    const previous = Array.from({ length: 80 }, (_, i) => `line ${i}`);
+    const current = [...previous.slice(3, 70), ...Array.from({ length: 13 }, (_, i) => `new footer ${i}`)];
+    expect(renderedRowShift(render(previous), render(current), 55)).toBe(3);
+  });
+
+  it('finds crop and prepend context after a 32-row blank head', () => {
+    const render = (rows: string[]) => renderTerminalContent(rows.join('\n'), 'ansi', true, true, 40).rows;
+    const rows = [...Array.from({ length: 40 }, () => ''), ...Array.from({ length: 40 }, (_, i) => `line ${i}`)];
+    const prefix = ['archive A', 'archive B'];
+    expect(renderedRowShift(render([...prefix, ...rows]), render(rows), 55)).toBe(2);
+    expect(renderedRowShift(render(rows), render([...prefix, ...rows]), 55)).toBe(-2);
+  });
+
   it('removes desktop-width decoration after terminal status text', () => {
     const decorated = `\x1b[2m─ Worked for 1m 46s ${'─'.repeat(120)}\x1b[0m`;
     expect(stripAnsi(trimTrailingDecoration(decorated))).toBe('─ Worked for 1m 46s');

@@ -839,14 +839,25 @@ export function renderedRowShift(previous: RenderedTerminalRow[], current: Rende
   };
   const anchorMatches = (shift: number) => {
     const anchor = Math.min(previous.length - 1, Math.max(0, anchorIndex ?? Math.floor(previous.length / 2)));
-    const start = Math.max(0, shift, anchor - 32);
-    const count = Math.min(64, previous.length - start, current.length - (start - shift));
-    return count >= 2 && matches(start, start - shift, count);
+    const mappedAnchor = anchor - shift;
+    if (mappedAnchor < 0 || mappedAnchor >= current.length
+      || previous[anchor].text !== current[mappedAnchor].text) return false;
+    let nonEmpty = previous[anchor].text.trim() ? 1 : 0;
+    for (let index = anchor - 1; index >= Math.max(0, shift, anchor - 32); index -= 1) {
+      if (previous[index].text !== current[index - shift].text) break;
+      if (previous[index].text.trim()) nonEmpty += 1;
+    }
+    const end = Math.min(previous.length, current.length + shift, anchor + 33);
+    for (let index = anchor + 1; index < end; index += 1) {
+      if (previous[index].text !== current[index - shift].text) break;
+      if (previous[index].text.trim()) nonEmpty += 1;
+    }
+    return nonEmpty >= 2;
   };
   const leadingSize = (rows: RenderedTerminalRow[]) => {
     let size = 0;
     let nonEmpty = 0;
-    while (size < rows.length && size < 32 && (nonEmpty < 2 || size < 8)) {
+    while (size < rows.length && size < 256 && (nonEmpty < 2 || size < 8)) {
       if (rows[size].text.trim()) nonEmpty += 1;
       size += 1;
     }
@@ -854,11 +865,17 @@ export function renderedRowShift(previous: RenderedTerminalRow[], current: Rende
   };
   const cropSize = leadingSize(current);
   for (let shift = 0; shift <= previous.length - cropSize; shift += 1) {
-    if (matches(shift, 0, cropSize) && anchorMatches(shift)) shifts.add(shift);
+    if (matches(shift, 0, cropSize) && anchorMatches(shift)) {
+      shifts.add(shift);
+      if (shifts.size > 1) return 0;
+    }
   }
   const prependSize = leadingSize(previous);
   for (let offset = 1; offset <= current.length - prependSize; offset += 1) {
-    if (matches(0, offset, prependSize) && anchorMatches(-offset)) shifts.add(-offset);
+    if (matches(0, offset, prependSize) && anchorMatches(-offset)) {
+      shifts.add(-offset);
+      if (shifts.size > 1) return 0;
+    }
   }
   return shifts.size === 1 ? shifts.values().next().value! : 0;
 }

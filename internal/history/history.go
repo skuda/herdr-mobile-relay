@@ -201,6 +201,10 @@ func (state *PaneState) UnmarshalJSON(data []byte) error {
 	var decoded metadataState
 	if json.Unmarshal(metadata, &decoded) != nil {
 		state.snapshotInvalid = true
+		var terminalID string
+		if json.Unmarshal(fields["terminal_id"], &terminalID) == nil {
+			state.TerminalID = terminalID
+		}
 	} else {
 		decoded.History, decoded.Footer = core.History, core.Footer
 		decoded.StaleRefusals, decoded.LastHash = core.StaleRefusals, core.LastHash

@@ -94,6 +94,37 @@ func TestHeldDecodeErrorsPreserveCoreAndFence(t *testing.T) {
 	}
 }
 
+func TestInvalidMetadataPreservesStoredTerminalIdentity(t *testing.T) {
+	for _, metadata := range []string{`"geometry_epoch":-1`, `"live_start":"3"`} {
+		for _, terminal := range []string{"T1", "T2"} {
+			t.Run(metadata+"/"+terminal, func(t *testing.T) {
+				m := NewManager(t.TempDir())
+				data := `{"history":["T1 row A","T1 row B"],"footer":["T1 footer"],"terminal_id":"T1",` + metadata + `}`
+				if err := os.WriteFile(m.stateFile("p"), []byte(data), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				loaded := m.loadState("p")
+				if loaded.TerminalID != "T1" || !loaded.snapshotInvalid {
+					t.Errorf("loaded identity=%q invalid=%v, want T1 and conservative fence", loaded.TerminalID, loaded.snapshotInvalid)
+				}
+				ctx := physicalContext(1, 54)
+				ctx.TerminalID = terminal
+				got, _, _ := m.AdmitSnapshot("p", snapshotPage("new A", "new B"), ctx, 0)
+				want := snapshotPage("new A", "new B")
+				if terminal == "T1" {
+					want = snapshotPage("T1 row A", "T1 row B", "new A", "new B")
+				}
+				if got != want {
+					t.Errorf("terminal %s received retained content %q, want %q", terminal, got, want)
+				}
+				if terminal == "T2" && !slices.Equal(m.states["p"].History, []string{"new A", "new B"}) {
+					t.Error("T2 history retained T1 rows")
+				}
+			})
+		}
+	}
+}
+
 func TestOptionalSnapshotMetadataTypesPreserveCoreRows(t *testing.T) {
 	for _, metadata := range []string{`"geometry_epoch":-1`, `"live_start":"3"`, `"terminal_id":7`, `"read_source":{}`, `"snapshot_version":[]`} {
 		m := NewManager(t.TempDir())

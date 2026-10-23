@@ -178,8 +178,9 @@ While the gate and heuristic qualify, display, background, and completion
 fallback captures request ANSI `recent` with `PhysicalCaptureLines=1000`.
 A non-leasing reader of the same pane uses that source too. Reader preferences
 of 100, 500, 1,000, or 10,000 rows limit the response after archival; they do
-not change the physical capture shape. The retained body is bounded by
-`MaxLines=10000`.
+not change the physical capture shape. `MaxLines=10000` bounds history rows.
+A separate `MaxHeldRows=2000` ring stores unresolved physical rows, beyond
+that history limit. Held rows are not shown on the phone.
 
 Before lease activation and after restore cleanup, Claude reads return to
 `ReadPane` (`recent-unwrapped`) and the legacy active-segment matcher. Qoder
@@ -205,21 +206,44 @@ undetectable. Emulator-grid or pixel-only changes do not advance this epoch.
 Narrowing Herdr's grid below the PTY width can clip rows without a detected
 geometry change; the shared desktop-garbling limitation remains.
 
-Inside a physical segment, accepted fixed-header alignment archives displaced
-scroll rows. Displacement candidates start at the first changed comparison row,
-with page-origin matches retained for ambiguity checks. Interior repeated blocks
-within the unchanged prefix do not establish scroll movement. The response
-places that archive before the raw current page,
-including its current header, footer, and ANSI styling. The header is not added
-to the displaced region. Comparisons ignore trailing blank padding, but stored
-and displayed pages preserve raw rows. A separate `ReplaceableTailLines=3`
-policy permits up to three rows at the content tail to change in place, before
-that padding. Those rows can contain a spinner, wrapped tips, or incomplete
-transcript text; their old values are not archived. Candidates with identical
-ordered displaced rows can share one outcome. Blank-only overlap cannot remove
-rows. Larger divergent tails and conflicting or reverse alignments retain
-the previous page and append the incoming page, which can repeat content even
-at unchanged PTY geometry.
+Inside a physical segment, ordered matching compares substantive rows: rows
+containing a Unicode letter or digit. Repeated text must agree on its occurrence
+across optimal ordered mappings before it can anchor retirement. Supported
+forward ranges retire in old-coordinate order, with their interior blank layout.
+A stationary header can remain in the current page without entering that range.
+A supported same-size interior slot cleared to blanks is archived before
+replacement rules apply. Comparisons ignore trailing blank padding and equate NBSP with spaces;
+stored rows retain their raw text and ANSI styling.
+
+`ReplaceableTailLines=3` bounds in-place replacement of a supported old slot or
+tail of one to three physical rows, including intervening blanks and punctuation.
+The corresponding new slot must contain at least as many physical rows. Previous
+values are not archived; this exception can replace incomplete transcript text.
+Equal slot edges remain matched before the changed middle is classified.
+
+Unexplained contraction, disputed occurrences, and reverse-pushed rows become
+held candidates before the discontinuity check. A verified return of the
+current segment's archived suffix retracts that prefix from the displayed archive;
+matching does not search earlier segments. The response is the archive prefix
+followed by the exact raw current page, including its header, footer, and styles.
+Held rows remain invisible. Their separate 2,000-row ring removes oldest rows in
+append order, including partial records, with eviction counts in logs. History
+prefix trimming can also expire held records whose archive pins fall before it.
+
+A matcher discontinuity freezes the old body once and installs the new raw page.
+The `held_majority` reason requires `H >= 3 && 2*H > N && N >= 8`, where H is newly
+held old nonblank rows and N is old nonblank rows. Matched, replaced, and retired
+rows remain explained in N; retiring most of a page during a fast scroll is not
+itself a freeze trigger. The separate `pair_budget` reason applies above
+`MaxPhysicalMatchPairs=65536` equal substantive pairs when linear matching cannot
+certify the transition. Short `/clear` exchanges can be replaced or held under
+the generic rules, so a clear does not promise visible retention by command name.
+Larger unexplained clears can reach the held-majority freeze threshold.
+
+The relay logs a reason, counts, and held share for a matcher freeze, without row
+text. Per-pane minute counters report admission classes, retirements, replacements,
+held additions/evictions/expiry, current held size, reverse retractions, and pair
+work. Boundary admissions are counted separately from matcher freezes.
 
 `FooterLines=6` splits the replaceable footer when a page exceeds six rows.
 Taller chrome can enter retained history; shorter chrome can leave transcript
@@ -230,8 +254,9 @@ not establish the cause of a blank run or recover text absent from a sample.
 Herdr 0.9.5 supplies placeholder `pane.read.revision=0`, not usable content
 order. The relay sequences underlying reads at start and shares the owner's
 admission outcome with followers. An older completion cannot replace a newer
-archived read. Reads that sample content in a different order can still reach
-the conservative reverse/ambiguity fallback and repeat a page.
+archived read. Reads that sample content in a different order use the same
+accounting rules: unresolved rows remain held unless a discontinuity freezes
+the old body. Verified current-segment overlap can retract the archive prefix.
 
 The relay skips archival inside or across the three-second settling interval.
 Rows appearing and disappearing during that pause are lost. Bursts larger
@@ -254,8 +279,8 @@ limit. This does not reserve space in the shared transport queue or change its
 eviction policy; a nonempty queue can still reject a frame.
 
 The truncation notice is not a completeness check: missing samples, settling
-loss, footer/tail replacement, and retention limits can omit text without a
-new notice. A narrow cosmetic limit remains for direct reads: if byte clipping
+loss, footer/slot/tail replacement, invisible held rows, and retention limits
+can omit displayed text without a new notice. A narrow cosmetic limit remains for direct reads: if byte clipping
 changes `truncated` but leaves content identical, the previous notice can remain
 until a content change or watch frame delivers updated metadata.
 

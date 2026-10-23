@@ -294,9 +294,11 @@ page. Eligibility requires a known zero scrollback metric, not a proven
 alternate-screen mode. Other readers of that pane share the physical source
 without acquiring a lease. A lease held by another relay does not enable it.
 The relay captures up to 1,000 physical rows per read regardless of the response
-preference and retains up to 10,000 body rows. Before activation and after
-restore cleanup, the unleased legacy matcher resumes with earlier segments
-retained.
+preference and retains up to 10,000 body rows. It stores unresolved rows in a
+separate 2,000-row oldest-first held ring; those rows are not shown on the phone.
+Held eviction and archive-pin expiry produce count logs. Before activation and
+after restore cleanup, the unleased legacy matcher resumes with earlier
+segments retained.
 
 This is sampled history, not a complete transcript. Source changes start
 segments for each pane. Lease changes, observed PTY changes, and relay restarts
@@ -304,12 +306,17 @@ start segments for physical and known-zero no-scrollback contexts. These
 boundaries can repeat one page. Panes with scrollback keep legacy matching
 across leases, PTY resizes, and relay restarts. Sampling gaps and the
 three-second resize-settling pause can lose output. The six-row footer split is
-a heuristic; up to three content-tail rows before trailing blank padding can
-change in place without archiving their old text. Retained desktop rows can
-wrap unevenly. PTY epochs do not detect emulator-grid or pixel-only changes,
-and a narrower Herdr grid can clip rows. The absence of an older-history notice
-does not establish that omitted samples or replaced tails were retained. For
-direct reads, an unchanged-content response can keep an earlier truncation
+a heuristic. Ordered matching archives supported old-coordinate ranges and
+keeps the raw current page. A supported slot or tail of one to three physical
+rows can change in place when its replacement is at least as large; the old
+values are not archived. Other unresolved rows can remain held and invisible.
+A short `/clear` can replace or hold the exchange under these generic rules;
+it does not promise visible retention. Larger unexplained changes can freeze
+the old page once, with a reason log. Retained desktop rows can wrap unevenly.
+PTY epochs do not detect emulator-grid or pixel-only changes, and a narrower
+Herdr grid can clip rows. The absence of an older-history notice does not
+establish that omitted samples, held rows, or replaced slots/tails are visible.
+For direct reads, an unchanged-content response can keep an earlier truncation
 notice until a content change or watch frame updates it.
 
 Footer updates refresh without a body change. Dirty admitted pages save on a

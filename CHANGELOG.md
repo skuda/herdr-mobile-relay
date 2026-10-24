@@ -5,6 +5,40 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Retain sampled fullscreen Claude/Qoder history during this relay's opted-in
+  Resize Session lease and pending restore, including reads from non-leasing
+  clients. Keep the current footer fresh, queue trailing captures, and save
+  dirty admitted history after output stops. Sampling gaps, resize settling,
+  footer/slot/tail replacement, invisible held rows, and retention limits can
+  still omit displayed text. Source changes start segments for each pane.
+  Lease changes, observed PTY changes, and relay restarts start segments for
+  physical and known-zero no-scrollback
+  contexts. These boundaries can repeat a page. Panes with scrollback keep
+  legacy matching across leases, PTY resizes, and relay restarts. Physical
+  matching retires supported rows in old-coordinate order and preserves the
+  raw current page before reader-row limits and response clipping. Supported
+  slots or tails of one to three physical rows
+  can change in place when the new slot is at least as large; their old values
+  are not archived. Unresolved rows stay invisible in a separate 2,000-row
+  oldest-first held ring beyond the 10,000 history rows, with removal counts in
+  logs. Short clears can replace or hold an exchange under these generic rules.
+  Larger discontinuities freeze the old body with a reason when held residue
+  reaches `H>=3 && 2*H>N && N>=8`; a separate 65,536-pair work limit can also
+  trigger a freeze. Here H counts held old nonblank rows and N counts old
+  nonblank rows, including explained matched, replaced, and retired rows.
+  Fast scroll retirement is not a freeze trigger. Per-pane minute counters and
+  freeze logs report retention outcomes without page text.
+- Clip oldest response rows so a single composed frame no longer exceeds the
+  per-message limit. This includes large unleased history responses; fitting
+  content stays unchanged, and a response with no fitting row succeeds with
+  empty truncated content. Stored history is not shortened by response
+  clipping. The shared transport queue and its eviction policy are unchanged.
+- Correct the phone app's leased-width height estimates and contextual prepend
+  anchors for short or blank rows. These frontend corrections require the new
+  app build.
+
 ## [0.22.13] - 2026-10-23
 
 ### Changed

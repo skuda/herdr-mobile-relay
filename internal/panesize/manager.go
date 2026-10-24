@@ -154,9 +154,9 @@ type cleanupState struct {
 }
 
 type paneState struct {
-	// lock serializes terminal I/O for this pane (open, validate, ioctl) and
-	// the decision that precedes it. It is a channel so waiting is bounded by
-	// a context. Field access is guarded by Manager.mu, never by lock.
+	// lock serializes lease acquisition, reconciliation, and restore work.
+	// History reads use geometry revision checks instead of this lock.
+	// Channel waits are context-bound; Manager.mu guards field access.
 	lock      chan struct{}
 	resolved  bool
 	identity  terminalIdentity
@@ -192,18 +192,20 @@ func (s *paneState) tryAcquire() bool {
 func (s *paneState) release() { <-s.lock }
 
 type Manager struct {
-	mu        sync.Mutex
-	provider  Provider
-	resolver  TTYResolver
-	ops       TerminalOps
-	available bool
-	opTimeout time.Duration
-	ttl       time.Duration
-	grace     time.Duration
-	now       func() time.Time
-	logger    *slog.Logger
-	panes     map[string]*paneState
-	closed    bool
+	mu              sync.Mutex
+	provider        Provider
+	resolver        TTYResolver
+	ops             TerminalOps
+	available       bool
+	opTimeout       time.Duration
+	ttl             time.Duration
+	grace           time.Duration
+	now             func() time.Time
+	logger          *slog.Logger
+	panes           map[string]*paneState
+	historyGeometry map[string]*historyGeometryState
+	historyRevision uint64
+	closed          bool
 }
 
 // NewManager returns the production manager: fresh Herdr lookups through
@@ -240,16 +242,17 @@ func newManager(
 		logger = slog.Default()
 	}
 	return &Manager{
-		provider:  provider,
-		resolver:  resolver,
-		ops:       ops,
-		available: true,
-		opTimeout: operationTimeout,
-		ttl:       ttl,
-		grace:     grace,
-		now:       now,
-		logger:    logger,
-		panes:     make(map[string]*paneState),
+		provider:        provider,
+		resolver:        resolver,
+		ops:             ops,
+		available:       true,
+		opTimeout:       operationTimeout,
+		ttl:             ttl,
+		grace:           grace,
+		now:             now,
+		logger:          logger,
+		panes:           make(map[string]*paneState),
+		historyGeometry: make(map[string]*historyGeometryState),
 	}
 }
 
@@ -317,6 +320,7 @@ func (m *Manager) Acquire(
 	}
 	terminal, err := m.openValidated(opCtx, paneID, &identity, created)
 	if err != nil {
+		m.historyUnknown(paneID, identity.terminalID)
 		if created {
 			forget()
 		} else if errors.Is(err, ErrTerminalGone) {
@@ -327,6 +331,7 @@ func (m *Manager) Acquire(
 	defer terminal.Close()
 	current, err := terminal.Size()
 	if err != nil {
+		m.historyUnknown(paneID, identity.terminalID)
 		if created {
 			forget()
 		}
@@ -365,28 +370,31 @@ func (m *Manager) Acquire(
 		state.observeLocked(current)
 	}
 	previous, hadPrevious := state.leases[clientID]
+	if created || state.cleanup != nil && len(state.leases) == 0 {
+		m.historyLeaseChangedLocked(paneID, identity)
+	} else {
+		m.historyStateLocked(paneID, identity)
+	}
 	state.leases[clientID] = lease
 	want := state.leaseTargetLocked(current)
 	m.mu.Unlock()
 
-	if next, changed := resized(current, want); changed {
-		if err := terminal.SetSize(next); err != nil {
-			m.mu.Lock()
-			// Undo only this request's lease: a concurrent disconnect may
-			// already have removed it, and must not see it come back.
-			if state.leases[clientID] == lease {
-				if hadPrevious {
-					state.leases[clientID] = previous
-				} else {
-					delete(state.leases, clientID)
-				}
+	if err := m.setHistorySize(paneID, identity, terminal, current, want); err != nil {
+		m.mu.Lock()
+		// Undo only this request's lease: a concurrent disconnect may
+		// already have removed it, and must not see it come back.
+		if state.leases[clientID] == lease {
+			if hadPrevious {
+				state.leases[clientID] = previous
+			} else {
+				delete(state.leases, clientID)
 			}
-			if created {
-				m.dropLocked(paneID, state)
-			}
-			m.mu.Unlock()
-			return 0, 0, fmt.Errorf("%w: %v", ErrResizeFailed, err)
 		}
+		if created {
+			m.dropLocked(paneID, state)
+		}
+		m.mu.Unlock()
+		return 0, 0, fmt.Errorf("%w: %v", ErrResizeFailed, err)
 	}
 
 	m.mu.Lock()
@@ -506,6 +514,11 @@ func (m *Manager) SweepExpired(ctx context.Context) {
 		return
 	}
 	now := m.now()
+	for paneID, state := range m.historyGeometry {
+		if state.forgotten && !historyIntervalUnsafe(state.geometry, now) {
+			delete(m.historyGeometry, paneID)
+		}
+	}
 	for paneID, state := range m.panes {
 		if !state.resolved {
 			continue
@@ -614,7 +627,7 @@ func (m *Manager) shutdownPane(ctx context.Context, paneID string, state *paneSt
 		return nil
 	}
 	clear(state.leases)
-	state.cleanup = nil
+	m.beginCleanupLocked(state, m.now())
 	m.mu.Unlock()
 	opCtx, cancel := context.WithTimeout(ctx, m.opTimeout)
 	defer cancel()
@@ -682,7 +695,7 @@ func (m *Manager) ResizedWithin(paneID string, window time.Duration) bool {
 	return m.now().Sub(state.resizedAt) < window
 }
 
-// lockPane returns the pane's current state with its I/O lock held. A missing
+// lockPane returns the pane's current state with its lease lock held. A missing
 // pane gets an unresolved placeholder, so concurrent first acquisitions of
 // one pane serialize on a single state.
 func (m *Manager) lockPane(ctx context.Context, paneID string) (*paneState, bool, error) {
@@ -902,6 +915,7 @@ func (m *Manager) reconcileActive(ctx context.Context, paneID string, state *pan
 	m.mu.Unlock()
 	terminal, err := m.openValidated(ctx, paneID, &identity, false)
 	if err != nil {
+		m.historyUnknown(paneID, identity.terminalID)
 		if errors.Is(err, ErrTerminalGone) {
 			m.dropGone(paneID, state, err)
 		}
@@ -910,6 +924,7 @@ func (m *Manager) reconcileActive(ctx context.Context, paneID string, state *pan
 	defer terminal.Close()
 	current, err := terminal.Size()
 	if err != nil {
+		m.historyUnknown(paneID, identity.terminalID)
 		return fmt.Errorf("%w: %v", ErrSizeUnavailable, err)
 	}
 	now := m.now()
@@ -921,10 +936,8 @@ func (m *Manager) reconcileActive(ctx context.Context, paneID string, state *pan
 	state.observeLocked(current)
 	want := state.leaseTargetLocked(current)
 	m.mu.Unlock()
-	if next, changed := resized(current, want); changed {
-		if err := terminal.SetSize(next); err != nil {
-			return fmt.Errorf("%w: %v", ErrResizeFailed, err)
-		}
+	if err := m.setHistorySize(paneID, identity, terminal, current, want); err != nil {
+		return fmt.Errorf("%w: %v", ErrResizeFailed, err)
 	}
 	m.mu.Lock()
 	if m.panes[paneID] == state {
@@ -1014,11 +1027,13 @@ func (m *Manager) restoreOnce(ctx context.Context, paneID string, state *paneSta
 	}
 	terminal, err := m.openValidated(ctx, paneID, &identity, false)
 	if err != nil {
+		m.historyUnknown(paneID, identity.terminalID)
 		return err
 	}
 	defer terminal.Close()
 	current, err := terminal.Size()
 	if err != nil {
+		m.historyUnknown(paneID, identity.terminalID)
 		return unverified("read terminal size", err)
 	}
 	want := sizeOf(current)
@@ -1028,10 +1043,8 @@ func (m *Manager) restoreOnce(ctx context.Context, paneID string, state *paneSta
 	if int(current.Rows) == applied.rows {
 		want.rows = baseline.rows
 	}
-	if next, changed := resized(current, want); changed {
-		if err := terminal.SetSize(next); err != nil {
-			return unverified("write terminal size", err)
-		}
+	if err := m.setHistorySize(paneID, identity, terminal, current, want); err != nil {
+		return unverified("write terminal size", err)
 	}
 	return nil
 }
@@ -1058,6 +1071,9 @@ func (m *Manager) dropGone(paneID string, state *paneState, err error) {
 
 func (m *Manager) dropLocked(paneID string, state *paneState) {
 	if m.panes[paneID] == state {
+		if history := m.historyGeometry[paneID]; state.resolved && history != nil && history.identity.terminalID == state.identity.terminalID {
+			history.geometry.LeaseRevision = m.nextHistoryRevisionLocked()
+		}
 		delete(m.panes, paneID)
 	}
 	state.cleanup = nil

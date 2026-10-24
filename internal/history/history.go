@@ -15,6 +15,7 @@ import (
 
 const (
 	MaxLines        = 10000
+	MaxHeldRows     = 2000
 	FooterLines     = 6
 	CaptureInterval = 4 * time.Second
 	SaveInterval    = 10 * time.Second
@@ -22,18 +23,50 @@ const (
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]|\x1b[>=<]|\x1b\[[\?]?[0-9;]*[hlJKHfG]`)
 
+type HeldRecord struct {
+	Rows        []string  `json:"rows"`
+	Position    int       `json:"position"`
+	Segment     int       `json:"segment"`
+	FirstSeenAt time.Time `json:"first_seen_at"`
+}
+
 type PaneState struct {
-	History       []string `json:"history"`
-	Footer        []string `json:"footer"`
-	StaleRefusals int      `json:"stale_refusals"`
-	LastHash      string   `json:"last_hash"`
+	History         []string     `json:"history"`
+	Footer          []string     `json:"footer"`
+	StaleRefusals   int          `json:"stale_refusals"`
+	LastHash        string       `json:"last_hash"`
+	SnapshotVersion int          `json:"snapshot_version,omitempty"`
+	TerminalID      string       `json:"terminal_id,omitempty"`
+	ReadSource      string       `json:"read_source,omitempty"`
+	GeometryEpoch   uint64       `json:"geometry_epoch,omitempty"`
+	LeaseRevision   uint64       `json:"lease_revision,omitempty"`
+	Columns         int          `json:"columns,omitempty"`
+	Rows            int          `json:"rows,omitempty"`
+	SegmentStart    int          `json:"segment_start,omitempty"`
+	LiveStart       int          `json:"live_start,omitempty"`
+	Held            []HeldRecord `json:"held,omitempty"`
+
+	loaded          bool
+	snapshotInvalid bool
+	heldInvalid     bool
+	dirty           bool
+	mutationVersion uint64
+	saveDue         time.Time
+	saveError       error
 }
 
 type Manager struct {
-	mu       sync.Mutex
-	states   map[string]*PaneState
-	dir      string
-	lastSave map[string]time.Time
+	mu                sync.Mutex
+	states            map[string]*PaneState
+	dir               string
+	lastSave          map[string]time.Time
+	persistMu         sync.Mutex
+	wake              chan struct{}
+	now               func() time.Time
+	writeFile         func(string, []byte, os.FileMode) error
+	removeFile        func(string) error
+	beforeRename      func()
+	unownedSaveErrors []error
 }
 
 func NewManager(cacheDir string) *Manager {
@@ -43,6 +76,7 @@ func NewManager(cacheDir string) *Manager {
 		states:   make(map[string]*PaneState),
 		dir:      dir,
 		lastSave: make(map[string]time.Time),
+		wake:     make(chan struct{}, 1), now: time.Now, writeFile: os.WriteFile, removeFile: os.Remove,
 	}
 }
 
@@ -58,43 +92,7 @@ func (m *Manager) MergeLimited(paneID string, rawContent string, limit int) (str
 }
 
 func (m *Manager) merge(paneID string, rawContent string, limit int) (string, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	state := m.loadState(paneID)
-
-	body, footer := splitSnapshot(rawContent)
-	if len(body) == 0 {
-		return joinContent(state, limit)
-	}
-
-	hash := hashLines(body)
-	if hash == state.LastHash && state.StaleRefusals == 0 {
-		return joinContent(state, limit)
-	}
-	state.LastHash = hash
-	state.Footer = footer
-
-	normalized := normalizeLines(body)
-	histNorm := normalizeLines(state.History)
-
-	if overlap := tailOverlap(histNorm, normalized); overlap > 0 {
-		historyStart := len(state.History) - overlap
-		copy(state.History[historyStart:], body[:overlap])
-		state.History = append(state.History, body[overlap:]...)
-	} else if match := sequenceMatch(histNorm, normalized); match.Size >= 2 {
-		m.applyMatch(state, body, match)
-	} else {
-		state.History = append(state.History, body...)
-		state.StaleRefusals = 0
-	}
-
-	if len(state.History) > MaxLines {
-		state.History = state.History[len(state.History)-MaxLines:]
-	}
-
-	m.maybeSave(paneID, state)
-	return joinContent(state, limit)
+	return m.MergeSnapshotLimited(paneID, rawContent, SnapshotContext{ReadSource: SourceLegacy}, limit)
 }
 
 func (m *Manager) Content(paneID string, limit int) string {
@@ -114,12 +112,8 @@ func (m *Manager) Discard(paneID string) {
 	os.Remove(m.stateFile(paneID))
 }
 
-func (m *Manager) SaveAll() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for paneID, state := range m.states {
-		m.saveState(paneID, state)
-	}
+func (m *Manager) SaveAll() error {
+	return m.flush(m.now(), true)
 }
 
 // Reconcile removes persisted and in-memory history for panes that are absent
@@ -181,6 +175,74 @@ func (m *Manager) applyMatch(state *PaneState, body []string, match seqmatch.Mat
 	}
 }
 
+func (state *PaneState) UnmarshalJSON(data []byte) error {
+	var core struct {
+		History       []string `json:"history"`
+		Footer        []string `json:"footer"`
+		StaleRefusals int      `json:"stale_refusals"`
+		LastHash      string   `json:"last_hash"`
+	}
+	if err := json.Unmarshal(data, &core); err != nil {
+		return err
+	}
+	*state = PaneState{History: core.History, Footer: core.Footer, StaleRefusals: core.StaleRefusals, LastHash: core.LastHash}
+	type metadataState PaneState
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for _, key := range []string{"history", "footer", "stale_refusals", "last_hash", "held"} {
+		delete(fields, key)
+	}
+	metadata, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	var decoded metadataState
+	if json.Unmarshal(metadata, &decoded) != nil {
+		state.snapshotInvalid = true
+		var terminalID string
+		if json.Unmarshal(fields["terminal_id"], &terminalID) == nil {
+			state.TerminalID = terminalID
+		}
+	} else {
+		decoded.History, decoded.Footer = core.History, core.Footer
+		decoded.StaleRefusals, decoded.LastHash = core.StaleRefusals, core.LastHash
+		*state = PaneState(decoded)
+	}
+	var wire struct {
+		Held json.RawMessage `json:"held"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if len(wire.Held) == 0 {
+		return nil
+	}
+	if string(wire.Held) == "null" || json.Unmarshal(wire.Held, &state.Held) != nil || !heldRowsAreStrings(wire.Held) {
+		state.Held = nil
+		state.heldInvalid = true
+	}
+	return nil
+}
+
+func heldRowsAreStrings(data json.RawMessage) bool {
+	var records []struct {
+		Rows []json.RawMessage `json:"rows"`
+	}
+	if json.Unmarshal(data, &records) != nil {
+		return false
+	}
+	for _, record := range records {
+		for _, row := range record.Rows {
+			if len(row) == 0 || row[0] != '"' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (m *Manager) loadState(paneID string) *PaneState {
 	if s, ok := m.states[paneID]; ok {
 		return s
@@ -189,31 +251,30 @@ func (m *Manager) loadState(paneID string) *PaneState {
 	s := &PaneState{}
 	data, err := os.ReadFile(m.stateFile(paneID))
 	if err == nil {
-		json.Unmarshal(data, s)
+		if json.Unmarshal(data, s) != nil {
+			*s = PaneState{}
+		} else {
+			s.loaded = true
+			validateSnapshotState(s)
+			trimSnapshotState(s)
+		}
 	}
 	m.states[paneID] = s
 	return s
 }
 
 func (m *Manager) maybeSave(paneID string, state *PaneState) {
-	if t, ok := m.lastSave[paneID]; ok && time.Since(t) < SaveInterval {
+	if !state.dirty || !state.saveDue.IsZero() {
 		return
 	}
-	m.saveState(paneID, state)
-	m.lastSave[paneID] = time.Now()
-}
-
-func (m *Manager) saveState(paneID string, state *PaneState) {
-	data, err := json.Marshal(state)
-	if err != nil {
-		return
+	state.saveDue = m.now()
+	if saved := m.lastSave[paneID]; !saved.IsZero() {
+		state.saveDue = saved.Add(SaveInterval)
 	}
-	path := m.stateFile(paneID)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return
+	select {
+	case m.wake <- struct{}{}:
+	default:
 	}
-	os.Rename(tmp, path)
 }
 
 func (m *Manager) stateFile(paneID string) string {

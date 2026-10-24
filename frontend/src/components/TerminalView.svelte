@@ -766,9 +766,8 @@
     let previousAnchor = stick
       ? null
       : pendingResizeAnchor || currentVirtualAnchor(previousTop);
-    // Rows cropped from the front shift every index; keep the anchor on the
-    // same row.
-    const rowShift = renderedRowShift(renderedRows, rendered.rows);
+    // Shift the anchor index for cropped or prepended context blocks.
+    const rowShift = renderedRowShift(renderedRows, rendered.rows, previousAnchor?.index);
     if (rowShift) wideGridOffsets.clear();
     if (previousAnchor && rowShift) {
       previousAnchor = { ...previousAnchor, index: Math.max(0, previousAnchor.index - rowShift) };
@@ -883,13 +882,19 @@
   ) {
     const width = terminalElement?.clientWidth
       || Math.round(window.visualViewport?.width || window.innerWidth);
+    const leasedColumns = lastLeasedColumns || renderedResizeColumns;
+    const containerColumns = measuredPaneColumns() || leasedColumns || 80;
+    const wrappingColumns = resizeLayoutActive && leasedColumns > 0
+      ? Math.min(containerColumns, leasedColumns)
+      : containerColumns;
     const layoutSignature = [
       lastPreserveLayout ? 'preserve' : 'readable',
       resizeLayoutActive ? 'resize' : 'fixed',
       lastPreserveLineEnds ? 'line-ends' : 'wrapped',
-      lastLeasedColumns || renderedResizeColumns,
+      leasedColumns,
       $interfaceSize,
       width,
+      wrappingColumns,
     ].join(':');
     if (layoutSignature !== virtualLayoutSignature) {
       virtualLayoutSignature = layoutSignature;
@@ -901,10 +906,6 @@
     const style = terminalElement ? getComputedStyle(terminalElement) : null;
     const parsedLineHeight = Number.parseFloat(style?.lineHeight || '');
     const lineHeight = Number.isFinite(parsedLineHeight) && parsedLineHeight > 0 ? parsedLineHeight : 18;
-    const wrappingColumns = measuredPaneColumns()
-      || lastLeasedColumns
-      || renderedResizeColumns
-      || 80;
     const sizes = renderedRows.map((row) => {
       const measured = virtualHeightCache.get(row.html);
       if (measured) return measured;
@@ -938,7 +939,7 @@
       virtualContentColumns = terminalScreenColumns(
         renderedRows,
         resizeLayoutActive,
-        lastLeasedColumns || renderedResizeColumns,
+        leasedColumns,
       );
     }
     renderVirtualWindow(nextTop, true);

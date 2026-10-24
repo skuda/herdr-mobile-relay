@@ -54,7 +54,38 @@ type AgentState struct {
 	PaneRevision                 int                    `json:"-"`
 	StateRevision                int64                  `json:"pane_revision,omitempty"`
 	ScrollMaxOffset              int                    `json:"-"`
+	ScrollMetricsKnown           bool                   `json:"-"`
 	ForegroundCwd                string                 `json:"-"`
+}
+
+func (a *AgentState) UsesNoScrollbackHistory() bool {
+	if a == nil || !a.ScrollMetricsKnown || a.ScrollMaxOffset != 0 {
+		return false
+	}
+	return IsClaudeLike(a.Agent)
+}
+
+func IsClaudeLike(agent string) bool {
+	lower := strings.ToLower(agent)
+	return strings.Contains(lower, "claude") || strings.Contains(lower, "qoder")
+}
+
+func sameScrollTerminal(paneID, terminalID, previousTerminalID string) bool {
+	return paneID != "" && terminalID != "" && terminalID == previousTerminalID
+}
+
+type StatusTransition struct {
+	PaneID     string
+	TerminalID string
+	Generation int64
+	OldStatus  string
+	NewStatus  string
+	Revision   int64
+}
+
+type statusDelivery struct {
+	event    StatusTransition
+	observer func(StatusTransition)
 }
 
 type TransitionCallback func(paneID, agent, project, status string, revision int64)
@@ -65,6 +96,7 @@ type State struct {
 	workspaces         []herdr.Workspace
 	revision           map[string]int64
 	contentRev         map[string]int64
+	scrollMetricsRev   map[string]int64
 	attentionRev       map[string]int64
 	prevStatus         map[string]string
 	topologyGen        int64
@@ -84,6 +116,8 @@ type State struct {
 	lastSuccessAt      time.Time
 	logger             *slog.Logger
 	onTransition       TransitionCallback
+	onStatusTransition func(StatusTransition)
+	pendingStatus      []statusDelivery
 	onInventory        func([]*AgentState)
 	notifyMu           sync.Mutex
 	pendingInventory   []*AgentState
@@ -110,9 +144,11 @@ type PollToken struct {
 // workspaces, and readiness are captured while holding the same State lock so
 // callers never publish a tuple assembled from different commits.
 type InventorySnapshot struct {
-	Status     map[string]any
-	Agents     []*AgentState
-	Workspaces []herdr.Workspace
+	Revision    int64
+	Established bool
+	Status      map[string]any
+	Agents      []*AgentState
+	Workspaces  []herdr.Workspace
 }
 
 func NewState(logger *slog.Logger) *State {
@@ -120,6 +156,7 @@ func NewState(logger *slog.Logger) *State {
 		agents:             make(map[string]*AgentState),
 		revision:           make(map[string]int64),
 		contentRev:         make(map[string]int64),
+		scrollMetricsRev:   make(map[string]int64),
 		attentionRev:       make(map[string]int64),
 		prevStatus:         make(map[string]string),
 		unseenDone:         make(map[string]bool),
@@ -177,10 +214,40 @@ func (s *State) SetOnTransition(fn TransitionCallback) {
 	s.onTransition = fn
 }
 
+func (s *State) SetOnStatusTransition(observer func(StatusTransition)) {
+	s.mu.Lock()
+	s.onStatusTransition = observer
+	s.mu.Unlock()
+}
+
+func (s *State) queueStatusLocked(agent *AgentState, previous string) {
+	if s.onStatusTransition == nil || previous == agent.Status {
+		return
+	}
+	s.pendingStatus = append(s.pendingStatus, statusDelivery{observer: s.onStatusTransition, event: StatusTransition{
+		PaneID: agent.PaneID, TerminalID: agent.TerminalID, Generation: s.generation[agent.PaneID],
+		OldStatus: previous, NewStatus: agent.Status, Revision: s.revCounter,
+	}})
+}
+
+func (s *State) takeStatusLocked() []statusDelivery {
+	pending := s.pendingStatus
+	s.pendingStatus = nil
+	return pending
+}
+
+func deliverStatus(pending []statusDelivery) {
+	for _, delivery := range pending {
+		delivery.observer(delivery.event)
+	}
+}
+
 var attentionStatuses = map[string]bool{
 	"working": true,
 	"blocked": true,
 }
+
+func IsAttentionStatus(status string) bool { return attentionStatuses[status] }
 
 var doneStatuses = map[string]bool{
 	"done":      true,
@@ -280,6 +347,7 @@ func (s *State) InventorySnapshot() InventorySnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return InventorySnapshot{
+		Revision: s.revCounter, Established: !s.lastSuccessAt.IsZero(),
 		Status:     s.inventoryStatusLocked(),
 		Agents:     s.snapshotLocked(),
 		Workspaces: cloneWorkspaces(s.workspaces),
@@ -380,7 +448,9 @@ func (s *State) MarkTopologyChanged() {
 func (s *State) CommitInventory(agents []*AgentState, baseRev int64) {
 	s.mu.Lock()
 	s.commitInventoryLocked(agents, baseRev)
+	pending := s.takeStatusLocked()
 	s.mu.Unlock()
+	deliverStatus(pending)
 	s.notifyInventory()
 }
 
@@ -417,7 +487,9 @@ func (s *State) CommitTopology(
 		s.topologyGen++
 	}
 	s.commitTopologyLocked(agents, baseRev)
+	pending := s.takeStatusLocked()
 	s.mu.Unlock()
+	deliverStatus(pending)
 	s.notifyInventory()
 	return workspaceChanged
 }
@@ -428,12 +500,18 @@ func (s *State) commitTopologyLocked(agents []*AgentState, baseRev int64) {
 		if incoming == nil {
 			continue
 		}
+		cp := *incoming
+		cp.ScrollMetricsKnown = false
+		cp.ScrollMaxOffset = 0
 		existing, exists := s.agents[incoming.PaneID]
+		if exists && sameScrollTerminal(cp.PaneID, cp.TerminalID, existing.TerminalID) {
+			cp.ScrollMetricsKnown = existing.ScrollMetricsKnown
+			cp.ScrollMaxOffset = existing.ScrollMaxOffset
+		}
 		if !exists || paneSessionReplaced(existing, incoming) {
-			topology[index] = incoming
+			topology[index] = &cp
 			continue
 		}
-		cp := *incoming
 		cp.Status = existing.Status
 		if existing.Status == "blocked" {
 			copyBlockedDetails(&cp, existing)
@@ -459,7 +537,9 @@ func (s *State) CommitPoll(
 	}
 	workspaceChanged = s.commitWorkspacesLocked(workspaces)
 	s.commitInventoryLocked(agents, token.BaseRevision)
+	pending := s.takeStatusLocked()
 	s.mu.Unlock()
+	deliverStatus(pending)
 	s.notifyInventory()
 	return workspaceChanged, true
 }
@@ -560,7 +640,8 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			}
 		} else if existing.Status == cp.Status && existing.Name == cp.Name && existing.Cwd == cp.Cwd && existing.Agent == cp.Agent &&
 			existing.ActivitySeq == cp.ActivitySeq &&
-			existing.PaneRevision == cp.PaneRevision && existing.ScrollMaxOffset == cp.ScrollMaxOffset && existing.ForegroundCwd == cp.ForegroundCwd {
+			existing.PaneRevision == cp.PaneRevision && existing.ScrollMaxOffset == cp.ScrollMaxOffset &&
+			existing.ScrollMetricsKnown == cp.ScrollMetricsKnown && existing.ForegroundCwd == cp.ForegroundCwd {
 			cp.UpdatedAt = existing.UpdatedAt
 		} else {
 			cp.UpdatedAt = time.Now().UnixMilli()
@@ -574,6 +655,9 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		s.applyBlockedCycleLocked(&cp, existing)
 		attentionChanged := !blockedDetailsEqual(existing, &cp)
 
+		if !exists || existing.UsesNoScrollbackHistory() != cp.UsesNoScrollbackHistory() {
+			s.scrollMetricsRev[incoming.PaneID] = s.revCounter
+		}
 		if !exists || existing.Status != cp.Status || existing.Name != cp.Name || existing.Cwd != cp.Cwd ||
 			existing.Agent != cp.Agent || existing.ActivitySeq != cp.ActivitySeq ||
 			attentionChanged {
@@ -591,6 +675,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		s.revision[incoming.PaneID] = s.revCounter
 		s.agents[incoming.PaneID] = &cp
 		s.prevStatus[incoming.PaneID] = cp.Status
+		s.queueStatusLocked(&cp, prev)
 		s.registerTransition(incoming.PaneID, prev, cp.Status, previousAttention)
 		if !exists && (doneStatuses[cp.Status] || cp.Status == "idle") {
 			if cp.LastActiveAt > cp.LastSeenAt {
@@ -619,6 +704,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			delete(s.agents, id)
 			delete(s.revision, id)
 			delete(s.contentRev, id)
+			delete(s.scrollMetricsRev, id)
 			delete(s.attentionRev, id)
 			delete(s.prevStatus, id)
 			delete(s.unseenDone, id)
@@ -673,7 +759,11 @@ func (s *State) CommitEventForSession(
 	updatedAt int64,
 ) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer func() {
+		pending := s.takeStatusLocked()
+		s.mu.Unlock()
+		deliverStatus(pending)
+	}()
 
 	agent, exists := s.agents[paneID]
 	if !exists {
@@ -730,6 +820,7 @@ func (s *State) CommitEventForSession(
 		s.attentionRev[paneID]++
 	}
 	s.prevStatus[paneID] = status
+	s.queueStatusLocked(a, prev)
 	s.registerTransition(paneID, prev, status, previousAttention)
 	if !preservesChatCompletion(prev, status, previousAttention) {
 		s.syncAttentionCompletionLocked(paneID, previousAttention, a.AttentionKind)
@@ -1198,6 +1289,12 @@ func (s *State) ContentRevision(paneID string) int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.contentRev[paneID]
+}
+
+func (s *State) ScrollMetricsRevision(paneID string) int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.scrollMetricsRev[paneID]
 }
 
 func (s *State) AttentionRevision(paneID string) int64 {

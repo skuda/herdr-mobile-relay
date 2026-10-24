@@ -163,6 +163,19 @@ func (p *Poller) poll(ctx context.Context) {
 	if paneErr != nil {
 		topologyPanes = inv.Panes
 	}
+	paneByID := make(map[string]herdr.Pane, len(topologyPanes))
+	if paneErr == nil {
+		for _, pane := range topologyPanes {
+			paneByID[pane.ID] = pane
+		}
+	}
+	for index := range inv.Panes {
+		pane := &inv.Panes[index]
+		pane.Scroll = nil
+		if current, ok := paneByID[pane.ID]; ok && sameScrollTerminal(pane.ID, pane.TerminalID, current.TerminalID) {
+			pane.Scroll = current.Scroll
+		}
+	}
 	hydrateWorkspaceCwds(workspaces, tabs, topologyPanes)
 	agents := p.agentsFromTopology(inv.Panes, tabs)
 
@@ -210,27 +223,33 @@ func (p *Poller) agentsFromTopology(panes []herdr.Pane, tabs []herdr.Tab) []*Age
 		if pane.Cwd != "" {
 			project = filepath.Base(pane.Cwd)
 		}
+		scrollKnown := pane.Scroll != nil && pane.Scroll.MaxOffsetFromBottom != nil
+		scrollMaxOffset := 0
+		if scrollKnown {
+			scrollMaxOffset = *pane.Scroll.MaxOffsetFromBottom
+		}
 		agents = append(agents, &AgentState{
-			PaneID:          pane.ID,
-			RawPaneID:       pane.ID,
-			TerminalID:      pane.TerminalID,
-			TabID:           pane.TabID,
-			TabLabel:        pane.TabLabel,
-			TabNumber:       pane.TabNumber,
-			TabOrder:        tabOrderByID[pane.TabID],
-			WorkspaceID:     pane.WorkspaceID,
-			Agent:           pane.Agent,
-			Name:            pane.Name,
-			Status:          pane.Status,
-			Focused:         pane.Focused,
-			Cwd:             pane.Cwd,
-			Project:         project,
-			Host:            p.hostname,
-			Session:         pane.Session,
-			ActivitySeq:     pane.StateChangeSeq,
-			PaneRevision:    pane.Revision,
-			ScrollMaxOffset: pane.Scroll.MaxOffsetFromBottom,
-			ForegroundCwd:   pane.ForegroundCwd,
+			PaneID:             pane.ID,
+			RawPaneID:          pane.ID,
+			TerminalID:         pane.TerminalID,
+			TabID:              pane.TabID,
+			TabLabel:           pane.TabLabel,
+			TabNumber:          pane.TabNumber,
+			TabOrder:           tabOrderByID[pane.TabID],
+			WorkspaceID:        pane.WorkspaceID,
+			Agent:              pane.Agent,
+			Name:               pane.Name,
+			Status:             pane.Status,
+			Focused:            pane.Focused,
+			Cwd:                pane.Cwd,
+			Project:            project,
+			Host:               p.hostname,
+			Session:            pane.Session,
+			ActivitySeq:        pane.StateChangeSeq,
+			PaneRevision:       pane.Revision,
+			ScrollMaxOffset:    scrollMaxOffset,
+			ScrollMetricsKnown: scrollKnown,
+			ForegroundCwd:      pane.ForegroundCwd,
 		})
 	}
 	return agents

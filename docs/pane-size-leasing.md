@@ -28,8 +28,8 @@ the relay side can fix that; a Herdr-owned resize API is the proper fix (see
 | `release_pane_size` | Idempotent cleanup. Without `immediate` the lease lapses after a 10 s navigation grace; `immediate: true` (sent when the user turns the switch off) skips it. |
 | Authorization | Both are controller-only ordered mutations with exact target validation (`validateExactPaneTarget`); release keeps the stale-target cleanup allowance. Readers are denied. |
 | Disconnect | A departing connection's leases are released immediately. |
-| Pane reads | Client-supplied `terminal_columns`/`terminal_rows` are always stripped. A client that itself holds an active lease on the pane reads it at the leased geometry (viewport-only read); everyone else reads it at Herdr's size. |
-| Settling | For 3 s after a lease actually changes the size, viewport-only frames carry `resize_settling` so the app does not commit redrawn rows to history. |
+| Pane reads | The relay strips client-supplied `terminal_columns`/`terminal_rows`. A leasing client's response carries viewport geometry. Eligible no-scrollback Claude/Qoder panes use the pane-wide physical source described below, including reads from non-leasing clients. |
+| Settling | History admission pauses for reads inside or crossing a 3 s observed PTY-size settling interval. Eligible ANSI responses can compose retained history without admitting the incoming page. Unsafe frames carry `resize_settling`; a leasing app bounds its display wait at 4 s. |
 
 Compatibility matrix:
 
@@ -123,7 +123,7 @@ leases with an attempt count, a next-attempt time and a fixed deadline:
 
 - at most 5 attempts, all within 30 s of the moment the last lease ended;
 - backoff 1 s, 2 s, 4 s, 8 s (capped at 10 s) after each failed attempt;
-- waiting for a busy pane's I/O lock and time spent in lookups, open and
+- waiting for a busy pane's lease lock and time spent in lookups, open and
   ioctls count against the 30 s; a delayed sweep keeps the original lease
   expiry as its start time, and an attempt whose next slot would fall past
   the deadline ends the cleanup;
@@ -135,10 +135,11 @@ A successful new acquisition supersedes it: the original baseline is kept, and
 the pane's generation is incremented so a cleanup attempt planned earlier can
 never write over or delete the newer lease.
 
-Terminal I/O for one pane is serialized by a per-pane lock; bookkeeping uses a
-separate short lock, so pane reads never wait for terminal I/O. Each attempt
-runs with a 3 s timeout, and the sweep handles due panes concurrently, so one
-slow pane cannot stall another. Shutdown stops accepting leases and makes one
+Lease acquisition, reconciliation, and restore work use a per-pane lock.
+History reads validate held descriptors separately and check geometry revisions
+around their samples. Bookkeeping uses a separate short lock. Each cleanup
+attempt runs with a 3 s timeout, and the sweep handles due panes concurrently.
+Shutdown stops accepting leases and makes one
 concurrent restore attempt per pane within a 5 s overall deadline; panes it
 could not restore are logged and returned as an error, never reported as
 restored.
@@ -155,6 +156,164 @@ a local change is never overwritten: a local resize back to exactly the leased
 value (ABA) is indistinguishable from no change, and a local resize landing
 between the relay's read and its write can be overwritten, because there is no
 compare-and-set for the window size.
+
+## Sampled fullscreen history
+
+The relay retains sampled physical pages for Claude-like agents while its
+pane-wide lease gate is active. `AgentState.UsesNoScrollbackHistory` selects
+names containing `claude` or `qoder` with a known zero
+`max_offset_from_bottom` metric. Polls join fresh `pane.list` metrics by pane
+and nonempty terminal identity; event topology commits retain current
+same-terminal evidence. Missing metrics do not qualify. Zero describes a lack
+of scrollback, not an explicit alternate-screen mode: a fresh primary-screen
+pane can satisfy this heuristic.
+
+`LeaseHistoryState` includes resolved lease state, navigation grace, expired
+leases awaiting cleanup, and pending restore work. The gate ends when cleanup
+drops that state. A lease owned by another relay does not enable this relay's
+physical source. Its observed PTY-size changes can still create a geometry
+boundary and a settling pause.
+
+While the gate and heuristic qualify, display, background, and completion
+fallback captures request ANSI `recent` with `PhysicalCaptureLines=1000`.
+A non-leasing reader of the same pane uses that source too. Reader preferences
+of 100, 500, 1,000, or 10,000 rows limit the response after archival; they do
+not change the physical capture shape. `MaxLines=10000` bounds history rows.
+A separate `MaxHeldRows=2000` ring stores unresolved physical rows, beyond
+that history limit. Held rows are not shown on the phone.
+
+Before lease activation and after restore cleanup, Claude reads return to
+`ReadPane` (`recent-unwrapped`) and the legacy active-segment matcher. Qoder
+keeps its existing display-source selection outside the physical route.
+Inline or unknown-metric viewport responses remain raw. Prior physical
+segments stay frozen when a later legacy segment is matched.
+
+### Boundaries, matching, and the current page
+
+`BeginHistoryRead` and `Finish` sample a held, validated TTY descriptor around
+the content read. This validation also runs for eligible unleased ANSI reads;
+text and legacy viewport-only reads skip it. Background deferral checks use
+retained geometry without opening another handle.
+
+The epoch tracks observed PTY rows and columns. Source changes start fresh
+history segments for each pane. Lease changes, observed PTY changes, and relay
+restarts start segments for physical and known-zero no-scrollback contexts.
+Panes with scrollback keep legacy matching across leases, PTY resizes, and relay
+restarts. Previously frozen physical prefixes remain frozen. A failed geometry
+sample does not create a geometry boundary; a later known sample establishes
+an unknown epoch's baseline without adding a boundary. A fullscreen boundary can
+repeat one page. An external A→B→A change entirely between samples remains
+undetectable. Emulator-grid or pixel-only changes do not advance this epoch.
+Narrowing Herdr's grid below the PTY width can clip rows without a detected
+geometry change; the shared desktop-garbling limitation remains.
+
+Inside a physical segment, ordered matching compares substantive rows: rows
+containing a Unicode letter or digit. Repeated text must agree on its occurrence
+across optimal ordered mappings before it can anchor retirement. Supported
+forward ranges retire in old-coordinate order, with their interior blank layout.
+A stationary header can remain in the current page without entering that range.
+A supported same-size interior slot cleared to blanks is archived before
+replacement rules apply. Comparisons ignore trailing blank padding and equate NBSP with spaces;
+stored rows retain their raw text and ANSI styling.
+
+`ReplaceableTailLines=3` bounds in-place replacement of a supported old slot or
+tail of one to three physical rows, including intervening blanks and punctuation.
+The corresponding new slot must contain at least as many physical rows. Previous
+values are not archived; this exception can replace incomplete transcript text.
+Equal slot edges remain matched before the changed middle is classified.
+
+Unexplained contraction, disputed occurrences, and reverse-pushed rows become
+held candidates before the discontinuity check. A verified return of the
+current segment's archived suffix retracts that prefix from the displayed archive;
+matching does not search earlier segments. The response is the archive prefix
+followed by the raw current page, including its header, footer, and styles,
+before the reader's row limit and response clipping apply.
+Held rows remain invisible. Their separate 2,000-row ring removes oldest rows in
+append order, including partial records, with eviction counts in logs. History
+prefix trimming can also expire held records whose archive pins fall before it.
+Rows that reappear or retire in a later admission can keep their earlier held
+copies. Those copies remain in the 2,000-row ring and consume its capacity.
+
+A matcher discontinuity freezes the old body once and installs the new raw page.
+The `held_majority` reason requires `H >= 3 && 2*H > N && N >= 8`, where H is newly
+held old nonblank rows and N is old nonblank rows. Matched, replaced, and retired
+rows remain explained in N; retiring most of a page during a fast scroll is not
+itself a freeze trigger. The separate `pair_budget` reason applies above
+`MaxPhysicalMatchPairs=65536` equal substantive pairs when linear matching cannot
+certify the transition. Short `/clear` exchanges can be replaced or held under
+the generic rules, so a clear does not promise visible retention by command name.
+Larger unexplained clears can reach the held-majority freeze threshold.
+
+The relay logs a reason, counts, and held share for a matcher freeze, without row
+text. Per-pane minute counters report admission classes, retirements, replacements,
+held additions/evictions/expiry, current held size, reverse retractions, and pair
+work. Boundary admissions are counted separately from matcher freezes.
+
+`FooterLines=6` splits the replaceable footer when a page exceeds six rows.
+Taller chrome can enter retained history; shorter chrome can leave transcript
+rows in the replaceable footer. Footer updates refresh even when the body is
+unchanged. Blank rows remain content rather than being collapsed. This does
+not establish the cause of a blank run or recover text absent from a sample.
+
+Herdr 0.9.5 supplies placeholder `pane.read.revision=0`, not usable content
+order. The relay sequences underlying reads at start and shares the owner's
+admission outcome with followers. An older completion cannot replace a newer
+archived read. Reads that sample content in a different order use the same
+accounting rules: unresolved rows remain held unless a discontinuity freezes
+the old body. Verified current-segment overlap can retract the archive prefix.
+
+The relay skips archival inside or across the three-second settling interval.
+Rows appearing and disappearing during that pause are lost. Bursts larger
+than the sampled page between captures can also leave gaps. The background
+service checks on a four-second tick. Its interval accounting uses scheduling
+time rather than validation completion time. The scheduler starts captures of
+one pane at least three seconds apart, so small timer jitter does not skip a
+tick and a late tick does not add a second capture. Inflight work, settling, and
+scheduler delays can still defer a capture. Trailing requests add sampling
+opportunities.
+
+### Response clipping, saving, and app compatibility
+
+Composed responses obey a JSON-encoded budget of 4 MiB minus 64 KiB, in addition
+to the reader's row limit. `fitPaneContentResponse` drops oldest response rows
+first, then current-page rows if needed. It keeps whole rows and reports
+`truncated`; if no row fits, it returns empty successful content with
+`truncated=true`. Response clipping does not delete stored history. This byte
+guard also applies to large unleased legacy responses; fitting legacy output
+stays unchanged. A single composed frame no longer exceeds the per-message
+limit. This does not reserve space in the shared transport queue or change its
+eviction policy; a nonempty queue can still reject a frame.
+
+The truncation notice is not a completeness check: missing samples, settling
+loss, footer/slot/tail replacement, invisible held rows, and retention limits
+can omit displayed text without a new notice. A narrow cosmetic limit remains for direct reads: if byte clipping
+changes `truncated` but leaves content identical, the previous notice can remain
+until a content change or watch frame delivers updated metadata.
+
+Accepted departures from `working` or `blocked` queue a trailing terminal
+capture, serviced on the four-second tick. Requests retain a 60-second lifetime
+and a five-actual-attempt bound. Native Conversation responses do not clear a
+separate pending terminal request. Dirty history has a scheduled save deadline:
+the first save is due immediately, later changes are due at the last successful
+save plus `SaveInterval=10s`, and write failures retain dirty state for retry.
+Shutdown closes admission, joins capture/persistence work, and saves dirty
+state without waiting for its deadline. Clean loaded caches remain unchanged.
+A crash before a successful save can still lose recent samples.
+
+Loaded history becomes a frozen prefix at its first physical or known-zero
+no-scrollback admission after restart, even if numeric PTY epochs and lease
+revisions repeat. Earlier scrollback or unknown-metric legacy admissions do
+not consume that restart fence. Scrollback legacy reads resume matching,
+including older-format files.
+Restart fencing does not infer the source or width of rows from older files.
+The shared pane-ID cache layout is unchanged; separate relays still need
+separate cache roots to avoid shared-cache interference.
+
+This release includes a new phone-app build. It estimates leased prose using
+the effective shared width and adjusts short/blank anchors for contextual
+prepends. Use the matching app build; published 0.22.11 and older apps lack
+these frontend corrections. No new history capability or
+client-side history merger is introduced.
 
 ## Residual risks
 

@@ -8,17 +8,17 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/history"
 	"github.com/0cv/herdr-mobile-relay/internal/panedelta"
+	"github.com/0cv/herdr-mobile-relay/internal/panesize"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
 const defaultPaneWatchInterval = 250 * time.Millisecond
 
-// paneResizeSettleWindow bounds how long after an actual leased-size change
-// pane frames are marked resize_settling. Full-screen agents re-render their
-// transcript on SIGWINCH and can push redrawn rows into the scrollback for a
-// couple of seconds; observed up to ~2s for omp under load.
-const paneResizeSettleWindow = 3 * time.Second
+// paneResizeSettleWindow is the post-resize interval used by pane reads.
+// resize_settling also marks a failed finished-read geometry check; that flag
+// does not establish that a resize occurred.
+const paneResizeSettleWindow = panesize.HistorySettleWindow
 
 type paneWatchFrame struct {
 	content             string
@@ -26,6 +26,7 @@ type paneWatchFrame struct {
 	frameFingerprint    string
 	classificationAgent string
 	resizeSettling      bool
+	historyRetry        bool
 }
 
 type paneWatch struct {
@@ -206,8 +207,9 @@ func (s *Server) pollPaneWatch(watch *paneWatch) {
 func (s *Server) readPaneWatchFrame(watch *paneWatch) (map[string]any, *paneWatchFrame) {
 	message := watchMessage(watch)
 	s.applyPaneReadLease(watch.client.ID(), message)
-	response := s.preparePaneResponse(message, s.dispatcher.HandleReadPane(watch.ctx, message))
+	response := s.readPaneResponse(watch.ctx, message)
 	response["target"] = watch.target
+	response = fitPaneContentResponse(response)
 	content, ok := successfulPaneContent(response)
 	if !ok {
 		return response, nil
@@ -223,6 +225,7 @@ func (s *Server) readPaneWatchFrame(watch *paneWatch) (map[string]any, *paneWatc
 		frameFingerprint:    frameFingerprint,
 		classificationAgent: classificationAgentID,
 		resizeSettling:      resizeSettling,
+		historyRetry:        response["history_retry"] == true,
 	}
 }
 
@@ -235,7 +238,7 @@ func paneWatchNeedsFrameRead(
 		return true
 	}
 	return acknowledged != nil &&
-		(acknowledged.resizeSettling ||
+		(acknowledged.resizeSettling || acknowledged.historyRetry ||
 			acknowledged.classificationAgent != classificationAgentID)
 }
 
@@ -323,11 +326,11 @@ func paneWatchUpdate(
 		segments := []panedelta.Segment{{
 			CopyLines: strings.Count(current.content, "\n") + 1,
 		}}
-		return paneDeltaResponse(response, acknowledged.contentFingerprint, segments)
+		return fittedPaneDelta(response, acknowledged.contentFingerprint, segments)
 	}
 	segments := panedelta.Build(acknowledged.content, current.content)
 	if panedelta.Efficient(segments, current.content) {
-		return paneDeltaResponse(response, acknowledged.contentFingerprint, segments)
+		return fittedPaneDelta(response, acknowledged.contentFingerprint, segments)
 	}
 	response["ack_required"] = true
 	return response

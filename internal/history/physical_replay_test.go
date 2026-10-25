@@ -129,8 +129,14 @@ func TestPhysicalFixturesContainNoEnvironmentText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(paths) != 6 {
-		t.Fatalf("privacy coverage found %d fixtures, want 6", len(paths))
+	expected := []string{
+		"testdata/physical-adversarial.json", "testdata/physical-boundary-150-62.json",
+		"testdata/physical-clear-gap-fill.json", "testdata/physical-pages-chunk17.json",
+		"testdata/physical-pages-desktop-shapes.json", "testdata/physical-pages-markdown.json",
+		"testdata/physical-pages-repeated-block.json",
+	}
+	if !slices.Equal(paths, expected) {
+		t.Fatalf("privacy fixture coverage=%q, want explicit set %q", paths, expected)
 	}
 	for _, path := range paths {
 		data, err := os.ReadFile(path)

@@ -231,7 +231,7 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		s.historyAdmissionObserver(token, admission)
 	}
 	if admission.Admitted {
-		if snapshotContext.ReadSource == history.SourceRecent {
+		if snapshotContext.ReadSource == history.SourceRecent || admission.BoundaryReconciledRows > 0 || admission.BoundaryRefused > 0 {
 			s.recordHistoryAdmissionLocked(token, admission)
 		}
 		diagnostic = &admission
@@ -281,6 +281,7 @@ type historyMinuteCounters struct {
 	heldMajority, pairBudget                                                                     int
 	matchedRows, retiredRows, replacedRows, heldAddedRows, heldEvictedRows, heldExpiredRows      int
 	retractionEvents, retractedRows, dpPairs, maxDPPairs, currentHeldRows                        int
+	boundaryReconciledRows, boundaryRefused, boundarySeamKept                                    int
 }
 
 func (s *Server) recordHistoryAdmissionLocked(token historyReadToken, d history.SnapshotAdmission) {
@@ -291,6 +292,12 @@ func (s *Server) recordHistoryAdmissionLocked(token historyReadToken, d history.
 	if counter == nil {
 		counter = &historyMinuteCounters{started: s.historyNow()}
 		s.historyCounters[token.paneID] = counter
+	}
+	counter.boundaryReconciledRows += d.BoundaryReconciledRows
+	counter.boundaryRefused += d.BoundaryRefused
+	counter.boundarySeamKept += d.BoundarySeamKept
+	if d.Class == "legacy" {
+		return
 	}
 	counter.admissions++
 	switch d.Class {
@@ -374,6 +381,7 @@ func (s *Server) flushHistoryCounters(now time.Time) {
 			"freezes", c.freezes, "held_majority", c.heldMajority, "pair_budget", c.pairBudget,
 			"matched_rows", c.matchedRows, "retired_rows", c.retiredRows, "replaced_rows", c.replacedRows,
 			"held_added_rows", c.heldAddedRows, "held_evicted_rows", c.heldEvictedRows, "held_expired_rows", c.heldExpiredRows, "held_total_rows", c.currentHeldRows,
-			"retraction_events", c.retractionEvents, "retracted_rows", c.retractedRows, "dp_pairs", c.dpPairs, "max_dp_pairs", c.maxDPPairs)
+			"retraction_events", c.retractionEvents, "retracted_rows", c.retractedRows, "dp_pairs", c.dpPairs, "max_dp_pairs", c.maxDPPairs,
+			"boundary_reconciled_rows", c.boundaryReconciledRows, "boundary_refused", c.boundaryRefused, "boundary_seam_kept", c.boundarySeamKept)
 	}
 }

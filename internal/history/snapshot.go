@@ -25,27 +25,30 @@ type SnapshotContext struct {
 }
 
 type SnapshotAdmission struct {
-	Admitted         bool
-	ContentChanged   bool
-	MetadataChanged  bool
-	HeldEvictedRows  int
-	HeldExpiredRows  int
-	HeldTotalRows    int
-	Class            string
-	Reason           string
-	MatchPath        string
-	MatchedNonblank  int
-	MatchedRows      int
-	RetiredNonblank  int
-	ReplacedNonblank int
-	HeldNonblank     int
-	OldNonblank      int
-	RetiredRows      int
-	ReplacedRows     int
-	HeldAddedRows    int
-	RetractedRows    int
-	RetractionCount  int
-	DPPairs          int
+	Admitted               bool
+	ContentChanged         bool
+	MetadataChanged        bool
+	HeldEvictedRows        int
+	HeldExpiredRows        int
+	HeldTotalRows          int
+	Class                  string
+	Reason                 string
+	MatchPath              string
+	MatchedNonblank        int
+	MatchedRows            int
+	RetiredNonblank        int
+	ReplacedNonblank       int
+	HeldNonblank           int
+	OldNonblank            int
+	RetiredRows            int
+	ReplacedRows           int
+	HeldAddedRows          int
+	RetractedRows          int
+	RetractionCount        int
+	DPPairs                int
+	BoundaryReconciledRows int
+	BoundaryRefused        int
+	BoundarySeamKept       int
 }
 
 // MergeSnapshot retains a page using its source and sampled PTY context.
@@ -117,13 +120,21 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		(state.Columns <= 0 || context.Columns <= 0 || state.Columns != context.Columns)
 	boundary := state.snapshotInvalid || state.SnapshotVersion != snapshotVersion && !legacyUpgrade ||
 		state.ReadSource != context.ReadSource || physicalWidthBoundary
+	body, footer := splitSnapshot(rawContent)
+	boundaryMatch := boundaryResult{}
 	if boundary {
 		state.zeroDisplacementReturn = nil
 		if state.LiveStart < len(state.History) {
 			state.archiveMutated()
 		}
-		state.SegmentStart = len(state.History)
 		state.LiveStart = len(state.History)
+		if len(state.History) > 0 {
+			supported := !state.snapshotInvalid && state.SnapshotVersion == snapshotVersion &&
+				(state.ReadSource == SourceLegacy || state.ReadSource == SourceRecent && state.Columns > 0) &&
+				(context.ReadSource == SourceLegacy || context.Columns > 0)
+			boundaryMatch = reconcileBoundary(state, body, supported)
+		}
+		state.SegmentStart = state.LiveStart
 		state.LastHash = ""
 		state.StaleRefusals = 0
 	}
@@ -131,7 +142,6 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		state.loaded = false
 	}
 	state.setSnapshotContext(context)
-	body, footer := splitSnapshot(rawContent)
 	state.Footer = slices.Clone(footer)
 	admission := SnapshotAdmission{Class: "legacy"}
 	if context.ReadSource == SourceRecent {
@@ -145,6 +155,10 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 			state.archiveMutated()
 		}
 		state.LiveStart = len(state.History)
+	}
+	admission.BoundaryReconciledRows, admission.BoundarySeamKept = boundaryMatch.rows, boundaryMatch.seam
+	if boundaryMatch.refused {
+		admission.BoundaryRefused = 1
 	}
 	expired := trimSnapshotState(state)
 	evicted := trimHeldCapacity(state)

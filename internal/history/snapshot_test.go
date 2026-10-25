@@ -405,6 +405,7 @@ func TestSnapshotLimitPreservesNewestRawRowsAndReportsClipping(t *testing.T) {
 	m.MergeSnapshot("p", snapshotPage("old A", "old B"), ctx)
 	raw := snapshotPage("new A", "new B")
 	ctx.GeometryEpoch++
+	ctx.Columns = 54
 	got, clipped := m.MergeSnapshotLimited("p", raw, ctx, 10)
 	if clipped || got != "old A\nold B\n"+raw {
 		t.Fatalf("exact bound = %q clipped=%v", got, clipped)
@@ -428,7 +429,7 @@ func TestSnapshotLimitPreservesNewestRawRowsAndReportsClipping(t *testing.T) {
 func TestSnapshotLegacyLoadRestartAndSourceBoundary(t *testing.T) {
 	for _, metadata := range []string{
 		``,
-		`,"snapshot_version":1,"read_source":"recent","geometry_epoch":1,"lease_revision":1,"columns":40,"rows":82,"segment_start":0,"live_start":0`,
+		`,"snapshot_version":1,"read_source":"recent","geometry_epoch":1,"lease_revision":1,"rows":82,"segment_start":0,"live_start":0`,
 		`,"snapshot_version":1,"read_source":"recent","segment_start":-1,"live_start":200`,
 		`,"snapshot_version":99,"read_source":"recent","segment_start":100,"live_start":-5`,
 	} {
@@ -483,7 +484,7 @@ func TestSnapshotFrozenPrefixTrimmingClampsOffsets(t *testing.T) {
 	}
 }
 
-func TestFirstRuntimeAdmissionFencesIdenticalNumericEpoch(t *testing.T) {
+func TestFirstRuntimePhysicalAdmissionContinuesAtEqualKnownColumns(t *testing.T) {
 	dir := t.TempDir()
 	first := NewManager(dir)
 	ctx := physicalContext(1, 40)
@@ -496,8 +497,8 @@ func TestFirstRuntimeAdmissionFencesIdenticalNumericEpoch(t *testing.T) {
 	if got := restarted.Content("p", 0); got != snapshotPage("A", "B", "old") {
 		t.Fatalf("restart content before admission = %q", got)
 	}
-	assertSnapshotContent(t, restarted.MergeSnapshot("p", snapshotPage("A", "B", "new"), ctx), "A", "B", "old", "A", "B", "new")
-	assertSnapshotContent(t, restarted.MergeSnapshot("p", snapshotPage("A", "B", "new"), ctx), "A", "B", "old", "A", "B", "new")
+	assertSnapshotContent(t, restarted.MergeSnapshot("p", snapshotPage("A", "B", "new"), ctx), "A", "B", "new")
+	assertSnapshotContent(t, restarted.MergeSnapshot("p", snapshotPage("A", "B", "new"), ctx), "A", "B", "new")
 }
 
 func TestFirstRuntimeLegacyAdmissionContinuesIdenticalNumericEpoch(t *testing.T) {
@@ -570,12 +571,12 @@ func TestLegacyUnknownMetricBecomingKnownZeroContinuesLoadedSegment(t *testing.T
 	}
 }
 
-func TestSourceGateCycleStartsNewSegmentWithoutIntermediateRead(t *testing.T) {
+func TestSourceGateCycleContinuesEqualWidthWithoutIntermediateRead(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 40)
 	m.MergeSnapshot("p", snapshotPage("A", "B", "old"), ctx)
 	ctx.LeaseRevision += 2
-	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage("A", "B", "new"), ctx), "A", "B", "old", "A", "B", "new")
+	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage("A", "B", "new"), ctx), "A", "B", "new")
 }
 
 func TestUnleasedNoScrollbackExistingFixturesRemainByteIdentical(t *testing.T) {
@@ -623,6 +624,7 @@ func TestSnapshotTerminalReplacementResetsButSessionDiscoveryDoesNot(t *testing.
 	ctx := physicalContext(1, 40)
 	m.MergeSnapshot("p", snapshotPage("old A", "old B"), ctx)
 	ctx.GeometryEpoch++
+	ctx.Columns = 54
 	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage("same terminal A", "same terminal B"), ctx), "old A", "old B", "same terminal A", "same terminal B")
 	ctx.TerminalID = "terminal-new"
 	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage("new A", "new B"), ctx), "new A", "new B")

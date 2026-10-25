@@ -881,24 +881,47 @@ func TestAsyncHistoryCaptureReturnsClosedError(t *testing.T) {
 }
 
 func TestFinishedReadPublishesOldEpochAfterLaterResize(t *testing.T) {
-	s, _, advance := captureServer(t, true)
-	entered, release := make(chan struct{}), make(chan struct{})
-	var enteredOnce, releaseOnce sync.Once
-	unblock := func() { releaseOnce.Do(func() { close(release) }) }
-	t.Cleanup(unblock)
-	s.historyReadFinishedObserver = func(historyReadToken) { enteredOnce.Do(func() { close(entered) }); <-release }
-	done := startHistoryCapture(s, capturePage("old A", "old B"), true)
-	awaitHistoryCaptureStart(t, entered, done)
-	_, _, _ = s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 70, 20)
-	unblock()
-	if outcome := awaitHistorySignal(t, done, "finished old epoch"); outcome.err != nil || !outcome.result.Capture.Admitted {
-		t.Fatalf("finished old epoch was rejected: error=%v capture=%+v", outcome.err, outcome.result.Capture)
-	}
-	s.historyReadFinishedObserver = nil
-	advance(4 * time.Second)
-	executeCapture(t, s, capturePage("new A", "new B"), true)
-	if got := s.historyM.Content("pane-1", 0); got != capturePage("old A", "old B", "new A", "new B") {
-		t.Fatalf("epoch composition = %q", got)
+	for _, change := range []string{"height", "width"} {
+		t.Run(change, func(t *testing.T) {
+			s, _, advance := captureServer(t, true)
+			entered, release := make(chan struct{}), make(chan struct{})
+			var enteredOnce, releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(unblock)
+			s.historyReadFinishedObserver = func(historyReadToken) { enteredOnce.Do(func() { close(entered) }); <-release }
+			done := startHistoryCapture(s, capturePage("A", "B", "old"), true)
+			awaitHistoryCaptureStart(t, entered, done)
+			columns, rows := 60, 30
+			if change == "width" {
+				columns, rows = 70, 20
+			}
+			if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", columns, rows); err != nil {
+				t.Fatal(err)
+			}
+			unblock()
+			outcome := awaitHistorySignal(t, done, "finished old epoch")
+			if outcome.err != nil || !outcome.result.Capture.Admitted {
+				t.Fatalf("finished old epoch was rejected: error=%v capture=%+v", outcome.err, outcome.result.Capture)
+			}
+			oldSnapshot := outcome.result.Capture.Snapshot
+			if oldSnapshot.Columns != 60 || oldSnapshot.Rows != 20 {
+				t.Fatalf("later resize relabeled finished token: %+v", oldSnapshot)
+			}
+			s.historyReadFinishedObserver = nil
+			advance(4 * time.Second)
+			next := executeCapture(t, s, capturePage("A", "B", "new"), true)
+			if !next.Capture.Admitted || next.Capture.Snapshot.GeometryEpoch == oldSnapshot.GeometryEpoch ||
+				next.Capture.Snapshot.Columns != columns || next.Capture.Snapshot.Rows != rows {
+				t.Fatalf("following resize metadata=%+v, old=%+v", next.Capture, oldSnapshot)
+			}
+			want := capturePage("A", "B", "new")
+			if change == "width" {
+				want = capturePage("A", "B", "old", "A", "B", "new")
+			}
+			if got := s.historyM.Content("pane-1", 0); got != want {
+				t.Fatalf("%s composition=%q, want %q", change, got, want)
+			}
+		})
 	}
 }
 

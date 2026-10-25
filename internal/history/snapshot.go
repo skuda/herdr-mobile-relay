@@ -106,17 +106,17 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		m.states[paneID] = state
 		delete(m.lastSave, paneID)
 	}
-	geometryBoundary := context.ReadSource == SourceRecent
-	if context.GeometryEpoch == 0 && state.ReadSource == context.ReadSource && !state.loaded {
+	if context.GeometryEpoch == 0 && context.ReadSource == SourceLegacy && state.ReadSource == context.ReadSource && !state.loaded {
 		context.GeometryEpoch, context.Columns, context.Rows = state.GeometryEpoch, state.Columns, state.Rows
 	}
 	legacyUpgrade := context.ReadSource == SourceLegacy && state.SnapshotVersion == 0 && !state.snapshotInvalid
 	if legacyUpgrade {
 		state.SegmentStart, state.LiveStart = 0, len(state.History)
 	}
-	boundary := geometryBoundary && state.loaded || state.SnapshotVersion != snapshotVersion && !legacyUpgrade ||
-		state.ReadSource != context.ReadSource || geometryBoundary && state.GeometryEpoch != 0 && context.GeometryEpoch != 0 && state.GeometryEpoch != context.GeometryEpoch ||
-		geometryBoundary && state.LeaseRevision != context.LeaseRevision
+	physicalWidthBoundary := context.ReadSource == SourceRecent &&
+		(state.Columns <= 0 || context.Columns <= 0 || state.Columns != context.Columns)
+	boundary := state.snapshotInvalid || state.SnapshotVersion != snapshotVersion && !legacyUpgrade ||
+		state.ReadSource != context.ReadSource || physicalWidthBoundary
 	if boundary {
 		state.zeroDisplacementReturn = nil
 		if state.LiveStart < len(state.History) {
@@ -127,7 +127,7 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		state.LastHash = ""
 		state.StaleRefusals = 0
 	}
-	if geometryBoundary {
+	if context.ReadSource == SourceRecent {
 		state.loaded = false
 	}
 	state.setSnapshotContext(context)

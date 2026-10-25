@@ -36,7 +36,6 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/hermesprofiles"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
-	"github.com/0cv/herdr-mobile-relay/internal/noecho"
 	"github.com/0cv/herdr-mobile-relay/internal/panesize"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
@@ -140,21 +139,41 @@ type Server struct {
 	inventoryPublicationObserver func(string)
 	// Optional test hook between history loading and tuple revalidation.
 	conversationHistoryReadObserver func()
+	historyReadFinishedObserver     func(historyReadToken)
+	historyAdmissionObserver        func(historyReadToken, history.SnapshotAdmission)
 
 	paneWatchMu sync.Mutex
 	paneWatches map[string]*paneWatch
 
-	historyCaptureMu  sync.Mutex
-	historyInflight   map[string]bool
-	historyLast       map[string]time.Time
-	historyActive     map[string]bool
-	historyReconciled bool
-	pushReconcileMu   sync.Mutex
-	pushReconciled    bool
-	pushTestMu        sync.Mutex
-	pushTestLast      map[string]time.Time
-	transitionTasks   *lifecycleTasks
-	historyTasks      *lifecycleTasks
+	// Lock order: historyCaptureMu -> historyPendingMu. Admission and discard
+	// hold historyCaptureMu; pending bookkeeping does not perform file I/O.
+	historyCaptureMu         sync.Mutex
+	historyPendingMu         sync.Mutex
+	historyPendingActive     map[string]historyIdentity
+	historyPendingClosed     bool
+	historyInflight          map[string]bool
+	historyLast              map[string]time.Time
+	historyActive            map[string]historyIdentity
+	historyOtherTerminals    map[string]string
+	historySequence          uint64
+	historyArchived          map[string]uint64
+	historyPending           map[string]*pendingHistoryCapture
+	historyStatusRevision    map[string]int64
+	historyRequestSequence   uint64
+	historyAcknowledgements  uint64
+	historyClosed            bool
+	lifecycleDrainTimeout    time.Duration
+	historyNow               func() time.Time
+	historyCounters          map[string]*historyMinuteCounters
+	persistenceTasks         *lifecycleTasks
+	historyInventoryRevision int64
+	historyReconciled        bool
+	pushReconcileMu          sync.Mutex
+	pushReconciled           bool
+	pushTestMu               sync.Mutex
+	pushTestLast             map[string]time.Time
+	transitionTasks          *lifecycleTasks
+	historyTasks             *lifecycleTasks
 }
 
 func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Server {
@@ -265,8 +284,10 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		inventoryView:       cloneStringMap(initialInventory.Status),
 		historyInflight:     make(map[string]bool),
 		historyLast:         make(map[string]time.Time),
-		historyActive:       make(map[string]bool),
-		pushTestLast:        make(map[string]time.Time),
+		historyActive:       make(map[string]historyIdentity),
+		historyArchived:     make(map[string]uint64),
+		historyPending:      make(map[string]*pendingHistoryCapture), historyStatusRevision: make(map[string]int64), historyNow: time.Now,
+		pushTestLast: make(map[string]time.Time),
 	}
 }
 
@@ -558,7 +579,24 @@ func (s *Server) Run(ctx context.Context) error {
 	ctx = runCtx
 	s.transitionTasks = newLifecycleTasks(ctx)
 	s.historyTasks = newLifecycleTasks(ctx)
-	defer s.drainLifecycleWork()
+	s.persistenceTasks = newLifecycleTasks(ctx)
+	s.persistenceTasks.Start(func(ctx context.Context) {
+		s.historyM.RunPersistenceWithReport(ctx, func(err error) {
+			if err == nil {
+				s.logger.Info("pane history persistence recovered")
+				return
+			}
+			s.recordSafeError("pane history persistence failed", err)
+			s.logger.Warn("pane history persistence failed", "error", err)
+		})
+	})
+	s.state.SetOnStatusTransition(s.enqueueHistoryTransition)
+	lifecycleDrained := false
+	defer func() {
+		if !lifecycleDrained {
+			_ = s.drainLifecycleWork()
+		}
+	}()
 	if s.uploadM != nil {
 		defer s.uploadM.Close()
 	}
@@ -756,10 +794,11 @@ func (s *Server) Run(ctx context.Context) error {
 		case "read_pane":
 			s.applyPaneReadLease(client.ID(), msg)
 			s.stopPaneWatch(client.ID(), inbound.PaneID)
-			resp := s.preparePaneResponse(msg, s.dispatcher.HandleReadPane(ctx, msg))
+			resp := s.readPaneResponse(ctx, msg)
 			if inbound.Target != nil {
 				resp["target"] = *inbound.Target
 			}
+			resp = fitPaneContentResponse(resp)
 			if unchanged := unchangedPaneResponse(msg, resp); unchanged != nil {
 				s.hub.Send(client, unchanged)
 				break
@@ -1407,7 +1446,10 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = s.udp.Close()
 	}
 	bg.Wait()
-	s.drainLifecycleWork()
+	lifecycleDrained = true
+	if err := s.drainLifecycleWork(); runErr == nil && err != nil {
+		runErr = fmt.Errorf("lifecycle shutdown: %w", err)
+	}
 	if s.dispatcher != nil {
 		dispatcherCloseCtx, cancelDispatcher := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := s.dispatcher.Close(dispatcherCloseCtx); runErr == nil && err != nil {
@@ -1536,11 +1578,52 @@ func canonicalHTTPPath(raw string) bool {
 	return true
 }
 
-func (s *Server) drainLifecycleWork() {
+func (s *Server) drainLifecycleWork() error {
+	s.historyCaptureMu.Lock()
+	s.historyClosed = true
+	s.historyPendingMu.Lock()
+	s.historyPendingClosed = true
+	s.historyPendingMu.Unlock()
+	s.historyCaptureMu.Unlock()
 	s.state.SetOnTransition(nil)
-	s.transitionTasks.Stop()
-	s.historyTasks.Stop()
-	s.historyM.SaveAll()
+	s.state.SetOnStatusTransition(nil)
+	timeout := s.lifecycleDrainTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var failures []error
+	groups := []struct {
+		name  string
+		tasks *lifecycleTasks
+	}{
+		{"transition", s.transitionTasks},
+		{"history capture", s.historyTasks},
+		{"history persistence", s.persistenceTasks},
+	}
+	for _, group := range groups {
+		if group.tasks != nil {
+			group.tasks.cancelWork()
+		}
+	}
+	for _, group := range groups {
+		if group.tasks == nil {
+			continue
+		}
+		if err := group.tasks.StopContext(ctx); err != nil {
+			failures = append(failures, fmt.Errorf("unfinished %s work: %w", group.name, err))
+		}
+	}
+	if err := s.historyM.SaveAll(); err != nil {
+		s.recordSafeError("final pane history save failed", err)
+		s.logger.Warn("final pane history save failed", "error", err)
+	}
+	err := errors.Join(failures...)
+	if err != nil {
+		s.logger.Warn("lifecycle work did not drain at shutdown", "error", err)
+	}
+	return err
 }
 
 func (s *Server) reconcileRecoveredPush(ctx context.Context, agents []*coordinator.AgentState) {
@@ -2076,13 +2159,9 @@ func (s *Server) captureHistoryLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			for _, agent := range s.state.Snapshot() {
-				if !isClaudeLike(agent.Agent) || (agent.Status != "working" && agent.Status != "blocked") {
-					continue
-				}
-				s.scheduleHistoryCapture(ctx, agent.PaneID)
-			}
+		case now := <-ticker.C:
+			s.captureHistoryTick(now)
+			s.flushHistoryCounters(now)
 		}
 	}
 }
@@ -2092,12 +2171,13 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 		return
 	}
 	s.historyCaptureMu.Lock()
-	if s.historyInflight[paneID] || time.Since(s.historyLast[paneID]) < history.CaptureInterval {
+	scheduledAt := s.historyNow()
+	minimumInterval := history.CaptureInterval - history.CaptureInterval/4
+	if s.historyClosed || s.historyInflight[paneID] || scheduledAt.Sub(s.historyLast[paneID]) < minimumInterval {
 		s.historyCaptureMu.Unlock()
 		return
 	}
 	s.historyInflight[paneID] = true
-	s.historyLast[paneID] = time.Now()
 	s.historyCaptureMu.Unlock()
 
 	started := s.historyTasks.Start(func(taskCtx context.Context) {
@@ -2106,23 +2186,14 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 			delete(s.historyInflight, paneID)
 			s.historyCaptureMu.Unlock()
 		}()
-		readCtx, cancel := context.WithTimeout(taskCtx, 3*time.Second)
-		defer cancel()
-		read, err := s.herdrC.ReadPane(readCtx, paneID, history.MaxLines, "ansi")
-		content := read.Content
-		if err != nil || len(content) == 0 || question.LayoutHint(string(content)) {
-			return
-		}
-		agent, ok := s.state.Agent(paneID)
-		if !ok || !isClaudeLike(agent.Agent) {
+		if s.historyCaptureDeferred(paneID) {
 			return
 		}
 		s.historyCaptureMu.Lock()
-		defer s.historyCaptureMu.Unlock()
-		if !s.historyActive[paneID] {
-			return
-		}
-		s.historyM.Merge(paneID, string(content))
+		s.historyLast[paneID] = scheduledAt
+		s.historyCaptureMu.Unlock()
+		s.syncHistoryPanes()
+		_, _ = s.captureTerminalHistory(taskCtx, paneID)
 	})
 	if started {
 		return
@@ -2132,30 +2203,88 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 	s.historyCaptureMu.Unlock()
 }
 
-func (s *Server) syncHistoryPanes(agents []*coordinator.AgentState) {
-	active := make(map[string]bool, len(agents))
+func (s *Server) syncHistoryPanes() {
+	s.syncHistorySnapshot(s.state.InventorySnapshot())
+}
+
+func (s *Server) syncHistorySnapshot(snapshot coordinator.InventorySnapshot) {
+	if !snapshot.Established {
+		return
+	}
+	agents := snapshot.Agents
+	active := make(map[string]historyIdentity, len(agents))
+	otherTerminals := make(map[string]string)
 	for _, agent := range agents {
 		if isClaudeLike(agent.Agent) {
-			active[agent.PaneID] = true
+			active[agent.PaneID] = historyIdentity{terminalID: agent.TerminalID, generation: agent.Generation}
+		} else {
+			otherTerminals[agent.PaneID] = agent.TerminalID
 		}
 	}
-
+	forgotten := make(map[string]string)
 	s.historyCaptureMu.Lock()
-	defer s.historyCaptureMu.Unlock()
+	if snapshot.Revision < s.historyInventoryRevision {
+		s.historyCaptureMu.Unlock()
+		return
+	}
+	s.historyInventoryRevision = snapshot.Revision
 	if !s.historyReconciled {
-		s.historyM.Reconcile(active)
+		present := make(map[string]bool, len(active))
+		for paneID := range active {
+			present[paneID] = true
+		}
+		s.historyM.Reconcile(present)
 		s.historyReconciled = true
 	}
-	for paneID := range s.historyActive {
-		if active[paneID] {
+	for paneID, previous := range s.historyOtherTerminals {
+		current, exists := otherTerminals[paneID]
+		if identity, claudeLike := active[paneID]; claudeLike {
+			current, exists = identity.terminalID, true
+		}
+		if !exists || current != previous {
+			forgotten[paneID] = previous
+		}
+	}
+	s.historyOtherTerminals = otherTerminals
+	for paneID, previous := range s.historyActive {
+		current, exists := active[paneID]
+		if exists && (previous.terminalID == "" || current.terminalID == "" || previous.terminalID == current.terminalID) {
 			continue
 		}
 		delete(s.historyActive, paneID)
 		delete(s.historyLast, paneID)
+		delete(s.historyArchived, paneID)
+		delete(s.historyCounters, paneID)
 		s.historyM.Discard(paneID)
+		forgotten[paneID] = previous.terminalID
 	}
-	for paneID := range active {
-		s.historyActive[paneID] = true
+	for paneID, identity := range active {
+		s.historyActive[paneID] = identity
+	}
+	s.historyPendingMu.Lock()
+	s.historyPendingActive = active
+	for paneID, revision := range s.historyStatusRevision {
+		if _, exists := active[paneID]; !exists && revision <= snapshot.Revision {
+			delete(s.historyStatusRevision, paneID)
+		}
+	}
+	for paneID, pending := range s.historyPending {
+		if pending.revision > snapshot.Revision {
+			continue
+		}
+		identity, exists := active[paneID]
+		if !exists || identity.terminalID != pending.identity.terminalID {
+			delete(s.historyPending, paneID)
+		} else {
+			pending.identity = identity
+		}
+	}
+	s.historyPendingMu.Unlock()
+	s.historyCaptureMu.Unlock()
+	if s.paneSizeM != nil {
+		for paneID, terminalID := range forgotten {
+			s.paneSizeM.ForgetHistoryPane(paneID, terminalID)
+		}
 	}
 }
 
@@ -2225,17 +2354,10 @@ func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, se
 	if response := s.latestConversationResponse(agent, cwd, sessionID, contexts...); response != "" {
 		return response
 	}
-	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	read, err := s.herdrC.ReadPane(readCtx, paneID, history.MaxLines, "ansi")
-	content := read.Content
-	if err != nil || len(content) == 0 {
+	s.syncHistoryPanes()
+	completionContent, err := s.captureTerminalHistory(ctx, paneID)
+	if err != nil || completionContent == "" {
 		return ""
-	}
-	raw := string(content)
-	completionContent := raw
-	if isClaudeLike(agent) && !question.LayoutHint(raw) {
-		completionContent = s.historyM.Merge(paneID, raw)
 	}
 	if response := question.LatestCompletedResponse(completionContent); response != "" {
 		return response
@@ -2259,8 +2381,7 @@ func sameConversationTuple(left, right *coordinator.AgentState) bool {
 		left.SessionID == right.SessionID
 }
 func isClaudeLike(agent string) bool {
-	lower := strings.ToLower(agent)
-	return strings.Contains(lower, "claude") || strings.Contains(lower, "qoder")
+	return coordinator.IsClaudeLike(agent)
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -2848,72 +2969,6 @@ func (s *Server) publicJobState(filename, defaultState string) map[string]any {
 		}
 	}
 	return result
-}
-
-// preparePaneResponse annotates a pane frame with everything the phone needs
-// to decide what it may offer the operator. The no-echo flag is computed last,
-// on the content the phone will actually render, so full reads, deltas and the
-// history-merged frames all agree on the tail.
-func (s *Server) preparePaneResponse(message, response map[string]any) map[string]any {
-	response = s.classifyPaneResponse(message, response)
-	content, ok := successfulPaneContent(response)
-	if !ok {
-		return response
-	}
-	prompt, secret := noecho.Match(content)
-	response["no_echo"] = secret
-	if secret {
-		response["no_echo_prompt"] = prompt
-	}
-	return response
-}
-
-func (s *Server) classifyPaneResponse(message, response map[string]any) map[string]any {
-	content, ok := successfulPaneContent(response)
-	if !ok {
-		return response
-	}
-	paneID, _ := message["pane_id"].(string)
-	agent, _ := s.agentInfo(paneID)
-	classification := question.Classify(content, agent)
-	response["attention_kind"] = classification.Kind
-	response["prompt"] = classification.Prompt
-	response["command"] = classification.Command
-	response["options"] = classification.Options
-	response["interaction"] = classification.Interaction
-	response["question_layout"] = classification.QuestionLayout
-	if interaction := classification.Interaction; interaction != nil {
-		if text := strings.TrimSpace(interaction.Other.Text); text != "" {
-			s.state.RecordCustomAnswer(paneID, interaction.Question, text)
-		}
-		question.FillCustomAnswers(interaction, s.state.CustomAnswers(paneID))
-	}
-	if viewportOnly, _ := response["viewport_only"].(bool); viewportOnly &&
-		s.paneSizeM != nil && s.paneSizeM.ResizedWithin(paneID, paneResizeSettleWindow) {
-		// The agent re-renders its transcript after a size change and can
-		// push a redrawn block into the scrollback for a while; the app must
-		// not commit rows from frames read inside this window as history.
-		response["resize_settling"] = true
-	}
-	agentLower := strings.ToLower(agent)
-	if classification.Interaction != nil ||
-		(!strings.Contains(agentLower, "claude") && !strings.Contains(agentLower, "qoder")) {
-		return response
-	}
-	if viewportOnly, _ := response["viewport_only"].(bool); viewportOnly {
-		return response
-	}
-	historyLimit := messageInt(message["lines"], 30)
-	if historyLimit < 1 {
-		historyLimit = 1
-	} else if historyLimit > history.MaxLines {
-		historyLimit = history.MaxLines
-	}
-	herdrTruncated, _ := response["truncated"].(bool)
-	merged, historyTruncated := s.historyM.MergeLimited(paneID, content, historyLimit)
-	response["content"] = merged
-	response["truncated"] = herdrTruncated || historyTruncated
-	return response
 }
 
 func successfulPaneContent(response map[string]any) (string, bool) {
@@ -3588,11 +3643,11 @@ func (s *Server) publishCurrentInventory(ctx context.Context) error {
 	}
 	if runAgentSideEffects {
 		s.reconcileRecoveredPush(ctx, sideEffectAgents)
-		s.syncHistoryPanes(sideEffectAgents)
+		s.syncHistoryPanes()
 		active := make(map[string]bool, len(sideEffectAgents))
 		for _, agent := range sideEffectAgents {
 			active[agent.PaneID] = true
-			if isClaudeLike(agent.Agent) && (agent.Status == "working" || agent.Status == "blocked") {
+			if isClaudeLike(agent.Agent) && coordinator.IsAttentionStatus(agent.Status) {
 				s.scheduleHistoryCapture(ctx, agent.PaneID)
 			}
 		}

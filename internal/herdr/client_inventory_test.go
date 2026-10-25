@@ -2,10 +2,49 @@ package herdr
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func paneScrollPresenceCases() []struct {
+	name string
+	json string
+	want string
+} {
+	return []struct {
+		name string
+		json string
+		want string
+	}{
+		{name: "missing scroll", json: `{}`, want: `null`},
+		{name: "null scroll", json: `{"scroll":null}`, want: `null`},
+		{name: "empty scroll", json: `{"scroll":{}}`, want: `{}`},
+		{name: "missing max field", json: `{"scroll":{"offset_from_bottom":0}}`, want: `{}`},
+		{name: "null max field", json: `{"scroll":{"max_offset_from_bottom":null}}`, want: `{}`},
+		{name: "explicit zero", json: `{"scroll":{"max_offset_from_bottom":0}}`, want: `{"max_offset_from_bottom":0}`},
+		{name: "positive value", json: `{"scroll":{"max_offset_from_bottom":24}}`, want: `{"max_offset_from_bottom":24}`},
+	}
+}
+
+func TestPaneScrollMetricPresence(t *testing.T) {
+	for _, tt := range paneScrollPresenceCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			var pane Pane
+			if err := json.Unmarshal([]byte(tt.json), &pane); err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := json.Marshal(pane.Scroll)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(encoded) != tt.want {
+				t.Fatalf("scroll = %s, want %s", encoded, tt.want)
+			}
+		})
+	}
+}
 
 func TestGetInventoryParsesAgentActivitySequence(t *testing.T) {
 	socketPath, done := startUnaryTestSocket(t, "agent.list", map[string]any{

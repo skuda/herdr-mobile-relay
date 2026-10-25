@@ -11,6 +11,23 @@ import (
 	"time"
 )
 
+func TestPaneReadZeroRevisionIsNotAuthoritativeOrder(t *testing.T) {
+	for _, text := range []string{"first page", "different page"} {
+		socketPath, done := startUnaryTestSocket(t, "pane.read", map[string]any{
+			"type": "pane_read", "read": map[string]any{"text": text, "revision": 0, "truncated": false},
+		})
+		client := NewClient("unused", socketPath)
+		read, err := client.ReadPaneRecent(context.Background(), "p", 1000, "ansi")
+		_ = client.Close()
+		if err != nil || string(read.Content) != text {
+			t.Fatalf("zero-revision read=%+v error=%v", read, err)
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestReadPaneReusesSocketAPIConnection(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)

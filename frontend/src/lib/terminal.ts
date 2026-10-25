@@ -824,26 +824,60 @@ export function terminalScreenColumns(
   return columns;
 }
 
-/**
- * Rows cropped from the front between two renders of a growing log. The new
- * head must reappear verbatim as a block of the previous rows; wholesale
- * redraws find no block and return 0.
- */
-export function renderedRowShift(previous: RenderedTerminalRow[], current: RenderedTerminalRow[]): number {
+/** Positive shifts describe a cropped prefix; negative shifts describe a prepend. */
+export function renderedRowShift(previous: RenderedTerminalRow[], current: RenderedTerminalRow[], anchorIndex?: number): number {
   if (!previous.length || !current.length) return 0;
-  let size = 0;
-  let nonEmpty = 0;
-  while (size < current.length && size < 32 && (nonEmpty < 2 || size < 8)) {
-    if (current[size].text.trim()) nonEmpty += 1;
-    size += 1;
+  const shifts = new Set<number>();
+  const matches = (oldStart: number, newStart: number, count: number) => {
+    if (oldStart < 0 || newStart < 0 || oldStart + count > previous.length || newStart + count > current.length) return false;
+    let nonEmpty = 0;
+    for (let i = 0; i < count; i += 1) {
+      if (previous[oldStart + i].text !== current[newStart + i].text) return false;
+      if (previous[oldStart + i].text.trim()) nonEmpty += 1;
+    }
+    return nonEmpty >= 2;
+  };
+  const anchorMatches = (shift: number) => {
+    const anchor = Math.min(previous.length - 1, Math.max(0, anchorIndex ?? Math.floor(previous.length / 2)));
+    const mappedAnchor = anchor - shift;
+    if (mappedAnchor < 0 || mappedAnchor >= current.length
+      || previous[anchor].text !== current[mappedAnchor].text) return false;
+    let nonEmpty = previous[anchor].text.trim() ? 1 : 0;
+    for (let index = anchor - 1; index >= Math.max(0, shift, anchor - 32); index -= 1) {
+      if (previous[index].text !== current[index - shift].text) break;
+      if (previous[index].text.trim()) nonEmpty += 1;
+    }
+    const end = Math.min(previous.length, current.length + shift, anchor + 33);
+    for (let index = anchor + 1; index < end; index += 1) {
+      if (previous[index].text !== current[index - shift].text) break;
+      if (previous[index].text.trim()) nonEmpty += 1;
+    }
+    return nonEmpty >= 2;
+  };
+  const leadingSize = (rows: RenderedTerminalRow[]) => {
+    let size = 0;
+    let nonEmpty = 0;
+    while (size < rows.length && size < 256 && (nonEmpty < 2 || size < 8)) {
+      if (rows[size].text.trim()) nonEmpty += 1;
+      size += 1;
+    }
+    return size;
+  };
+  const cropSize = leadingSize(current);
+  for (let shift = 0; shift <= previous.length - cropSize; shift += 1) {
+    if (matches(shift, 0, cropSize) && anchorMatches(shift)) {
+      shifts.add(shift);
+      if (shifts.size > 1) return 0;
+    }
   }
-  if (nonEmpty < 2) return 0;
-  for (let shift = 0; shift <= previous.length - size; shift += 1) {
-    let index = 0;
-    while (index < size && previous[shift + index].text === current[index].text) index += 1;
-    if (index === size) return shift;
+  const prependSize = leadingSize(previous);
+  for (let offset = 1; offset <= current.length - prependSize; offset += 1) {
+    if (matches(0, offset, prependSize) && anchorMatches(-offset)) {
+      shifts.add(-offset);
+      if (shifts.size > 1) return 0;
+    }
   }
-  return 0;
+  return shifts.size === 1 ? shifts.values().next().value! : 0;
 }
 
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/history"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 )
 
@@ -78,10 +79,47 @@ type paneSessionAdmission struct {
 	allowAbsent bool
 }
 
+type PaneReadRequest struct {
+	PaneID          string
+	Lines           int
+	Format          string
+	Resized         bool
+	Physical        bool
+	Agent           *AgentState
+	Generation      int64
+	ContentRevision int64
+	Background      bool
+}
+
+type PaneReadCapture struct {
+	Sequence        uint64
+	TerminalID      string
+	Generation      int64
+	Admitted        bool
+	Snapshot        history.SnapshotContext
+	PendingSequence uint64
+}
+
+type PaneReadResult struct {
+	Read     herdr.PaneRead
+	Response map[string]any
+	Capture  PaneReadCapture
+	Composed bool
+}
+
+type PaneReadOptions struct {
+	Physical        bool
+	SourceRevision  uint64
+	FollowerJoined  func()
+	ResizedRecently func() bool
+	Execute         func(context.Context, PaneReadRequest, func(context.Context, PaneReadRequest) (herdr.PaneRead, error)) (PaneReadResult, error)
+}
+
 type paneRead struct {
-	done chan struct{}
-	read herdr.PaneRead
-	err  error
+	done      chan struct{}
+	result    PaneReadResult
+	err       error
+	followers int
 }
 
 func NewDispatcher(client *herdr.Client, state *State, journal *activity.Journal, logger *slog.Logger) *Dispatcher {
@@ -1168,41 +1206,68 @@ func (d *Dispatcher) readPaneForDisplay(
 }
 
 func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any) map[string]any {
+	response, _ := d.HandleReadPaneWithOptions(ctx, message, PaneReadOptions{})
+	return response
+}
+
+func (d *Dispatcher) HandleReadPaneWithOptions(ctx context.Context, message map[string]any, options PaneReadOptions) (map[string]any, PaneReadCapture) {
+	response, capture := d.handleReadPane(ctx, message, options)
+	return response, capture
+}
+
+func (d *Dispatcher) handleReadPane(ctx context.Context, message map[string]any, options PaneReadOptions) (map[string]any, PaneReadCapture) {
 	paneID := stringValue(message, "pane_id")
 	if paneID == "" {
-		return map[string]any{"type": "pane_content", "pane_id": "", "content": "", "format": "text"}
+		return map[string]any{"type": "pane_content", "pane_id": "", "content": "", "format": "text"}, PaneReadCapture{}
 	}
 	d.handleAcknowledge(stringValue(message, "request_id"), paneID)
-	lines := intValue(message["lines"], 30)
-	if lines < 1 {
-		lines = 1
-	}
-	if lines > 10000 {
-		lines = 10000
-	}
+	lines := min(history.MaxLines, max(1, intValue(message["lines"], 30)))
 	format := stringValue(message, "format")
 	if format != "ansi" {
 		format = "text"
 	}
-	terminalColumns := intValue(message["terminal_columns"], 0)
-	if terminalColumns < 1 {
-		terminalColumns = 0
-	}
+	terminalColumns := max(0, intValue(message["terminal_columns"], 0))
 	readCtx, cancel := context.WithTimeout(ctx, commandDeadline)
 	defer cancel()
 	generation := d.state.Generation(paneID)
 	revision := d.state.ContentRevision(paneID)
+	agent, _ := d.state.Agent(paneID)
+	request := PaneReadRequest{PaneID: paneID, Lines: lines, Format: format, Resized: terminalColumns > 0,
+		Physical: options.Physical && format == "ansi", Agent: agent, Generation: generation, ContentRevision: revision}
 	key := fmt.Sprintf("%s\x00%d\x00%s\x00%d\x00%d", paneID, lines, format, terminalColumns, generation)
+	if request.Physical {
+		request.Lines = history.PhysicalCaptureLines
+		terminalID := ""
+		if agent != nil {
+			terminalID = agent.TerminalID
+		}
+		key = fmt.Sprintf("physical\x00%s\x00%s\x00%d\x00%d\x00%d\x00%s", paneID, terminalID, generation, options.SourceRevision, request.Lines, format)
+	}
 	d.readMu.Lock()
 	call := d.reads[key]
 	owner := call == nil
 	if owner {
 		call = &paneRead{done: make(chan struct{})}
 		d.reads[key] = call
+	} else {
+		call.followers++
 	}
 	d.readMu.Unlock()
+	if !owner && options.FollowerJoined != nil {
+		options.FollowerJoined()
+	}
 	if owner {
-		call.read, call.err = d.readPaneForDisplay(readCtx, paneID, lines, format, terminalColumns > 0)
+		executeRead := func(ctx context.Context, request PaneReadRequest) (herdr.PaneRead, error) {
+			if request.Physical {
+				return d.herdr.ReadPaneRecent(ctx, request.PaneID, request.Lines, request.Format)
+			}
+			return d.readPaneForDisplay(ctx, request.PaneID, request.Lines, request.Format, request.Resized)
+		}
+		if options.Execute != nil {
+			call.result, call.err = options.Execute(readCtx, request, executeRead)
+		} else {
+			call.result.Read, call.err = executeRead(readCtx, request)
+		}
 		d.readMu.Lock()
 		delete(d.reads, key)
 		close(call.done)
@@ -1211,29 +1276,49 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 		select {
 		case <-call.done:
 		case <-readCtx.Done():
-			return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "Unable to read the agent pane"}
+			return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "Unable to read the agent pane"}, PaneReadCapture{}
 		}
 	}
-	read, err := call.read, call.err
-	if err != nil {
-		return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "Unable to read the agent pane"}
+	failed := func(text string) (map[string]any, PaneReadCapture) {
+		return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": text}, call.result.Capture
+	}
+	if call.err != nil {
+		return failed("Unable to read the agent pane")
 	}
 	if d.state.Generation(paneID) != generation {
-		return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "The agent pane was replaced while it was being read"}
+		return failed("The agent pane was replaced while it was being read")
 	}
 	if d.state.ContentRevision(paneID) != revision {
-		return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "The agent state changed while the pane was being read"}
+		return failed("The agent state changed while the pane was being read")
 	}
-	content := capPaneContentLines(read.Content, lines)
-	response := map[string]any{
-		"type": "pane_content", "pane_id": paneID, "content": string(content),
-		"format": format, "truncated": read.Truncated, "viewport_only": terminalColumns > 0,
-		"interaction": nil, "question_layout": false,
+	read := call.result.Read
+	response := make(map[string]any)
+	for key, value := range call.result.Response {
+		response[key] = value
+	}
+	content := string(read.Content)
+	if composed, ok := response["content"].(string); ok {
+		content = composed
+	}
+	limited := content
+	if call.result.Capture.Admitted || call.result.Composed {
+		limited, _ = history.LimitSnapshotContent(content, lines)
+	} else {
+		limited = string(capPaneContentLines([]byte(content), lines))
+	}
+	response["type"], response["pane_id"], response["content"] = "pane_content", paneID, limited
+	response["format"], response["viewport_only"] = format, terminalColumns > 0
+	if terminalColumns > 0 && options.ResizedRecently != nil && options.ResizedRecently() {
+		response["resize_settling"] = true
+	}
+	response["truncated"] = read.Truncated || len(limited) != len(content)
+	if _, ok := response["interaction"]; !ok {
+		response["interaction"], response["question_layout"] = nil, false
 	}
 	if terminalRows := intValue(message["terminal_rows"], 0); terminalRows > 0 {
 		response["viewport_rows"] = terminalRows
 	}
-	return response
+	return response, call.result.Capture
 }
 
 func (d *Dispatcher) HandleProbePane(ctx context.Context, message map[string]any) map[string]any {

@@ -605,7 +605,10 @@ export interface TerminalFrame {
   noEcho?: boolean;
   /** The recognized secret prompt line, when noEcho is set. */
   noEchoPrompt?: string;
-  /** Frame read inside the post-resize settle window; its rows must not be committed to history. */
+  /**
+   * Post-resize settling, a failed finished-read geometry check, or a pending
+   * history pin; not proof of a resize.
+   */
   resizeSettling?: boolean;
 }
 

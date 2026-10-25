@@ -42,6 +42,10 @@ type TTYResolver interface {
 	TTYPath(ctx context.Context, pid int) (string, error)
 }
 
+type processTTYResolver interface {
+	ttyIdentity(ctx context.Context, pid int) (path string, startTime uint64, rdev uint64, err error)
+}
+
 // Provider is the fresh Herdr lookup surface. Each call must reach the
 // running server: identity checks never reuse an earlier answer.
 type Provider interface {

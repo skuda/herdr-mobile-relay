@@ -5,6 +5,60 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Retain sampled fullscreen Claude/Qoder history during this relay's opted-in
+  Resize Session lease and pending restore, including reads from non-leasing
+  clients. Keep the current footer fresh, queue trailing captures, and save
+  dirty admitted history after output stops. Sampling gaps, resize settling,
+  footer/slot/tail replacement, invisible held rows, and retention limits can
+  still omit displayed text. Legacy matching continues across leases, PTY
+  resizes, and relay restarts, including known-zero panes and valid v0.22.10
+  saves. Physical matching continues at equal known columns across restart,
+  reacquisition, and height changes. Source changes and changed or unknown
+  physical columns start boundaries. Bounded word agreement can remove a
+  proved whole-row archive suffix; a partial seam keeps one overlapping row,
+  and refusal retains the boundary copy. Qoder boundaries keep the copy without
+  reconciliation. Compared rows with unsplit paths, code punctuation, or
+  combining marks, including variation selectors, can refuse reconciliation.
+  One substantive-row reverse and a generation-bound cleared-slot return can
+  retract supported recent copies; this does not deduplicate stored history
+  globally. Physical matching retires supported rows in old-coordinate order
+  and preserves the raw current page before reader-row limits and response
+  clipping. Supported slots or tails of one to three physical rows can change
+  in place when the new slot is at least as large; their old values
+  are not archived. Unresolved rows stay invisible in a separate 2,000-row
+  oldest-first held ring beyond the 10,000 history rows, with removal counts in
+  logs. Short clears can replace or hold an exchange under these generic rules.
+  Larger discontinuities freeze the old body with a reason when held residue
+  reaches `H>=3 && 2*H>N && N>=8`; a separate 65,536-pair work limit can also
+  trigger a freeze. Here H counts held old nonblank rows and N counts old
+  nonblank rows, including explained matched, replaced, and retired rows.
+  Fast scroll retirement is not a freeze trigger. Per-pane minute counters and
+  freeze logs report retention outcomes without page text. Boundary counters
+  include reconciled rows, refused cuts, and retained seams. Legacy reads skip
+  read-time TTY geometry work. Linux physical reads borrow a manager-owned
+  descriptor during the lease or restore interval. Linux resolves controlling
+  TTYs through procfs, and writes keep fresh validation. Darwin keeps read-owned
+  descriptors and its `ps` resolver.
+  Same-terminal-ID respawn can leave a Linux read pin stale until an
+  invalidation signal. A retired pin with a blocked borrower keeps later
+  physical capture admission refused. A physical display read blocked in Size
+  keeps its shared-read entry; later display reads with that key, from other
+  clients too, join it and fail at their command deadline until the key changes
+  or the relay restarts.
+  Legacy reads can temporarily merge a replacement terminal's page into the old
+  archive before inventory reports it. Saved history now records
+  `snapshot_version=1`.
+- Clip oldest response rows to fit an encoded budget 64 KiB below the per-message
+  limit. This includes large unleased history responses; fitting content stays
+  unchanged, and a response with no fitting row succeeds with
+  empty truncated content. Stored history is not shortened by response
+  clipping. The shared transport queue and its eviction policy are unchanged.
+- Correct the phone app's leased-width height estimates and contextual prepend
+  anchors for short or blank rows. These frontend corrections require the new
+  app build.
+
 ## [0.22.13] - 2026-10-23
 
 ### Changed

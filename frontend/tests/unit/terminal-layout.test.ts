@@ -45,6 +45,11 @@ describe('terminalScreenColumns', () => {
     expect(terminalScreenColumns(paneRows(), false, 40)).toBe(WIDEST_PANE_COLUMNS);
   });
 
+  it('keeps a narrower shared lease as the wrapping width on a wider phone', () => {
+    expect(terminalScreenColumns([{ columns: 150, fixedGrid: false }], true, 40)).toBe(40);
+    expect(Math.ceil(150 / terminalScreenColumns([{ columns: 150, fixedGrid: false }], true, 40))).toBe(4);
+  });
+
   it('sizes the screen to the cap when wrapping is engaged', () => {
     expect(terminalScreenColumns(paneRows(), true, 40)).toBe(40);
   });

@@ -259,6 +259,10 @@ desktop Safari reports an occluded window as hidden and brief app switches
 must not resize the shared pane. Several phones on one pane get the narrowest
 requested size. Readers never resize anything.
 
+Eligible fullscreen Claude/Qoder history follows this relay's pane-wide lease
+and restore state, rather than the reader's own lease; the sampling limits are
+described below.
+
 **Lease Terminal Height** (off by default, available only with Resize Session
 on and a relay that supports it) also fits the height, so full-screen agents
 redraw to the phone instead of serving a mostly empty desktop-sized grid. Each
@@ -274,10 +278,63 @@ not carry the new opt-in, so an older app keeps the default layout. Design,
 safety checks and residual risks are in
 [pane-size-leasing.md](pane-size-leasing.md).
 
-Terminal History keeps 100, 500, 1,000, or 10,000 lines in the terminal view.
+Terminal History offers 100, 500, 1,000, or 10,000 response rows.
 1,000 is the default and the ceiling on the gateway-relayed path; direct
-connections can use 10,000. The "older history" notice reports when rows beyond
-the served window exist. Use **Copy** for the latest response or
+connections can request 10,000. Responses also have an encoded-byte budget.
+The relay removes oldest response rows to fit it, without deleting retained
+history. A row that cannot fit can leave an empty successful response with the
+history-limit notice. Large unleased legacy responses use this byte guard too;
+content that fits the budget is unchanged. Clipping keeps the newest rows that
+fit a budget 64 KiB below the per-message limit; the shared transport queue and
+its eviction policy are unchanged.
+
+During this relay's Resize Session lease or pending restore, eligible
+Claude/Qoder panes retain sampled fullscreen pages before the current raw
+page. Eligibility requires a known zero scrollback metric, not a proven
+alternate-screen mode. Other readers of that pane share the physical source
+without acquiring a lease. A lease held by another relay does not enable it.
+The relay captures up to 1,000 physical rows per read regardless of the response
+preference and retains up to 10,000 body rows. It stores unresolved rows in a
+separate 2,000-row oldest-first held ring; those rows are not shown on the phone.
+Held eviction and archive-pin expiry produce count logs. Before activation and
+after restore cleanup, the unleased legacy matcher resumes with earlier
+segments retained.
+
+This is sampled history, not a complete transcript. Legacy matching continues
+across lease changes, PTY resizes, and relay restarts, including known-zero
+panes. Physical matching continues when columns remain equal and known,
+including height changes, restart, and reacquisition. Source changes and
+changed or unknown physical columns start boundaries. A bounded whole-row
+suffix proof can remove an overlapping archive copy; refusal retains it, and
+a partial seam can retain one overlapping row. Sampling gaps and this relay's
+three-second resize-settling pause can lose output. Unleased legacy reads do
+not sample external PTY resizes. The six-row footer split is
+a heuristic. Ordered matching archives supported old-coordinate ranges and
+keeps the raw current page before the reader's row limit and response clipping.
+A supported slot or tail of one to three physical
+rows can change in place when its replacement is at least as large; the old
+values are not archived. Other unresolved rows can remain held and invisible.
+A short `/clear` can replace or hold the exchange under these generic rules;
+it does not promise visible retention. Larger unexplained changes can freeze
+the old body once, with a reason log. Retained desktop rows can wrap unevenly.
+PTY epochs do not detect emulator-grid or pixel-only changes, and a narrower
+Herdr grid can clip rows. The absence of an older-history notice does not
+establish that omitted samples, held rows, or replaced slots/tails are visible.
+For direct reads, an unchanged-content response can keep an earlier truncation
+notice until a content change or watch frame updates it.
+
+Footer updates refresh without a body change. Dirty admitted pages save on a
+deadline even after output stops. Valid legacy files resume matching after
+restart, including v0.22.10 saves; equal-known-column physical state also
+continues. Invalid provenance keeps a conservative boundary. A crash before a
+successful save can still lose recent samples. This release also
+includes a new app build for effective-width height estimates and short/blank
+prepend anchors; use the matching build for those frontend corrections. See
+[sampled fullscreen history](pane-size-leasing.md#sampled-fullscreen-history)
+for source, matching, persistence, and clipping limits.
+
+Terminal history is separate from ordinary Herdr scrollback and the provider's
+native conversation log. Use **Copy** for the latest response or
 **Conversation History** for clean, searchable earlier turns.
 
 In **Settings → Agents → Default View**, choose **Terminal** or

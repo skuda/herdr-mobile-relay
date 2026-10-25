@@ -76,6 +76,7 @@ func (m *Manager) PreviewSnapshot(paneID, rawContent string, context SnapshotCon
 	clone := *state
 	clone.History, clone.Footer = slices.Clone(state.History), slices.Clone(state.Footer)
 	clone.Held = cloneHeldRecords(state.Held)
+	clone.zeroDisplacementReturn = clonePhysicalReturn(state.zeroDisplacementReturn)
 	m.mu.Unlock()
 	preview := &Manager{states: map[string]*PaneState{paneID: &clone}, lastSave: make(map[string]time.Time), now: time.Now}
 	content, _, _ := preview.AdmitSnapshot(paneID, rawContent, context, 0)
@@ -100,6 +101,7 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		context.ReadSource = SourceLegacy
 	}
 	if state.TerminalID != "" && context.TerminalID != "" && state.TerminalID != context.TerminalID {
+		state.zeroDisplacementReturn = nil
 		state = &PaneState{}
 		m.states[paneID] = state
 		delete(m.lastSave, paneID)
@@ -116,6 +118,10 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		state.ReadSource != context.ReadSource || geometryBoundary && state.GeometryEpoch != 0 && context.GeometryEpoch != 0 && state.GeometryEpoch != context.GeometryEpoch ||
 		geometryBoundary && state.LeaseRevision != context.LeaseRevision
 	if boundary {
+		state.zeroDisplacementReturn = nil
+		if state.LiveStart < len(state.History) {
+			state.archiveMutated()
+		}
 		state.SegmentStart = len(state.History)
 		state.LiveStart = len(state.History)
 		state.LastHash = ""
@@ -135,6 +141,9 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		}
 	} else {
 		m.mergeLegacySegment(state, body)
+		if !slices.Equal(beforeHistory, state.History) {
+			state.archiveMutated()
+		}
 		state.LiveStart = len(state.History)
 	}
 	expired := trimSnapshotState(state)
@@ -253,6 +262,9 @@ func trimHeldCapacity(state *PaneState) int {
 
 func trimSnapshotState(state *PaneState) int {
 	removed := max(0, len(state.History)-MaxLines)
+	if removed > 0 {
+		state.archiveMutated()
+	}
 	state.History = state.History[removed:]
 	state.SegmentStart = min(len(state.History), max(0, state.SegmentStart-removed))
 	state.LiveStart = min(len(state.History), max(state.SegmentStart, state.LiveStart-removed))

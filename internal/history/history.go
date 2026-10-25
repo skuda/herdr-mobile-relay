@@ -46,6 +46,9 @@ type PaneState struct {
 	LiveStart       int          `json:"live_start,omitempty"`
 	Held            []HeldRecord `json:"held,omitempty"`
 
+	archiveGeneration      uint64
+	zeroDisplacementReturn *physicalReturnRecord
+
 	loaded          bool
 	snapshotInvalid bool
 	heldInvalid     bool
@@ -107,6 +110,9 @@ func (m *Manager) Content(paneID string, limit int) string {
 func (m *Manager) Discard(paneID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if state := m.states[paneID]; state != nil {
+		state.zeroDisplacementReturn = nil
+	}
 	delete(m.states, paneID)
 	delete(m.lastSave, paneID)
 	os.Remove(m.stateFile(paneID))
@@ -141,6 +147,7 @@ func (m *Manager) Reconcile(activePaneIDs map[string]bool) {
 		if activePaneIDs[paneID] {
 			continue
 		}
+		m.states[paneID].zeroDisplacementReturn = nil
 		delete(m.states, paneID)
 		delete(m.lastSave, paneID)
 	}

@@ -404,7 +404,7 @@ func verifiedPhysicalReverse(state *PaneState, old, next []string, plan *physica
 	header := plan.header
 	processedEnd := -1
 	for _, pair := range plan.consensus.agreed {
-		if pair.Old < header || pair.Old < processedEnd || pair.Next-pair.Old < 2 {
+		if pair.Old < header || pair.Old < processedEnd || pair.Next-pair.Old <= 0 {
 			continue
 		}
 		run := plan.anchorRun(old, next, pair)
@@ -426,7 +426,7 @@ func verifiedPhysicalReverse(state *PaneState, old, next []string, plan *physica
 				substantive++
 			}
 		}
-		if substantive < 2 {
+		if substantive < min(k, 2) {
 			return 0
 		}
 		combined := append(slices.Clone(archived), old[header:]...)
@@ -440,12 +440,128 @@ func verifiedPhysicalReverse(state *PaneState, old, next []string, plan *physica
 				prefixPairs++
 			}
 		}
-		if prefixPairs >= 2 {
+		if prefixPairs >= min(k, 2) {
 			return k
 		}
 	}
 
 	return 0
+}
+
+type physicalReturnRecord struct {
+	rows       []string
+	neighbours [2]string
+	slot       int
+	segment    int
+	generation uint64
+}
+
+func (state *PaneState) archiveMutated() {
+	state.archiveGeneration++
+	state.zeroDisplacementReturn = nil
+}
+
+func clonePhysicalReturn(record *physicalReturnRecord) *physicalReturnRecord {
+	if record == nil {
+		return nil
+	}
+	clone := *record
+	clone.rows = slices.Clone(record.rows)
+	return &clone
+}
+
+func physicalReturnCandidate(old, next []string, plan *physicalTransition) *physicalReturnRecord {
+	end := len(old)
+	for end > 0 && plan.outcome[end-1] != physicalRetired {
+		end--
+	}
+	start := end
+	for start > 0 && plan.outcome[start-1] == physicalRetired {
+		start--
+	}
+	if start == 0 || end >= len(old) || end >= len(next) ||
+		plan.agreedIndex[start-1] != start-1 || plan.agreedIndex[end] != end {
+		return nil
+	}
+	for _, row := range next[start:end] {
+		if row != "" {
+			return nil
+		}
+	}
+	rows := make([]string, end-start)
+	for i, row := range old[start:end] {
+		rows[i] = strings.Clone(row)
+	}
+	return &physicalReturnRecord{rows: rows, neighbours: [2]string{strings.Clone(old[start-1]), strings.Clone(old[end])}, slot: start}
+}
+
+func verifiedPhysicalSlotReturn(state *PaneState, old, next []string, plan *physicalTransition) int {
+	record := state.zeroDisplacementReturn
+	if record == nil {
+		return 0
+	}
+	n, start := len(record.rows), record.slot
+	end := start + n
+	if record.generation != state.archiveGeneration || record.segment != state.SegmentStart || n == 0 ||
+		n > state.LiveStart-state.SegmentStart || start <= 0 || end >= len(old) || end >= len(next) ||
+		!slices.Equal(record.rows, physicalComparisonRows(state.History[state.LiveStart-n:state.LiveStart])) ||
+		old[start-1] != record.neighbours[0] || old[end] != record.neighbours[1] ||
+		next[start-1] != record.neighbours[0] || next[end] != record.neighbours[1] || plan.diagnostic.Class == "freeze" {
+		state.zeroDisplacementReturn = nil
+		return 0
+	}
+	for _, row := range old[start:end] {
+		if row != "" {
+			state.zeroDisplacementReturn = nil
+			return 0
+		}
+	}
+	blank := true
+	for _, row := range next[start:end] {
+		blank = blank && row == ""
+	}
+	if !blank && !slices.Equal(record.rows, next[start:end]) {
+		state.zeroDisplacementReturn = nil
+		return 0
+	}
+	proof := physicalConsensus(old, next, true)
+	left, right := false, false
+	for _, pair := range proof.agreed {
+		left = left || pair == (physicalPair{start - 1, start - 1})
+		right = right || pair == (physicalPair{end, end})
+	}
+	if proof.budget || !left || !right {
+		state.zeroDisplacementReturn = nil
+		return 0
+	}
+	if blank {
+		return 0
+	}
+	proofOld := slices.Clone(old)
+	copy(proofOld[start:end], record.rows)
+	proof = physicalConsensus(proofOld, next, true)
+	left, right, returned := false, false, 0
+	for _, pair := range proof.agreed {
+		if pair.Old != pair.Next {
+			continue
+		}
+		left = left || pair.Old == start-1
+		right = right || pair.Old == end
+		if pair.Old >= start && pair.Old < end {
+			returned++
+		}
+	}
+	substantive := 0
+	for _, row := range record.rows {
+		if physicalSubstantive(row) {
+			substantive++
+		}
+	}
+	if proof.budget || !left || !right || !blank && returned != substantive {
+		state.zeroDisplacementReturn = nil
+		return 0
+	}
+	return n
 }
 
 func (m *Manager) mergePhysical(state *PaneState, body []string) SnapshotAdmission {
@@ -461,16 +577,25 @@ func (m *Manager) mergePhysical(state *PaneState, body []string) SnapshotAdmissi
 		return d
 	}
 	if d.Class == "freeze" {
+		state.archiveMutated()
 		state.LiveStart = len(state.History)
 		state.History = append(state.History, body...)
 		return d
 	}
 	retract := verifiedPhysicalReverse(state, old, next, &plan)
+	if retract == 0 {
+		retract = verifiedPhysicalSlotReturn(state, old, next, &plan)
+	}
+	candidate := physicalReturnCandidate(old, next, &plan)
+	if retract > 0 {
+		state.archiveMutated()
+	}
 	archive := slices.Clone(state.History[:state.LiveStart-retract])
 	pin := len(archive)
 	for i := 0; i < len(old); {
 		switch plan.outcome[i] {
 		case physicalRetired:
+			state.archiveMutated()
 			archive = append(archive, strings.Clone(previous[i]))
 			pin++
 			i++
@@ -494,6 +619,10 @@ func (m *Manager) mergePhysical(state *PaneState, body []string) SnapshotAdmissi
 	}
 	state.LiveStart = len(archive)
 	state.History = append(archive, body...)
+	if candidate != nil {
+		candidate.segment, candidate.generation = state.SegmentStart, state.archiveGeneration
+		state.zeroDisplacementReturn = candidate
+	}
 	if retract > 0 {
 		d.Class = "reverse"
 		d.RetractedRows = retract

@@ -613,6 +613,47 @@ func TestTerminalReplacementInvalidatesQueuedSave(t *testing.T) {
 	}
 }
 
+func TestPhysicalReturnRuntimeStateIsNotPersisted(t *testing.T) {
+	root := t.TempDir()
+	m := NewManager(root)
+	ctx := physicalContext(1, 54)
+	admitPhysicalOccurrence(t, m, []string{"H", "X", "T", "U"}, ctx, "X", 1)
+	admitPhysicalOccurrence(t, m, []string{"H", "", "T", "U"}, ctx, "X", 1)
+	state := m.states["p"]
+	if !physicalReturnPending(state) || physicalArchiveGeneration(state) == 0 {
+		t.Error("missing runtime record/generation before persistence")
+	}
+	if err := m.SaveAll(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(m.stateFile("p"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string]bool{
+		"history": true, "footer": true, "stale_refusals": true, "last_hash": true,
+		"snapshot_version": true, "terminal_id": true, "read_source": true,
+		"geometry_epoch": true, "lease_revision": true, "columns": true, "rows": true,
+		"segment_start": true, "live_start": true, "held": true,
+	}
+	for key := range wire {
+		if !allowed[key] {
+			t.Errorf("unexpected persisted field %q", key)
+		}
+	}
+	if string(wire["snapshot_version"]) != "1" {
+		t.Errorf("snapshot_version=%s, want 1", wire["snapshot_version"])
+	}
+	loaded := NewManager(root).loadState("p")
+	if physicalReturnPending(loaded) || physicalArchiveGeneration(loaded) != 0 {
+		t.Error("reload retained runtime return state")
+	}
+}
+
 func TestRunPersistenceSavesWithoutAnotherMerge(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx, cancel := context.WithCancel(context.Background())

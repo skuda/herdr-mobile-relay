@@ -131,10 +131,12 @@ type Lease struct {
 // write. shellPID is zero only when Herdr reported no shell and the TTY was
 // found through the foreground process group leader instead.
 type terminalIdentity struct {
-	terminalID string
-	shellPID   int
-	ttyPath    string
-	rdev       uint64
+	terminalID   string
+	shellPID     int
+	ttyPath      string
+	rdev         uint64
+	processPID   int
+	processStart uint64
 }
 
 type size struct {
@@ -215,10 +217,10 @@ type Manager struct {
 }
 
 // NewManager returns the production manager: fresh Herdr lookups through
-// provider, `ps` for the shell's TTY, and direct winsize ioctls. It is
+// provider, platform TTY resolution, and direct winsize ioctls. It is
 // available only on darwin and linux.
 func NewManager(provider Provider, logger *slog.Logger) *Manager {
-	m := newManager(provider, psTTYResolver{}, ioctlTerminalOps{}, LeaseTTL, ReleaseGrace, time.Now, logger)
+	m := newManager(provider, platformTTYResolver(), ioctlTerminalOps{}, LeaseTTL, ReleaseGrace, time.Now, logger)
 	m.available = platformSupported && provider != nil
 	return m
 }
@@ -777,7 +779,7 @@ func (m *Manager) lockPane(ctx context.Context, paneID string) (*paneState, bool
 // lookupIdentity finds the terminal an acquisition binds to: Herdr's
 // terminal_id from a fresh pane.get (the inventory does not cover plain shell
 // panes), the shell's pid from a fresh pane.process_info, and that process's
-// TTY. The device number is added by openValidated once the TTY is open.
+// TTY.
 func (m *Manager) lookupIdentity(ctx context.Context, paneID string) (terminalIdentity, error) {
 	if m.provider == nil || m.resolver == nil || m.ops == nil {
 		return terminalIdentity{}, ErrUnavailable
@@ -811,11 +813,21 @@ func (m *Manager) lookupIdentity(ctx context.Context, paneID string) (terminalId
 			return terminalIdentity{}, identityUnavailable("Herdr reported no shell or foreground process", nil)
 		}
 	}
+	identity := terminalIdentity{terminalID: pane.TerminalID, shellPID: shellPID}
+	if resolver, ok := m.resolver.(processTTYResolver); ok {
+		tty, start, rdev, err := resolver.ttyIdentity(ctx, pid)
+		if err != nil || start == 0 {
+			return terminalIdentity{}, identityUnavailable("shell TTY", err)
+		}
+		identity.ttyPath, identity.processPID, identity.processStart, identity.rdev = tty, pid, start, rdev
+		return identity, nil
+	}
 	tty, err := m.resolver.TTYPath(ctx, pid)
 	if err != nil {
 		return terminalIdentity{}, identityUnavailable("shell TTY", err)
 	}
-	return terminalIdentity{terminalID: pane.TerminalID, shellPID: shellPID, ttyPath: tty}, nil
+	identity.ttyPath = tty
+	return identity, nil
 }
 
 // openValidated is the mutation boundary. It (a) opens the cached TTY path
@@ -864,6 +876,9 @@ func (m *Manager) openValidated(ctx context.Context, paneID string, identity *te
 	case !character:
 		_ = terminal.Close()
 		return nil, gone("terminal path is not a character device")
+	case identity.processStart != 0 && rdev != identity.rdev:
+		_ = terminal.Close()
+		return nil, gone("controlling terminal device number changed")
 	case capture:
 		identity.rdev = rdev
 	case rdev != identity.rdev:
@@ -918,6 +933,16 @@ func (m *Manager) validateIdentity(ctx context.Context, paneID string, identity 
 		if pid, ok = foregroundPID(info); !ok {
 			return unverified("Herdr reported no foreground process", nil)
 		}
+	}
+	if resolver, ok := m.resolver.(processTTYResolver); ok {
+		tty, start, rdev, err := resolver.ttyIdentity(ctx, pid)
+		if err != nil {
+			return unverified("shell TTY", err)
+		}
+		if identity.processStart == 0 || identity.processPID != pid || identity.processStart != start || identity.rdev != rdev || identity.ttyPath != tty {
+			return gone("pane process or controlling terminal changed")
+		}
+		return nil
 	}
 	tty, err := m.resolver.TTYPath(ctx, pid)
 	if err != nil {

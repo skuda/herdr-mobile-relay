@@ -427,6 +427,17 @@ func (m *Manager) HistoryReadFence(paneID, terminalID string) HistoryFence {
 	return fence
 }
 
+// HistoryTerminalReplaced reports whether existing geometry has a terminal ID different from nonempty terminalID.
+func (m *Manager) HistoryTerminalReplaced(paneID, terminalID string) bool {
+	if m == nil || terminalID == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state := m.historyGeometry[paneID]
+	return state != nil && state.identity.terminalID != terminalID
+}
+
 func (m *Manager) HistoryReadUnsafe(paneID, terminalID string) bool {
 	if m == nil {
 		return false

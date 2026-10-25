@@ -91,6 +91,29 @@ func historyCountDelta(a, b [7]int32) [7]int32 {
 	}
 	return d
 }
+
+func TestHistoryTerminalReplacedUsesRetainedStateWithoutTTYWork(t *testing.T) {
+	f, parts := historyCountFixture(t, false)
+	before := parts.counts()
+	if (*Manager)(nil).HistoryTerminalReplaced("p", "terminal-p") || f.m.HistoryTerminalReplaced("p", "terminal-p") {
+		t.Error("absent manager or geometry reported a replacement")
+	}
+	if parts.counts() != before {
+		t.Error("absent-state query performed terminal work")
+	}
+	f.acquire("owner", "p", 60, 20)
+	before = parts.counts()
+	if f.m.HistoryTerminalReplaced("p", "terminal-p") || f.m.HistoryTerminalReplaced("p", "") {
+		t.Error("matching or empty terminal ID reported a replacement")
+	}
+	if !f.m.HistoryTerminalReplaced("p", "another-terminal") {
+		t.Error("different retained terminal ID did not report a replacement")
+	}
+	if parts.counts() != before {
+		t.Error("retained-state query performed terminal work")
+	}
+}
+
 func TestHistoryReadFenceTracksLeaseTargetChangesWithoutTTYWork(t *testing.T) {
 	for _, client := range []string{"owner", "second-client"} {
 		t.Run(client, func(t *testing.T) {

@@ -176,6 +176,56 @@ func TestBeginHistoryReadReplacementDuringPublicationCannotPreview(t *testing.T)
 	}
 }
 
+func TestPendingHistoryPinReplacementDuringContentCannotPreview(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux pin gate")
+	}
+	s, f, advance := captureServer(t, false)
+	g := &pendingHistoryReadGeometry{paneSizeFakes: f}
+	s.paneSizeM = panesize.NewManagerWith(g, g, g, s.historyNow, nil)
+	if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 60, 20); err != nil {
+		t.Fatal(err)
+	}
+	advance(4 * time.Second)
+	executeCapture(t, s, capturePage("archive A", "archive B", "current C", "current D"), true)
+	executeCapture(t, s, capturePage("current C", "current D"), true)
+	stored := s.historyM.Content("pane-1", 0)
+	borrow, err := s.paneSizeM.BeginHistoryRead(context.Background(), "pane-1", "terminal-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = borrow.Close() })
+	s.paneSizeM.ForgetHistoryPane("pane-1", "terminal-1")
+	pending, err := s.paneSizeM.BeginHistoryRead(context.Background(), "pane-1", "terminal-1")
+	if pending != nil {
+		_ = pending.Close()
+	}
+	if pending != nil || !errors.Is(err, panesize.ErrHistoryPinPending) {
+		t.Fatalf("fixture did not leave a pending history pin: %v", err)
+	}
+	raw := capturePage("replacement page")
+	result, err := s.executeHistoryRead(context.Background(), captureRequest(s, true), func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error) {
+		g.terminalID.Store("terminal-B")
+		if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 60, 20); !errors.Is(err, panesize.ErrTerminalGone) {
+			t.Fatalf("old lease did not reject the replacement: %v", err)
+		}
+		if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 60, 20); err != nil {
+			t.Fatal(err)
+		}
+		return herdr.PaneRead{Content: []byte(raw)}, nil
+	})
+	if err != nil || result.Capture.Admitted || result.Composed || result.Response["content"] != raw {
+		t.Errorf("pending-pin replacement attached an archive preview: capture=%+v composed=%v content=%q error=%v", result.Capture, result.Composed, result.Response["content"], err)
+	}
+	agent, _ := s.state.Agent("pane-1")
+	if agent.TerminalID != "terminal-1" || s.historyActive["pane-1"].terminalID != "terminal-1" {
+		t.Fatal("fixture changed coordinator or history-active identity")
+	}
+	if s.historyM.Content("pane-1", 0) != stored {
+		t.Error("pending-pin replacement changed stored history")
+	}
+}
+
 func TestBeginHistoryReadPendingPinKeepsPreview(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux pin gate")
@@ -204,7 +254,7 @@ func TestBeginHistoryReadPendingPinKeepsPreview(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = borrow.Close() })
 			result := executeCapture(t, s, capturePage("current C", "current D"), true)
-			if result.Capture.Admitted || !result.Composed || result.Response["resize_settling"] != true || !strings.Contains(result.Response["content"].(string), "archive A") {
+			if result.Capture.Admitted || !result.Composed || result.Response["resize_settling"] != true || result.Response["content"] != capturePage("archive A", "archive B", "current C", "current D") {
 				t.Errorf("transient Begin refusal lost preview/settling: %+v", result)
 			}
 			if s.historyM.Content("pane-1", 0) != stored {

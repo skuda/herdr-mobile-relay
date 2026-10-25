@@ -154,6 +154,10 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 	if handle == nil && (errors.Is(geometryErr, panesize.ErrTerminalGone) || errors.Is(geometryErr, panesize.ErrHistoryReadUnsafe)) {
 		terminalCurrent = false
 	}
+	if handle == nil && errors.Is(geometryErr, panesize.ErrHistoryPinPending) && s.paneSizeM != nil &&
+		s.paneSizeM.HistoryTerminalReplaced(request.PaneID, token.identity.terminalID) {
+		terminalCurrent = false
+	}
 	identityCurrent := terminalCurrent && s.state.Generation(request.PaneID) == token.identity.generation
 	physicalNow, revisionNow := s.physicalHistorySource(current)
 	if handle != nil {

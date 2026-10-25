@@ -657,6 +657,35 @@ func TestFlatHistoryFirstPhysicalBoundary(t *testing.T) {
 	}
 }
 
+func TestPhysicalPreviewUnknownColumnsKeepsArchiveWithoutRepeatingLiveBody(t *testing.T) {
+	for _, columns := range []int{0, -1} {
+		t.Run(fmt.Sprintf("columns=%d", columns), func(t *testing.T) {
+			m := NewManager(t.TempDir())
+			ctx := physicalContext(1, 60)
+			m.AdmitSnapshot("p", snapshotPage("archive A", "archive B", "current C", "current D"), ctx, 0)
+			m.AdmitSnapshot("p", snapshotPage("current C", "current D"), ctx, 0)
+			state := m.states["p"]
+			if state.LiveStart != 2 {
+				t.Fatalf("fixture archive prefix has %d rows, want 2", state.LiveStart)
+			}
+			state.Held = []HeldRecord{{Rows: []string{"held residue"}, Position: 0, Segment: 0, FirstSeenAt: m.now()}}
+			before := *state
+			before.History, before.Footer = slices.Clone(state.History), slices.Clone(state.Footer)
+			before.Held = cloneHeldRecords(state.Held)
+			before.zeroDisplacementReturn = clonePhysicalReturn(state.zeroDisplacementReturn)
+			ctx.Columns = columns
+			preview, ok := m.PreviewSnapshot("p", snapshotPage("current C", "current D"), ctx)
+			want := snapshotPage("archive A", "archive B", "current C", "current D")
+			if !ok || preview != want {
+				t.Errorf("unknown-column preview repeated the live body: composed=%v got=%q want=%q", ok, preview, want)
+			}
+			if !reflect.DeepEqual(before, *state) {
+				t.Error("unknown-column preview changed stored state")
+			}
+		})
+	}
+}
+
 func TestBoundaryPreviewEqualsAdmissionWithoutMutation(t *testing.T) {
 	m := NewManager(t.TempDir())
 	legacy := physicalContext(1, 150)

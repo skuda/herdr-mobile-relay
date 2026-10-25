@@ -320,6 +320,66 @@ func TestBoundaryWholeRewrappedPromptBlockAndAnswerMatch(t *testing.T) {
 	}
 }
 
+func TestBoundaryRowContextsTrackBlankAndPrompt(t *testing.T) {
+	rows := []string{"leading unknown", "---", "", "known prose", "  ❯ request", "wrapped continuation", "?", "", "more prose", "❯ next request"}
+	want := []boundaryContext{boundaryContextUnknown, boundaryContextUnknown, boundaryContextProse, boundaryContextProse, boundaryContextPrompt, boundaryContextPrompt, boundaryContextPrompt, boundaryContextProse, boundaryContextProse, boundaryContextPrompt}
+	if got := boundaryRowContexts(rows); !slices.Equal(got, want) {
+		t.Errorf("row contexts=%v, want %v", got, want)
+	}
+	work := boundaryWork{}
+	incoming, ok := boundaryIncoming(rows, &work)
+	if !ok || !slices.Equal(incoming.contexts, want) {
+		t.Fatalf("incoming context view=%v ok=%v", incoming.contexts, ok)
+	}
+	work = boundaryWork{}
+	archive, ok := boundaryArchive(append([]string{"earlier segment"}, rows...), 1, 10000, &work)
+	if !ok || archive.firstRow != 1 || !slices.Equal(archive.contexts, want) {
+		t.Errorf("archive context view first=%d contexts=%v ok=%v", archive.firstRow, archive.contexts, ok)
+	}
+}
+
+func TestBoundaryMatchedKnownPromptContextsMustAgree(t *testing.T) {
+	prompt := "❯ Describe the coastal lights."
+	old := append([]string{prompt, ""}, boundaryProse...)
+	incoming := append([]string{prompt}, boundaryProse...)
+	incoming = append(incoming, "", "A different response starts now.")
+	result := matchBoundarySuffix(old, 0, incoming)
+	if !result.refused || result.reason != boundaryIncomingPrompt {
+		t.Errorf("known answer-to-prompt match result=%+v, want incoming-prompt", result)
+	}
+	assertBoundaryCopyRetained(t, old, incoming)
+}
+
+func TestBoundaryIncomingUnknownPromptContinuationCanMatch(t *testing.T) {
+	old := append([]string{"❯ Explain how patient harbor keepers maintain bright lamps", "through long winter storms and guide the ships safely.", ""}, boundaryProse...)
+	incoming := slices.Clone(old[1:])
+	// The incoming continuation has UNKNOWN context, so the whole-row match keeps archive row 0 and cuts at 1.
+	result := matchBoundarySuffix(old, 0, incoming)
+	if result.refused || result.cut != 1 || result.rows != len(old)-1 || result.seam != 0 {
+		t.Errorf("unknown leading continuation changed: %+v", result)
+	}
+	m := NewManager(t.TempDir())
+	ctx := physicalContext(1, 150)
+	m.AdmitSnapshot("p", snapshotPage(old...), ctx, 0)
+	ctx.Columns = 62
+	got, _, d := m.AdmitSnapshot("p", snapshotPage(incoming...), ctx, 0)
+	if d.BoundaryRefused != 0 || d.BoundaryReconciledRows != len(old)-1 || m.states["p"].LiveStart != 1 || got != snapshotPage(old...) {
+		t.Errorf("unknown continuation lost the prompt row or raw page: %+v", d)
+	}
+}
+
+func TestBoundaryResidualUnrelatedPromptPrefixRefuses(t *testing.T) {
+	// Accepted refusal residual (class 1): an unrelated preceding prompt keeps the copy.
+	prompt := "❯ Describe the coastal lights."
+	old := append([]string{prompt, "", "---"}, boundaryProse...)
+	incoming := append([]string{"❯ An earlier unrelated request.", "", prompt, "", "---"}, boundaryProse...)
+	result := matchBoundarySuffix(old, 0, incoming)
+	if !result.refused || result.reason != boundaryIncomingPrompt {
+		t.Errorf("unrelated-prefix refusal changed: %+v", result)
+	}
+	assertBoundaryCopyRetained(t, old, incoming)
+}
+
 func TestBoundaryResidualPunctuationPromptContinuationRefuses(t *testing.T) {
 	// Accepted refusal residual: this punctuation-row prompt continuation refuses and keeps the copy.
 	prompt := "❯ Explain why patient harbor keepers maintain bright lamps now"

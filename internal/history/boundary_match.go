@@ -21,9 +21,18 @@ type boundaryToken struct {
 	text string
 	row  int
 }
+type boundaryContext uint8
+
+const (
+	boundaryContextUnknown boundaryContext = iota
+	boundaryContextProse
+	boundaryContextPrompt
+)
+
 type boundaryView struct {
 	rows     []string
 	tokens   []boundaryToken
+	contexts []boundaryContext
 	firstRow int
 }
 type boundaryWork struct {
@@ -157,6 +166,20 @@ func (work *boundaryWork) addTokens(row string, index int) ([]boundaryToken, boo
 	}
 	return tokens, true
 }
+func boundaryRowContexts(rows []string) []boundaryContext {
+	contexts := make([]boundaryContext, len(rows))
+	state := boundaryContextUnknown
+	for i, row := range rows {
+		if row == "" {
+			state = boundaryContextProse
+		} else if strings.HasPrefix(strings.TrimSpace(row), "❯") {
+			state = boundaryContextPrompt
+		}
+		contexts[i] = state
+	}
+	return contexts
+}
+
 func boundaryIncoming(rows []string, work *boundaryWork) (boundaryView, bool) {
 	view := boundaryView{}
 	for i, raw := range rows {
@@ -171,6 +194,7 @@ func boundaryIncoming(rows []string, work *boundaryWork) (boundaryView, bool) {
 		}
 		view.tokens = append(view.tokens, tokens...)
 	}
+	view.contexts = boundaryRowContexts(view.rows)
 	return view, true
 }
 func boundaryArchive(rows []string, floor int, limit int, work *boundaryWork) (boundaryView, bool) {
@@ -205,6 +229,7 @@ func boundaryArchive(rows []string, floor int, limit int, work *boundaryWork) (b
 	for i := len(reverse) - 1; i >= 0; i-- {
 		view.tokens = append(view.tokens, reverse[i]...)
 	}
+	view.contexts = boundaryRowContexts(view.rows)
 	return view, true
 }
 func boundaryUnsafeRow(row string) bool {
@@ -465,6 +490,14 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 		}
 		for k := range n {
 			if boundaryRowStartMarker(next, newStart+k) != boundaryRowStartMarker(old, start+k) {
+				result.reason = boundaryIncomingPrompt
+				return result
+			}
+		}
+		for k := range n {
+			archiveContext := old.contexts[old.tokens[start+k].row-old.firstRow]
+			incomingContext := next.contexts[next.tokens[newStart+k].row-next.firstRow]
+			if archiveContext != boundaryContextUnknown && incomingContext != boundaryContextUnknown && archiveContext != incomingContext {
 				result.reason = boundaryIncomingPrompt
 				return result
 			}

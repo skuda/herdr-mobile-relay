@@ -654,6 +654,16 @@ func TestBoundaryResidualRequestOutsideIncomingPageCanReconcile(t *testing.T) {
 	}
 }
 
+func TestBoundaryResidualIdenticalRepeatedRequestCanReconcile(t *testing.T) {
+	// Accepted residual: an identical request and answer below the floor match a re-render.
+	request := []string{"❯ Please give the same harbor answer again, word for word.", ""}
+	rows := append(slices.Clone(request), boundaryProse...)
+	result := matchBoundarySuffix(rows, len(request), slices.Clone(rows))
+	if result.refused || result.cut != len(request) || result.rows != 3 || result.seam != 0 {
+		t.Errorf("identical repeated request residual outcome changed: %+v", result)
+	}
+}
+
 func TestBoundarySplitLongWordAndPathAt62ColumnsRefuse(t *testing.T) {
 	for _, test := range []struct {
 		name, token string

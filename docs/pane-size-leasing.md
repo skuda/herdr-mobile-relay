@@ -408,8 +408,10 @@ client-side history merger is introduced.
 - **Boundary reconciliation residuals** — bounded inspection does not see a
   repeat wholly outside its comparison view. A repeated answer whose request
   is not on the incoming page can reconcile as a re-render and keep one stored
-  occurrence instead of two. Answer text not separated from a preceding `❯`
-  prompt row by a blank row is classified as prompt text.
+  occurrence instead of two. So can a request repeated with identical text and
+  an identical answer when the earlier copy is not on the incoming page. Answer
+  text not separated from a preceding `❯` prompt row by a blank row is
+  classified as prompt text.
 - **Value-equality restore heuristic** — see above.
 - **Desktop fights** — when the desktop resizes the pane while it is leased,
   the change becomes the new restore point and the lease is applied again at

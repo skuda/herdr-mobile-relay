@@ -351,10 +351,11 @@ type slowHistoryProvider struct {
 	*paneSizeFakes
 	entered chan struct{}
 	once    sync.Once
+	blocked atomic.Bool
 }
 
 func (p *slowHistoryProvider) PaneGet(ctx context.Context, paneID string) (*herdr.Pane, error) {
-	if paneID == "slow" {
+	if paneID == "slow" && p.blocked.Load() {
 		p.once.Do(func() { close(p.entered) })
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -371,6 +372,10 @@ func TestSlowHistoryGeometryDoesNotBlockOtherPaneScheduling(t *testing.T) {
 	s.syncHistoryPanes()
 	provider := &slowHistoryProvider{paneSizeFakes: f, entered: make(chan struct{})}
 	s.paneSizeM = panesize.NewManagerWith(provider, f, f, s.historyNow, nil)
+	if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "slow", 120, 40); err != nil {
+		t.Fatal(err)
+	}
+	provider.blocked.Store(true)
 	root := t.TempDir()
 	bin := filepath.Join(root, "herdr")
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf 'fast A\\nfast B'\n"), 0o700); err != nil {
@@ -1259,7 +1264,7 @@ func TestLeaseActivationAndRestoreAreSourceBoundaries(t *testing.T) {
 }
 
 func TestScrollbackLegacyHistoryMatchesAcrossPhoneLeaseCycle(t *testing.T) {
-	s, _, advance := captureServer(t, false)
+	s, g, advance := countingGeometryServer(t, false)
 	agent, _ := s.state.Agent("pane-1")
 	agent.ScrollMaxOffset = 10
 	s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
@@ -1270,7 +1275,9 @@ func TestScrollbackLegacyHistoryMatchesAcrossPhoneLeaseCycle(t *testing.T) {
 			t.Fatalf("%s selected physical history for a scrollback pane", stage)
 		}
 		page := capturePage(body...)
+		before := g.calls()
 		result := executeCapture(t, s, page, false)
+		assertNoHistoryGeometryCalls(t, g, before)
 		want := base.Merge("pane-1", page)
 		if !result.Capture.Admitted || result.Response["content"] != want || s.historyM.Content("pane-1", 0) != want {
 			t.Fatalf("%s: admitted=%v content=%q stored=%q, base Merge=%q", stage, result.Capture.Admitted,
@@ -1292,8 +1299,8 @@ func TestScrollbackLegacyHistoryMatchesAcrossPhoneLeaseCycle(t *testing.T) {
 	advance(4 * time.Second)
 	leased := check("after lease", "A", "B", "C", "D", "E")
 	if leased.Capture.Snapshot.LeaseRevision == before.Capture.Snapshot.LeaseRevision ||
-		leased.Capture.Snapshot.GeometryEpoch == before.Capture.Snapshot.GeometryEpoch {
-		t.Fatalf("lease did not change revision and epoch: before=%+v after=%+v", before.Capture.Snapshot, leased.Capture.Snapshot)
+		leased.Capture.Snapshot.GeometryEpoch != 0 || before.Capture.Snapshot.GeometryEpoch != 0 {
+		t.Fatalf("legacy lease revision or unsampled epoch: before=%+v after=%+v", before.Capture.Snapshot, leased.Capture.Snapshot)
 	}
 	if err := s.paneSizeM.Release(context.Background(), "owner", "pane-1", false); err != nil {
 		t.Fatal(err)
@@ -1308,37 +1315,45 @@ func TestScrollbackLegacyHistoryMatchesAcrossPhoneLeaseCycle(t *testing.T) {
 	}
 }
 
-func TestFailedLegacyGeometrySampleRetainsRestoreSettleFence(t *testing.T) {
-	s, f, advance := captureServer(t, true)
+func TestLegacyNoGeometrySampleRetainsRestoreSettleFence(t *testing.T) {
+	s, g, advance := countingGeometryServer(t, true)
 	executeCapture(t, s, capturePage("old A", "old B"), true)
-	_ = s.paneSizeM.Release(context.Background(), "owner", "pane-1", true)
-	f.mu.Lock()
-	f.size.Columns = 0
-	f.mu.Unlock()
-	if result := executeCapture(t, s, capturePage("settling A", "settling B"), false); result.Capture.Admitted {
-		t.Fatal("failed sample bypassed retained restore settling")
+	if err := s.paneSizeM.Release(context.Background(), "owner", "pane-1", true); err != nil {
+		t.Fatal(err)
 	}
+	g.mu.Lock()
+	g.paneSizeFakes.size.Columns = 0
+	g.mu.Unlock()
+	before := g.calls()
+	if result := executeCapture(t, s, capturePage("settling A", "settling B"), false); result.Capture.Admitted {
+		t.Fatal("legacy read bypassed retained restore settling")
+	}
+	assertNoHistoryGeometryCalls(t, g, before)
 	advance(4 * time.Second)
 	if result := executeCapture(t, s, capturePage("legacy A", "legacy B"), false); !result.Capture.Admitted {
-		t.Fatal("outside-settle legacy read required known geometry")
+		t.Fatal("outside-settle legacy read required geometry")
 	}
+	assertNoHistoryGeometryCalls(t, g, before)
 }
 
 func TestLegacyHistoryUnknownSampleKeepsEpoch(t *testing.T) {
-	s, f, _ := captureServer(t, false)
+	s, g, _ := countingGeometryServer(t, false)
 	page := capturePage("A", "B", "C")
+	before := g.calls()
+	first := executeCapture(t, s, page, false)
+	g.mu.Lock()
+	columns := g.paneSizeFakes.size.Columns
+	g.paneSizeFakes.size.Columns = 0
+	g.mu.Unlock()
 	executeCapture(t, s, page, false)
-	f.mu.Lock()
-	columns := f.size.Columns
-	f.size.Columns = 0
-	f.mu.Unlock()
-	executeCapture(t, s, page, false)
-	f.mu.Lock()
-	f.size.Columns = columns
-	f.mu.Unlock()
+	g.mu.Lock()
+	g.paneSizeFakes.size.Columns = columns
+	g.mu.Unlock()
 	result := executeCapture(t, s, page, false)
-	if got := s.historyM.Content("pane-1", 0); got != page || result.Response["content"] != page {
-		t.Fatalf("failed geometry sample duplicated legacy page: %q", got)
+	assertNoHistoryGeometryCalls(t, g, before)
+	if got := s.historyM.Content("pane-1", 0); got != page || result.Response["content"] != page ||
+		first.Capture.Snapshot.GeometryEpoch != 0 || result.Capture.Snapshot.GeometryEpoch != 0 {
+		t.Fatalf("unsampled geometry changed legacy page or epoch: content=%q snapshot=%+v", got, result.Capture.Snapshot)
 	}
 }
 
@@ -1358,13 +1373,15 @@ func TestScrollbackMetricGrowthDuringReadRemainsEligible(t *testing.T) {
 }
 
 func TestHistoryLegacyAdmissionWithUnknownGeometry(t *testing.T) {
-	s, f, _ := captureServer(t, false)
-	f.mu.Lock()
-	f.size.Columns = 0
-	f.mu.Unlock()
+	s, g, _ := countingGeometryServer(t, false)
+	g.mu.Lock()
+	g.paneSizeFakes.size.Columns = 0
+	g.mu.Unlock()
+	before := g.calls()
 	result := executeCapture(t, s, capturePage("legacy A", "legacy B"), false)
-	if !result.Capture.Admitted {
-		t.Fatal("legacy route imposed known-geometry eligibility")
+	assertNoHistoryGeometryCalls(t, g, before)
+	if !result.Capture.Admitted || result.Capture.Snapshot.Columns != 0 || result.Capture.Snapshot.Rows != 0 || result.Capture.Snapshot.GeometryEpoch != 0 {
+		t.Fatalf("legacy route imposed geometry eligibility or sampled geometry: %+v", result.Capture)
 	}
 }
 
@@ -1383,21 +1400,19 @@ func TestPaneWatchPublishesSettledHistoryWithUnchangedProbe(t *testing.T) {
 }
 
 func TestOtherRelayPTYResizeDoesNotEnablePhysicalSource(t *testing.T) {
-	s, f, advance := captureServer(t, false)
-	executeCapture(t, s, capturePage("old A", "old B"), false)
-	f.mu.Lock()
-	f.size.Columns = 80
-	f.mu.Unlock()
+	s, g, _ := countingGeometryServer(t, false)
+	before := g.calls()
+	executeCapture(t, s, capturePage("A", "B", "C"), false)
+	g.mu.Lock()
+	g.paneSizeFakes.size.Columns = 80
+	g.mu.Unlock()
 	if physical, _ := s.physicalHistorySource(captureRequest(s, false).Agent); physical {
 		t.Fatal("external resize enabled gate")
 	}
-	if result := executeCapture(t, s, capturePage("settling A", "settling B"), false); result.Capture.Admitted {
-		t.Fatal("external resize bypassed settling")
-	}
-	advance(4 * time.Second)
-	result := executeCapture(t, s, capturePage("new A", "new B"), false)
-	if !result.Capture.Admitted || result.Response["content"] != capturePage("old A", "old B", "new A", "new B") {
-		t.Fatalf("external resize composition = %+v", result)
+	result := executeCapture(t, s, capturePage("B", "C", "D"), false)
+	assertNoHistoryGeometryCalls(t, g, before)
+	if !result.Capture.Admitted || result.Response["resize_settling"] == true || result.Response["content"] != "A\nB\nC\nD\nf1\nf2\nf3\nf4\nf5\nf6" {
+		t.Fatalf("unsampled external resize changed baseline legacy composition: %+v", result)
 	}
 }
 
@@ -1786,12 +1801,12 @@ func (p *replacedHistoryProvider) PaneGet(_ context.Context, paneID string) (*he
 	return &herdr.Pane{ID: paneID, TerminalID: "terminal-2"}, nil
 }
 func TestHistoryIdentityErrorCannotAdmitOrPreview(t *testing.T) {
-	s, f, _ := captureServer(t, false)
-	executeCapture(t, s, capturePage("archive A", "archive B", "current A", "current B"), false)
-	executeCapture(t, s, capturePage("current A", "current B"), false)
+	s, f, _ := captureServer(t, true)
+	executeCapture(t, s, capturePage("archive A", "archive B", "current A", "current B"), true)
+	executeCapture(t, s, capturePage("current A", "current B"), true)
 	before := s.historyM.Content("pane-1", 0)
 	s.paneSizeM = panesize.NewManagerWith(&replacedHistoryProvider{f}, f, f, s.historyNow, nil)
-	result := executeCapture(t, s, capturePage("replacement A", "replacement B"), false)
+	result := executeCapture(t, s, capturePage("replacement A", "replacement B"), true)
 	if result.Capture.Admitted || result.Composed || result.Response["history_retry"] == true || s.historyM.Content("pane-1", 0) != before {
 		t.Fatalf("identity error admitted or previewed: admitted=%v composed=%v retry=%v", result.Capture.Admitted, result.Composed, result.Response["history_retry"])
 	}
@@ -1877,9 +1892,13 @@ func (p *delayedBudgetHistoryProvider) PaneGet(ctx context.Context, paneID strin
 	}
 }
 func TestBackgroundHistoryContentGetsIndependentBudget(t *testing.T) {
-	s, f, _ := captureServer(t, false)
+	s, f, advance := captureServer(t, false)
 	s.paneSizeM = panesize.NewManagerWith(&delayedBudgetHistoryProvider{f}, f, f, s.historyNow, nil)
-	request := captureRequest(s, false)
+	if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 60, 20); err != nil {
+		t.Fatal(err)
+	}
+	advance(4 * time.Second)
+	request := captureRequest(s, true)
 	request.Background = true
 	_, err := s.executeHistoryRead(context.Background(), request, func(ctx context.Context, _ coordinator.PaneReadRequest) (herdr.PaneRead, error) {
 		deadline, ok := ctx.Deadline()
@@ -1934,9 +1953,13 @@ func (p *boundedHistoryProvider) PaneGet(ctx context.Context, paneID string) (*h
 	return p.paneSizeFakes.PaneGet(ctx, paneID)
 }
 func TestClaudeGeometryValidationKeepsPaneSizeOperationBound(t *testing.T) {
-	s, f, _ := captureServer(t, false)
+	s, f, advance := captureServer(t, false)
 	s.paneSizeM = panesize.NewManagerWith(&boundedHistoryProvider{f, t}, f, f, s.historyNow, nil)
-	request := captureRequest(s, false)
+	if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 60, 20); err != nil {
+		t.Fatal(err)
+	}
+	advance(4 * time.Second)
+	request := captureRequest(s, true)
 	request.Background = true
 	_, err := s.executeHistoryRead(context.Background(), request, func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error) {
 		return herdr.PaneRead{Content: []byte(capturePage("A", "B"))}, nil

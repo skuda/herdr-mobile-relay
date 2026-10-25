@@ -64,6 +64,11 @@ func TestBackgroundHistoryUsesSchedulingTimeAndOneHandle(t *testing.T) {
 	s, f, advance := captureServer(t, false)
 	provider := &countingHistoryProvider{paneSizeFakes: f, after: func() { advance(time.Millisecond) }}
 	s.paneSizeM = panesize.NewManagerWith(provider, f, f, s.historyNow, nil)
+	if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 60, 20); err != nil {
+		t.Fatal(err)
+	}
+	advance(4 * time.Second)
+	provider.gets.Store(0)
 	var reads atomic.Int32
 	installPaneReadFixture(t, s, func(context.Context) (string, error) {
 		reads.Add(1)
@@ -80,7 +85,7 @@ func TestBackgroundHistoryUsesSchedulingTimeAndOneHandle(t *testing.T) {
 	if reads.Load() != 2 {
 		t.Fatalf("four-second opportunity skipped after validation delay: reads=%d", reads.Load())
 	}
-	if got := provider.gets.Load(); got != 3 {
-		t.Fatalf("background validation repeated: pane.get calls=%d want=3", got)
+	if got := provider.gets.Load(); got != 2 {
+		t.Fatalf("warm physical background validation repeated: pane.get calls=%d want=2", got)
 	}
 }

@@ -119,7 +119,7 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 	var handle *panesize.HistoryRead
 	var geometryErr error
 	captureShape := request.Format == "ansi" && (request.Physical || !request.Resized)
-	if captureShape && s.paneSizeM != nil && s.paneSizeM.Available() && agent.TerminalID != "" {
+	if request.Physical && captureShape && s.paneSizeM != nil && s.paneSizeM.Available() && agent.TerminalID != "" {
 		handle, geometryErr = s.paneSizeM.BeginHistoryRead(ctx, request.PaneID, agent.TerminalID)
 		if handle != nil {
 			defer handle.Close()

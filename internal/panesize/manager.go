@@ -939,8 +939,11 @@ func (m *Manager) validateIdentity(ctx context.Context, paneID string, identity 
 		if err != nil {
 			return unverified("shell TTY", err)
 		}
-		if identity.processStart == 0 || identity.processPID != pid || identity.processStart != start || identity.rdev != rdev || identity.ttyPath != tty {
-			return gone("pane process or controlling terminal changed")
+		if identity.processStart == 0 || identity.rdev != rdev || identity.ttyPath != tty {
+			return gone("pane controlling terminal changed")
+		}
+		if identity.shellPID > 0 && (identity.processPID != pid || identity.processStart != start) {
+			return gone("pane shell process changed")
 		}
 		return nil
 	}

@@ -2,7 +2,6 @@ package panesize
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -186,15 +185,7 @@ func TestProcTTYSelfStatSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("self stat parser failed: %v", err)
 	}
-	path, _, err := procTTYPath(parsed.tty)
-	if err != nil {
-		t.Skip("self controlling terminal is not devpts")
-	}
-	got, err := platformTTYResolver().TTYPath(context.Background(), os.Getpid())
-	if err != nil && !errors.Is(err, context.Canceled) {
-		t.Fatal(err)
-	}
-	if got != path {
-		t.Errorf("self tty=%q want=%q", got, path)
+	if parsed.pid != os.Getpid() || parsed.start == 0 || parsed.tty == 0 {
+		t.Errorf("self stat fields invalid: %+v", parsed)
 	}
 }

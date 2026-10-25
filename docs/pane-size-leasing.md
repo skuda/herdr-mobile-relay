@@ -422,13 +422,16 @@ capability or client-side history merger is introduced.
   in the scrollback. Resizing may also truncate scrollback and lose older
   output. It cannot be cleaned up afterwards.
 - **Boundary reconciliation residuals** — bounded inspection does not see a
-  repeat wholly outside its comparison view. A repeated answer whose request
-  is not on the incoming page can reconcile as a re-render and keep one stored
-  occurrence instead of two. So can a request repeated with identical text and
-  an identical answer when the earlier copy is not on the incoming page. Answer
-  text not separated from a preceding `❯` prompt row by a blank row is
-  classified as prompt text. Qoder boundaries are not reconciled; they keep
-  the boundary copy.
+  repeat wholly outside its comparison view. A cut removes only rows of the
+  departing segment, so incoming rows that repeat rows stored before that
+  segment are stored again; a desktop page after a short phone lease can
+  repeat rows from above the phone segment this way. A repeated answer whose
+  request is not on the incoming page can reconcile as a re-render and keep
+  one stored occurrence instead of two. So can a request repeated with
+  identical text and an identical answer when the earlier copy is not on the
+  incoming page. Answer text not separated from a preceding `❯` prompt row by
+  a blank row is classified as prompt text. Qoder boundaries are not
+  reconciled; they keep the boundary copy.
 - **Value-equality restore heuristic** — see above.
 - **Desktop fights** — when the desktop resizes the pane while it is leased,
   the change becomes the new restore point and the lease is applied again at

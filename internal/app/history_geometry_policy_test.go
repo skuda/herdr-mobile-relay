@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ type countingHistoryGeometry struct {
 	*paneSizeFakes
 	pane, process, resolver, open, device, size atomic.Int32
 	failSize                                    atomic.Bool
+	closes                                      atomic.Int32
 }
 
 func (g *countingHistoryGeometry) PaneGet(ctx context.Context, paneID string) (*herdr.Pane, error) {
@@ -50,6 +52,68 @@ func (g *countingHistoryGeometry) Size() (panesize.Winsize, error) {
 		return panesize.Winsize{}, errors.New("test size unavailable")
 	}
 	return g.paneSizeFakes.Size()
+}
+
+func (g *countingHistoryGeometry) Close() error {
+	g.closes.Add(1)
+	return nil
+}
+
+func TestPhysicalHistoryObservedEligibilityChangeRejectsAdmission(t *testing.T) {
+	for _, departure := range []string{"non-Claude", "absent"} {
+		t.Run(departure, func(t *testing.T) {
+			s, _, _ := countingGeometryServer(t, true)
+			request := captureRequest(s, true)
+			result, err := s.executeHistoryRead(context.Background(), request, func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error) {
+				if departure == "absent" {
+					s.state.CommitInventory(nil, s.state.RevisionCounter())
+				} else {
+					agent, _ := s.state.Agent("pane-1")
+					agent.Agent = "codex"
+					s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+				}
+				s.syncHistorySnapshot(s.state.InventorySnapshot())
+				return herdr.PaneRead{Content: []byte(capturePage("raw departure"))}, nil
+			})
+			if err != nil || result.Capture.Admitted {
+				t.Errorf("observed eligibility change admitted: capture=%+v error=%v", result.Capture, err)
+			}
+		})
+	}
+}
+
+func TestHistoryObservedDepartureRetiresPublishedPin(t *testing.T) {
+	for _, departure := range []string{"non-Claude", "absent", "non-Claude-during-settling"} {
+		t.Run(departure, func(t *testing.T) {
+			s, g, _ := countingGeometryServer(t, true)
+			if !executeCapture(t, s, capturePage("A", "B", "C"), true).Capture.Admitted {
+				t.Fatal("initial physical read refused")
+			}
+			if departure == "non-Claude-during-settling" {
+				if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 70, 20); err != nil {
+					t.Fatal(err)
+				}
+			}
+			closed := g.closes.Load()
+			agent, _ := s.state.Agent("pane-1")
+			if departure != "absent" {
+				agent.Agent = "codex"
+				s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+			} else {
+				s.state.CommitInventory(nil, s.state.RevisionCounter())
+			}
+			s.syncHistorySnapshot(s.state.InventorySnapshot())
+			if runtime.GOOS == "linux" && g.closes.Load() != closed+1 {
+				t.Error("observed departure did not close the published pin")
+			}
+			before := g.calls()
+			result := executeCapture(t, s, capturePage("raw departure"), false)
+			assertNoHistoryGeometryCalls(t, g, before)
+			if result.Capture.Admitted || result.Response["content"] != capturePage("raw departure") {
+				t.Error("departed agent read admitted history")
+			}
+		})
+	}
 }
 
 func (g *countingHistoryGeometry) calls() [6]int32 {

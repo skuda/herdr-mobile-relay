@@ -192,20 +192,26 @@ func (s *paneState) tryAcquire() bool {
 func (s *paneState) release() { <-s.lock }
 
 type Manager struct {
-	mu              sync.Mutex
-	provider        Provider
-	resolver        TTYResolver
-	ops             TerminalOps
-	available       bool
-	opTimeout       time.Duration
-	ttl             time.Duration
-	grace           time.Duration
-	now             func() time.Time
-	logger          *slog.Logger
-	panes           map[string]*paneState
-	historyGeometry map[string]*historyGeometryState
-	historyRevision uint64
-	closed          bool
+	mu                sync.Mutex
+	provider          Provider
+	resolver          TTYResolver
+	ops               TerminalOps
+	available         bool
+	opTimeout         time.Duration
+	ttl               time.Duration
+	grace             time.Duration
+	now               func() time.Time
+	logger            *slog.Logger
+	panes             map[string]*paneState
+	historyGeometry   map[string]*historyGeometryState
+	historyRevision   uint64
+	disableHistoryPin bool
+	historyPins       map[*historyPin]bool
+	historyClosing    []*historyPin
+	historyChanged    chan struct{}
+	historyReads      map[*HistoryRead]context.CancelFunc
+	historyResolving  map[chan struct{}]context.CancelFunc
+	closed            bool
 }
 
 // NewManager returns the production manager: fresh Herdr lookups through
@@ -242,17 +248,21 @@ func newManager(
 		logger = slog.Default()
 	}
 	return &Manager{
-		provider:        provider,
-		resolver:        resolver,
-		ops:             ops,
-		available:       true,
-		opTimeout:       operationTimeout,
-		ttl:             ttl,
-		grace:           grace,
-		now:             now,
-		logger:          logger,
-		panes:           make(map[string]*paneState),
-		historyGeometry: make(map[string]*historyGeometryState),
+		provider:         provider,
+		resolver:         resolver,
+		ops:              ops,
+		available:        true,
+		opTimeout:        operationTimeout,
+		ttl:              ttl,
+		grace:            grace,
+		now:              now,
+		logger:           logger,
+		panes:            make(map[string]*paneState),
+		historyGeometry:  make(map[string]*historyGeometryState),
+		historyPins:      make(map[*historyPin]bool),
+		historyChanged:   make(chan struct{}),
+		historyReads:     make(map[*HistoryRead]context.CancelFunc),
+		historyResolving: make(map[chan struct{}]context.CancelFunc),
 	}
 }
 
@@ -310,6 +320,12 @@ func (m *Manager) Acquire(
 	if created {
 		identity, err = m.lookupIdentity(opCtx, paneID)
 		if err != nil {
+			m.mu.Lock()
+			if history := m.historyGeometry[paneID]; history != nil {
+				m.historyUnknownLocked(paneID, history.identity.terminalID)
+			}
+			m.mu.Unlock()
+			_ = m.closeRetiredHistoryPins()
 			forget()
 			return 0, 0, err
 		}
@@ -501,6 +517,7 @@ func (m *Manager) ReleaseClient(ctx context.Context, clientID string) error {
 // goroutine with its own timeout; a pane busy with another operation is left
 // for the next sweep.
 func (m *Manager) SweepExpired(ctx context.Context) {
+	defer m.closeRetiredHistoryPins()
 	type work struct {
 		paneID     string
 		state      *paneState
@@ -515,6 +532,10 @@ func (m *Manager) SweepExpired(ctx context.Context) {
 	}
 	now := m.now()
 	for paneID, state := range m.historyGeometry {
+		leased, _ := m.leaseHistoryStateLocked(paneID, state.identity.terminalID)
+		if !leased && !historyIntervalUnsafe(state.geometry, now) {
+			m.retireHistoryPinLocked(state)
+		}
 		if state.forgotten && !historyIntervalUnsafe(state.geometry, now) {
 			delete(m.historyGeometry, paneID)
 		}
@@ -583,6 +604,15 @@ func (m *Manager) Run(ctx context.Context) {
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
 	m.closed = true
+	for _, state := range m.historyGeometry {
+		m.retireHistoryPinLocked(state)
+	}
+	for _, cancel := range m.historyReads {
+		cancel()
+	}
+	for _, cancel := range m.historyResolving {
+		cancel()
+	}
 	panes := make(map[string]*paneState, len(m.panes))
 	for paneID, state := range m.panes {
 		panes[paneID] = state
@@ -606,6 +636,23 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		}()
 	}
 	wg.Wait()
+	_ = m.closeRetiredHistoryPins()
+historyDrain:
+	for {
+		m.mu.Lock()
+		pending := len(m.historyPins) + len(m.historyReads) + len(m.historyResolving)
+		changed := m.historyChanged
+		m.mu.Unlock()
+		if pending == 0 {
+			break
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			unresolved = append(unresolved, "history descriptors (shutdown deadline: "+ctx.Err().Error()+")")
+			break historyDrain
+		}
+	}
 	if len(unresolved) == 0 {
 		return nil
 	}
@@ -791,7 +838,17 @@ func (m *Manager) lookupIdentity(ctx context.Context, paneID string) (terminalId
 //
 // With capture (acquisition), the device number is recorded instead of
 // compared.
-func (m *Manager) openValidated(ctx context.Context, paneID string, identity *terminalIdentity, capture bool) (Terminal, error) {
+func (m *Manager) openValidated(ctx context.Context, paneID string, identity *terminalIdentity, capture bool) (result Terminal, resultErr error) {
+	defer func() {
+		m.mu.Lock()
+		if state := m.historyGeometry[paneID]; state != nil && state.identity.terminalID == identity.terminalID {
+			if resultErr != nil || capture && state.pin != nil && state.identity != *identity {
+				m.historyUnknownLocked(paneID, identity.terminalID)
+			}
+		}
+		m.mu.Unlock()
+		_ = m.closeRetiredHistoryPins()
+	}()
 	terminal, err := m.ops.Open(identity.ttyPath)
 	if err != nil {
 		if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENXIO) {

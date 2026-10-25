@@ -31,10 +31,13 @@ type HistoryGeometry struct {
 }
 
 type historyGeometryState struct {
-	identity  terminalIdentity
-	geometry  HistoryGeometry
-	baseline  bool
-	forgotten bool
+	identity   terminalIdentity
+	geometry   HistoryGeometry
+	baseline   bool
+	forgotten  bool
+	pin        *historyPin
+	resolving  chan struct{}
+	forceFresh bool
 }
 
 // HistoryRead holds a validated descriptor until Finish, Close, or cancellation.
@@ -43,11 +46,13 @@ type HistoryRead struct {
 	manager  *Manager
 	ctx      context.Context
 	terminal Terminal
+	pin      *historyPin
 	state    *historyGeometryState
 	start    HistoryGeometry
 	started  time.Time
 	unsafe   bool
 	stop     func() bool
+	cancel   context.CancelFunc
 	done     bool
 	result   HistoryGeometry
 	err      error
@@ -85,6 +90,7 @@ func (m *Manager) historyStateLocked(paneID string, identity terminalIdentity) *
 		state.forgotten = false
 		return state
 	}
+	m.retireHistoryPinLocked(state)
 	state = &historyGeometryState{
 		identity: identity,
 		geometry: HistoryGeometry{PaneID: paneID, TerminalID: identity.terminalID, Revision: m.nextHistoryRevisionLocked()},
@@ -118,6 +124,8 @@ func (m *Manager) historyUnknownLocked(paneID, terminalID string) {
 	if state == nil || state.identity.terminalID != terminalID {
 		return
 	}
+	m.retireHistoryPinLocked(state)
+	state.forceFresh = true
 	state.geometry.Known = false
 	state.geometry.Revision = m.nextHistoryRevisionLocked()
 }
@@ -126,6 +134,7 @@ func (m *Manager) historyUnknown(paneID, terminalID string) {
 	m.mu.Lock()
 	m.historyUnknownLocked(paneID, terminalID)
 	m.mu.Unlock()
+	_ = m.closeRetiredHistoryPins()
 }
 
 func (m *Manager) historyLeaseChangedLocked(paneID string, identity terminalIdentity) {
@@ -134,6 +143,7 @@ func (m *Manager) historyLeaseChangedLocked(paneID string, identity terminalIden
 }
 
 func (m *Manager) setHistorySize(paneID string, identity terminalIdentity, terminal Terminal, current Winsize, want size) error {
+	defer m.closeRetiredHistoryPins()
 	m.mu.Lock()
 	state := m.historyGeometry[paneID]
 	if state == nil || state.identity != identity {
@@ -161,7 +171,7 @@ func (m *Manager) setHistorySize(paneID string, identity terminalIdentity, termi
 	state.geometry.InProgress = false
 	state.geometry.Revision = m.nextHistoryRevisionLocked()
 	if err != nil {
-		state.geometry.Known = false
+		m.historyUnknownLocked(paneID, identity.terminalID)
 		return err
 	}
 	state.geometry.Columns, state.geometry.Rows = previousSize.columns, previousSize.rows
@@ -173,11 +183,40 @@ func (m *Manager) BeginHistoryRead(ctx context.Context, paneID, terminalID strin
 	if !m.Available() {
 		return nil, ErrUnavailable
 	}
+	defer m.closeRetiredHistoryPins()
 	if paneID == "" || terminalID == "" {
 		return nil, ErrIdentityUnavailable
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if platformHistoryPin && !m.disableHistoryPin {
+		m.mu.Lock()
+		leased, _ := m.leaseHistoryStateLocked(paneID, terminalID)
+		state := m.historyGeometry[paneID]
+		settling := state != nil && state.identity.terminalID == terminalID && historyIntervalUnsafe(state.geometry, m.now())
+		if !leased && !settling {
+			m.retireHistoryPinLocked(state)
+		}
+		m.mu.Unlock()
+		_ = m.closeRetiredHistoryPins()
+		if !leased && !settling {
+			m.mu.Lock()
+			blocked := false
+			for pin := range m.historyPins {
+				if pin.paneID == paneID {
+					blocked = true
+					break
+				}
+			}
+			m.mu.Unlock()
+			if blocked {
+				return nil, ErrHistoryReadUnsafe
+			}
+		}
+		if leased || settling {
+			return m.beginPinnedHistoryRead(ctx, paneID, terminalID)
+		}
 	}
 	m.mu.Lock()
 	if m.closed {
@@ -191,11 +230,12 @@ func (m *Manager) BeginHistoryRead(ctx context.Context, paneID, terminalID strin
 	} else {
 		cached = nil
 	}
+	forceFresh := cached != nil && cached.forceFresh
 	m.mu.Unlock()
 
 	opCtx, cancel := context.WithTimeout(ctx, m.opTimeout)
 	defer cancel()
-	capture := identity.terminalID == ""
+	capture := identity.terminalID == "" || forceFresh
 	var err error
 	if capture {
 		identity, err = m.lookupIdentity(opCtx, paneID)
@@ -242,6 +282,7 @@ func (m *Manager) BeginHistoryRead(ctx context.Context, paneID, terminalID strin
 		return nil, ErrHistoryReadUnsafe
 	}
 	state := m.historyStateLocked(paneID, identity)
+	state.forceFresh = false
 	revision := state.geometry.Revision
 	m.mu.Unlock()
 	current, err := terminal.Size()
@@ -300,7 +341,7 @@ func (r *HistoryRead) Finish() (HistoryGeometry, error) {
 	current, err := r.terminal.Size()
 	m.mu.Lock()
 	geometry := r.state.geometry
-	unsafe := r.unsafe || m.closed || m.historyGeometry[r.start.PaneID] != r.state ||
+	unsafe := r.unsafe || m.closed || r.pin != nil && r.pin.retired || m.historyGeometry[r.start.PaneID] != r.state ||
 		revision != geometry.Revision || geometry.InProgress
 	if err != nil || current.Columns == 0 || current.Rows == 0 {
 		if m.historyGeometry[r.start.PaneID] == r.state {
@@ -330,8 +371,20 @@ func (r *HistoryRead) completeLocked(geometry HistoryGeometry, err error) {
 	if r.stop != nil {
 		r.stop()
 	}
-	closeErr := r.terminal.Close()
+	if r.cancel != nil {
+		r.cancel()
+	}
+	var closeErr error
+	if r.pin != nil {
+		closeErr = r.manager.releaseHistoryPin(r.pin)
+	} else {
+		closeErr = r.terminal.Close()
+	}
 	r.result, r.err, r.done = geometry, errors.Join(err, closeErr), true
+	r.manager.mu.Lock()
+	delete(r.manager.historyReads, r)
+	r.manager.notifyHistoryLocked()
+	r.manager.mu.Unlock()
 }
 
 func (r *HistoryRead) Close() error {
@@ -360,9 +413,12 @@ func (m *Manager) HistoryReadUnsafe(paneID, terminalID string) bool {
 }
 
 func (m *Manager) ForgetHistoryPane(paneID, terminalID string) {
+	defer m.closeRetiredHistoryPins()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if state := m.historyGeometry[paneID]; state != nil && terminalID != "" && state.identity.terminalID == terminalID {
+		m.retireHistoryPinLocked(state)
+		state.geometry.Revision = m.nextHistoryRevisionLocked()
 		if historyIntervalUnsafe(state.geometry, m.now()) {
 			state.forgotten = true
 			state.geometry.Revision = m.nextHistoryRevisionLocked()

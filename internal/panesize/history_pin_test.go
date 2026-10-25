@@ -530,6 +530,106 @@ func TestHistoryPinQuietExpiryAndShutdownBorrowRelease(t *testing.T) {
 	}
 }
 
+type historyCloseActionTerminal struct {
+	Terminal
+	onClose func()
+}
+
+func (t historyCloseActionTerminal) Close() error {
+	t.onClose()
+	return t.Terminal.Close()
+}
+
+func TestHistoryReadGateOffRejectsReplacementDuringCloseDrain(t *testing.T) {
+	if !platformHistoryPin {
+		t.Skip("manager pin platform")
+	}
+	f, parts := historyCountFixture(t, true)
+	borrow := historyRead(t, f, "p")
+	if err := f.m.Release(context.Background(), "owner", "p", true); err != nil {
+		t.Fatal(err)
+	}
+	f.clock.Advance(HistorySettleWindow + time.Second)
+	f.addPane("other", 200, "/dev/pts/2", 2)
+	f.acquire("owner", "other", 60, 20)
+	f.clock.Advance(HistorySettleWindow + time.Second)
+	finishSafe(t, historyRead(t, f, "other"))
+	replacements := 0
+	f.m.mu.Lock()
+	f.m.retireHistoryPinLocked(f.m.historyGeometry["p"])
+	other := f.m.historyGeometry["other"]
+	other.pin.terminal = historyCloseActionTerminal{Terminal: other.pin.terminal, onClose: func() {
+		f.m.mu.Lock()
+		defer f.m.mu.Unlock()
+		identity := f.m.historyGeometry["p"].identity
+		identity.terminalID = "terminal-B"
+		f.m.historyStateLocked("p", identity)
+		replacements++
+	}}
+	f.m.retireHistoryPinLocked(other)
+	f.m.mu.Unlock()
+	read, err := f.m.BeginHistoryRead(context.Background(), "p", "terminal-p")
+	if read != nil {
+		_ = read.Close()
+	}
+	if replacements != 1 {
+		t.Fatalf("close queue did not replace the geometry once: %d", replacements)
+	}
+	if read != nil || !errors.Is(err, ErrTerminalGone) || errors.Is(err, ErrHistoryPinPending) {
+		t.Errorf("gate-off read treated replacement during close drain as pending: read=%v error=%v", read != nil, err)
+	}
+	_ = borrow.Close()
+	if parts.opens.Load() != parts.closes.Load() {
+		t.Errorf("replacement close drain leaked descriptors: %v", parts.counts())
+	}
+}
+
+type historyPublicationResolver struct {
+	TTYResolver
+	calls           int
+	afterValidation func()
+}
+
+func (r *historyPublicationResolver) TTYPath(ctx context.Context, pid int) (string, error) {
+	path, err := r.TTYResolver.TTYPath(ctx, pid)
+	r.calls++
+	if r.calls == 2 && err == nil {
+		r.afterValidation()
+	}
+	return path, err
+}
+
+func TestHistoryPinColdPublicationRejectsReplacementGeometry(t *testing.T) {
+	if !platformHistoryPin {
+		t.Skip("manager pin platform")
+	}
+	f, parts := historyCountFixture(t, true)
+	replaced := false
+	f.m.resolver = &historyPublicationResolver{TTYResolver: parts, afterValidation: func() {
+		f.herdr.update("p", func(pane *fakePane) { pane.terminalID = "terminal-B" })
+		if _, _, err := f.m.Acquire(context.Background(), "owner", "p", 60, 20); !errors.Is(err, ErrTerminalGone) {
+			t.Fatalf("old lease did not reject the replacement: %v", err)
+		}
+		f.acquire("owner", "p", 60, 20)
+		replaced = true
+	}}
+	read, err := f.m.BeginHistoryRead(context.Background(), "p", "terminal-p")
+	if read != nil {
+		_ = read.Close()
+	}
+	if !replaced || read != nil || !errors.Is(err, ErrTerminalGone) || errors.Is(err, ErrHistoryPinPending) {
+		t.Errorf("replacement geometry did not reject the cold read as terminal gone: read=%v error=%v replaced=%v", read != nil, err, replaced)
+	}
+	f.m.mu.Lock()
+	current := f.m.historyGeometry["p"]
+	currentTerminal := current.identity.terminalID
+	pending := len(f.m.historyResolving)
+	f.m.mu.Unlock()
+	if currentTerminal != "terminal-B" || pending != 0 || parts.opens.Load() != parts.closes.Load() {
+		t.Errorf("cold replacement cleanup changed current geometry or leaked work: terminal=%s pending=%d counts=%v", currentTerminal, pending, parts.counts())
+	}
+}
+
 func TestHistoryPinColdPublicationRefusesObsoleteResolution(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux pin gate")

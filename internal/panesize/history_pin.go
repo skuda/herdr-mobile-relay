@@ -145,6 +145,9 @@ func (m *Manager) beginPinnedHistoryRead(ctx context.Context, paneID, terminalID
 			close(wait)
 		}
 		if err != nil || obsolete {
+			if current := m.historyGeometry[paneID]; err == nil && current != nil && current.identity.terminalID != terminalID {
+				err = gone("history terminal was replaced")
+			}
 			if m.historyGeometry[paneID] == state {
 				m.historyUnknownLocked(paneID, terminalID)
 				state.forceFresh = true

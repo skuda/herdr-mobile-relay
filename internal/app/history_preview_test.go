@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"strings"
 	"sync"
@@ -106,8 +107,9 @@ func TestRejectedHistoryReadComposesWithoutAdmission(t *testing.T) {
 
 type pendingHistoryReadGeometry struct {
 	*paneSizeFakes
-	beforeOpen func()
-	terminalID atomic.Value
+	beforeOpen   func()
+	afterTTYPath func()
+	terminalID   atomic.Value
 }
 
 func (g *pendingHistoryReadGeometry) Open(string) (panesize.Terminal, error) {
@@ -123,6 +125,55 @@ func (g *pendingHistoryReadGeometry) PaneGet(ctx context.Context, id string) (*h
 		p.TerminalID = v.(string)
 	}
 	return p, err
+}
+
+func (g *pendingHistoryReadGeometry) TTYPath(ctx context.Context, pid int) (string, error) {
+	path, err := g.paneSizeFakes.TTYPath(ctx, pid)
+	if g.afterTTYPath != nil {
+		g.afterTTYPath()
+	}
+	return path, err
+}
+
+func TestBeginHistoryReadReplacementDuringPublicationCannotPreview(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux pin gate")
+	}
+	s, f, advance := captureServer(t, false)
+	g := &pendingHistoryReadGeometry{paneSizeFakes: f}
+	s.paneSizeM = panesize.NewManagerWith(g, g, g, s.historyNow, nil)
+	if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 60, 20); err != nil {
+		t.Fatal(err)
+	}
+	advance(4 * time.Second)
+	executeCapture(t, s, capturePage("archive A", "archive B", "current C", "current D"), true)
+	executeCapture(t, s, capturePage("current C", "current D"), true)
+	stored := s.historyM.Content("pane-1", 0)
+	s.paneSizeM.ForgetHistoryPane("pane-1", "terminal-1")
+	calls := 0
+	replaced := false
+	g.afterTTYPath = func() {
+		calls++
+		if calls != 2 {
+			return
+		}
+		g.terminalID.Store("terminal-B")
+		if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 60, 20); !errors.Is(err, panesize.ErrTerminalGone) {
+			t.Fatalf("old lease did not reject the replacement: %v", err)
+		}
+		if _, _, err := s.paneSizeM.Acquire(context.Background(), "owner", "pane-1", 60, 20); err != nil {
+			t.Fatal(err)
+		}
+		replaced = true
+	}
+	raw := capturePage("replacement page")
+	result := executeCapture(t, s, raw, true)
+	if !replaced || result.Capture.Admitted || result.Composed || result.Response["content"] != raw || result.Response["resize_settling"] == true || result.Response["history_retry"] == true {
+		t.Errorf("replacement cold publication attached an archive preview: capture=%+v composed=%v response=%+v replaced=%v", result.Capture, result.Composed, result.Response, replaced)
+	}
+	if s.historyM.Content("pane-1", 0) != stored {
+		t.Error("rejected replacement changed stored history")
+	}
 }
 
 func TestBeginHistoryReadPendingPinKeepsPreview(t *testing.T) {

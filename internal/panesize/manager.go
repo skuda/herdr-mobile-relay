@@ -839,11 +839,11 @@ func (m *Manager) lookupIdentity(ctx context.Context, paneID string) (terminalId
 
 // openValidated is the mutation boundary. It (a) opens the cached TTY path
 // read-only without becoming its controlling process, (b) checks with fstat
-// that the held descriptor is a character device with the recorded device
-// number, and only then (c) re-validates the pane with fresh lookups: the same
-// Herdr terminal_id, the same shell pid, and that pid's TTY is still the
-// cached path. Mutation callers close the descriptor after their ioctls;
-// history reads can retain it in a manager-owned pin.
+// that the held descriptor is a character device, and only then (c)
+// re-validates the pane with fresh lookups: the same Herdr terminal_id, the
+// same shell pid, and that pid's TTY is still the cached path. Mutation
+// callers close the descriptor after their ioctls; history reads can retain it
+// in a manager-owned pin.
 //
 // The order is the point. A pseudo-terminal is not returned to the allocator
 // while any descriptor on it is open: Linux frees a devpts index only when the

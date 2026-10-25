@@ -207,9 +207,11 @@ func (m *Manager) BeginHistoryRead(ctx context.Context, paneID, terminalID strin
 		if !leased && !settling {
 			m.mu.Lock()
 			blocked := m.paneHistoryPinnedLocked(paneID)
+			current := m.historyGeometry[paneID]
+			replaced := current != nil && current.identity.terminalID != terminalID
 			m.mu.Unlock()
 			if blocked {
-				if !matching && state != nil {
+				if !matching && state != nil || replaced {
 					return nil, gone("history terminal was replaced")
 				}
 				return nil, ErrHistoryPinPending

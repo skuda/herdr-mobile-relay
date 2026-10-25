@@ -12,12 +12,16 @@ project follows [Semantic Versioning](https://semver.org/).
   clients. Keep the current footer fresh, queue trailing captures, and save
   dirty admitted history after output stops. Sampling gaps, resize settling,
   footer/slot/tail replacement, invisible held rows, and retention limits can
-  still omit displayed text. Source changes start segments for each pane.
-  Lease changes, observed PTY changes, and relay restarts start segments for
-  physical and known-zero no-scrollback
-  contexts. These boundaries can repeat a page. Panes with scrollback keep
-  legacy matching across leases, PTY resizes, and relay restarts. Physical
-  matching retires supported rows in old-coordinate order and preserves the
+  still omit displayed text. Legacy matching continues across leases, PTY
+  resizes, and relay restarts, including known-zero panes and valid v0.22.10
+  saves. Physical matching continues at equal known columns across restart,
+  reacquisition, and height changes. Source changes and changed or unknown
+  physical columns start boundaries. Bounded word agreement can remove a
+  proved whole-row archive suffix; a partial seam keeps one overlapping row,
+  and refusal retains the boundary copy. One substantive-row reverse and a
+  generation-bound cleared-slot return can retract supported recent copies;
+  this does not deduplicate stored history globally. Physical matching retires
+  supported rows in old-coordinate order and preserves the
   raw current page before reader-row limits and response clipping. Supported
   slots or tails of one to three physical rows
   can change in place when the new slot is at least as large; their old values
@@ -29,7 +33,15 @@ project follows [Semantic Versioning](https://semver.org/).
   trigger a freeze. Here H counts held old nonblank rows and N counts old
   nonblank rows, including explained matched, replaced, and retired rows.
   Fast scroll retirement is not a freeze trigger. Per-pane minute counters and
-  freeze logs report retention outcomes without page text.
+  freeze logs report retention outcomes without page text. Boundary counters
+  include reconciled rows, refused cuts, and retained seams. Legacy reads skip
+  read-time TTY geometry work. Linux physical reads borrow a manager-owned
+  descriptor during the lease or restore interval. Linux resolves controlling
+  TTYs through procfs, and writes keep fresh validation. Darwin keeps read-owned
+  descriptors and its `ps` resolver.
+  Same-terminal-ID respawn can leave a Linux read pin stale until an
+  invalidation signal. A retired pin with a blocked borrower keeps later
+  physical captures refused. Storage stays at `snapshot_version=1`.
 - Clip oldest response rows so a single composed frame no longer exceeds the
   per-message limit. This includes large unleased history responses; fitting
   content stays unchanged, and a response with no fitting row succeeds with

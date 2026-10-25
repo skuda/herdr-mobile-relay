@@ -69,14 +69,23 @@ At acquisition the relay captures a terminal identity:
 1. pane ID;
 2. Herdr's `terminal_id` from a fresh `pane.get` socket call (the agent
    inventory does not cover plain shell panes);
-3. `shell_pid` from a fresh `pane.process_info` socket call; only when Herdr
-   reports no shell is the foreground process-group leader used instead;
-4. that process's TTY path, from `ps -o tty= -p <pid>` (validated to stay
-   under `/dev`);
+3. `shell_pid` from a fresh `pane.process_info` socket call; when Herdr reports
+   no shell, `foregroundPID` selects the foreground group leader or a reported
+   foreground process;
+4. that process's controlling TTY path: Linux reads `tty_nr` and `starttime`
+   from `/proc/<pid>/stat`; Darwin uses `ps -o tty= -p <pid>`;
 5. the device number (`st_rdev`) from `fstat` of the opened TTY.
 
-A missing `terminal_id`, shell or TTY rejects the acquisition with a clear
-error and no write.
+Linux's procfs resolver checks process birth and controlling-TTY identity
+before and after inspecting the candidate `/dev/pts/<minor>` device. The
+candidate must be a character device with the decoded device number. Shell
+validation compares the recorded PID and start time. When Herdr reports no
+shell, validation resolves the current foreground leader and checks its TTY
+path and device instead; foreground-process turnover on that terminal is
+permitted. These process fingerprints stay in memory.
+
+A missing `terminal_id`, unavailable shell/foreground identity, or unavailable
+TTY rejects acquisition before a size write.
 
 Every mutation (acquisition, renewal, reconcile, restore, shutdown restore)
 then follows the same sequence, implemented once in `openValidated`:
@@ -84,9 +93,10 @@ then follows the same sequence, implemented once in `openValidated`:
 1. open the cached TTY path with `O_RDONLY|O_NOCTTY|O_NONBLOCK|O_CLOEXEC`;
 2. `fstat` the held descriptor: it must be a character device with the
    recorded device number;
-3. **then** re-validate freshly: `pane.get` reports the same `terminal_id`,
-   `pane.process_info` the same `shell_pid`, and that pid's TTY is still the
-   cached path;
+3. **then** re-validate freshly: `pane.get` reports the same `terminal_id`;
+   `pane.process_info` retains the recorded shell identity, or still reports no
+   shell for the foreground fallback; the selected process's controlling TTY
+   must match the cached path and device evidence;
 4. read and write the window size with ioctls on the held descriptor;
 5. close it.
 
@@ -104,16 +114,18 @@ exactly that window. The device number alone cannot detect reuse (a reused
 index has the same device number); it catches a different device appearing at
 the path.
 
-`TestHeldSlaveDescriptorPinsPTYName` checks the pinning empirically with real
-PTYs: on macOS a held `/dev/ttysNNN` was not handed to any of eight new PTYs
-and was reused by the very next allocation after it was closed. The same test
-runs on Linux, where it has not yet been executed for this change.
+`TestHeldSlaveDescriptorPinsPTYName` exercises device-instance pinning with
+real PTYs. The Linux native `TestHeldSlaveSizeAfterMasterClose` also checks
+that Size fails on a held slave after its master closes. That hangup test has
+not run on Darwin for this change; Darwin history reads retain read-owned
+descriptors rather than enabling the shared read pin.
 
 **Outcomes.** A confirmed change (`pane_not_found`, different `terminal_id`,
 `shell_pid` or TTY, different or non-character device, `ENOENT`/`ENXIO` on
 open) drops the pane's lease state and any pending cleanup with no write and
-one info log. Anything else (socket or `ps` failures, timeouts, ioctl errors)
-is unknown: nothing is written, and only a cleanup retries, within its budget.
+one info log. Socket, procfs or `ps` failures, timeouts, and ioctl errors can
+leave identity or geometry unverified. The failed operation writes no size;
+pending cleanup retries within its budget.
 
 ## Cleanup budget
 
@@ -171,8 +183,10 @@ pane can satisfy this heuristic.
 `LeaseHistoryState` includes resolved lease state, navigation grace, expired
 leases awaiting cleanup, and pending restore work. The gate ends when cleanup
 drops that state. A lease owned by another relay does not enable this relay's
-physical source. Its observed PTY-size changes can still create a geometry
-boundary and a settling pause.
+physical source. Unleased legacy reads perform no TTY open, Size sample,
+resolver call, or geometry identity lookup. They do not observe another
+relay's PTY-size changes. This relay's restore settling remains fenced through
+in-memory geometry state.
 
 While the gate and heuristic qualify, display, background, and completion
 fallback captures request ANSI `recent` with `PhysicalCaptureLines=1000`.
@@ -190,22 +204,69 @@ segments stay frozen when a later legacy segment is matched.
 
 ### Boundaries, matching, and the current page
 
-`BeginHistoryRead` and `Finish` sample a held, validated TTY descriptor around
-the content read. This validation also runs for eligible unleased ANSI reads;
-text and legacy viewport-only reads skip it. Background deferral checks use
-retained geometry without opening another handle.
+Physical ANSI reads use `BeginHistoryRead` and `Finish` to sample Size around
+the content read. On Linux, the read borrows a manager-owned descriptor while
+the pane-wide lease or restore interval retains it. Cold resolution uses fresh
+identity lookup and post-open validation. Warm borrowing adds no read-triggered
+identity lookup, resolver call, reopen, or device-stat check. Lease mutations
+continue to use their separate, freshly validated write descriptors.
 
-The epoch tracks observed PTY rows and columns. Source changes start fresh
-history segments for each pane. Lease changes, observed PTY changes, and relay
-restarts start segments for physical and known-zero no-scrollback contexts.
-Panes with scrollback keep legacy matching across leases, PTY resizes, and relay
-restarts. Previously frozen physical prefixes remain frozen. A failed geometry
-sample does not create a geometry boundary; a later known sample establishes
-an unknown epoch's baseline without adding a boundary. A fullscreen boundary can
-repeat one page. An external A→B→A change entirely between samples remains
-undetectable. Emulator-grid or pixel-only changes do not advance this epoch.
-Narrowing Herdr's grid below the PTY width can clip rows without a detected
-geometry change; the shared desktop-garbling limitation remains.
+Finish, Close, and cancellation release a read's borrow. Size failure, fresh
+validation failure or identity mismatch, observed departure through
+`ForgetHistoryPane`, terminal replacement, gate-off plus settle expiry, and
+shutdown retire the matching pin. Closure waits for its borrowers to release.
+The manager retains at most one history pin per pane, including a retired pin
+that is still draining. If a borrower's Size call does not return, later
+physical captures of that pane remain refused; shutdown reports unresolved
+history descriptors at its deadline.
+
+A held descriptor identifies a PTY instance, not the runtime Herdr currently
+serves. Herdr can respawn a shell on a new PTY without changing `terminal_id`.
+A Linux read can borrow the old pin until the first Size failure, fresh
+validation signal, or accepted departure invalidates it.
+If its Size still succeeds and coordinator eligibility has not changed, the
+existing checks cannot distinguish the old PTY from the new runtime. This
+window has no fixed detection bound. No per-read process polling or new runtime
+reset callback is added.
+
+Darwin keeps the read-owned descriptor path until native master-close/Size
+failure qualification permits a pin. A warm read uses its cached identity and
+post-open validation; cold reads and invalidation recovery perform identity
+lookup. Finish, Close, and cancellation close that read-owned descriptor. The
+Darwin native hangup test has not run for this change. Background deferral
+checks use retained geometry without opening another handle.
+
+The epoch tracks observed PTY rows and columns and fences unsafe read
+intervals. It does not determine physical segment continuity at equal known
+columns. `AdmitSnapshot` continues legacy matching across resize, restart, and
+lease revision, including known-zero no-scrollback panes. Equal positive
+physical columns continue matching across height, epoch, lease revision, and
+restart changes. Source changes, changed or unknown physical columns, and
+invalid provenance start representation boundaries. Terminal replacement
+resets the pane state.
+
+At a supported boundary, `matchBoundarySuffix` compares ordered whitespace
+words after ANSI stripping and NBSP equivalence. Agreement must cover at least
+12 words over two substantive archive rows. It removes one contiguous proved
+archive suffix at whole-row edges before installing the incoming raw page.
+Non-substantive layout between proved rows can join that suffix. If the new
+page begins partway through an archive row, the matcher retains that partial
+seam row and removes the proved rows after it.
+
+Reconciliation reads only rows of the departing segment, within the budgets below. Its budgets are 1 MiB of raw inspection, 256 KiB of
+normalized input, 16,384 tokens, 64 candidate seams, and 65,536 token comparisons.
+Raw-length checks precede normalization and comparison-view allocation; a
+second raw normalization pass is charged separately. Exhaustion, unsupported
+structure, or occurrence ambiguity refuses the cut and retains the boundary
+copy. Code/table structure, split paths or URLs, split words, repeated prose,
+and competing occurrences can cause refusal. Comparison tokens do not
+reconstruct the displayed page or split stored ANSI rows.
+
+Previously frozen physical prefixes stay outside destructive legacy matching.
+An external A→B→A change entirely between physical samples remains undetectable.
+Emulator-grid or pixel-only changes do not advance the sampled epoch. Narrowing
+Herdr's grid below the PTY width can clip rows without a detected geometry
+change; the shared desktop-garbling limitation remains.
 
 Inside a physical segment, ordered matching compares substantive rows: rows
 containing a Unicode letter or digit. Repeated text must agree on its occurrence
@@ -224,8 +285,16 @@ Equal slot edges remain matched before the changed middle is classified.
 
 Unexplained contraction, disputed occurrences, and reverse-pushed rows become
 held candidates before the discontinuity check. A verified return of the
-current segment's archived suffix retracts that prefix from the displayed archive;
-matching does not search earlier segments. The response is the archive prefix
+current segment's archived suffix retracts that prefix from the displayed archive.
+One substantive returned row can qualify under two agreed surviving anchors and
+the combined occurrence proof. A zero-displacement cleared-slot return uses one
+runtime record: it binds the archived tail to its segment, archive generation,
+agreed neighbours, coordinates, and intervening layout. The slot must remain
+blank under that support until the rows return. Successful retraction consumes
+the record; archive mutation, trim, reload, terminal reset, or a representation
+boundary invalidates it. This is not global text deduplication and does not
+remove duplicates already stored. Same-segment matching does not search earlier
+segments. The response is the archive prefix
 followed by the raw current page, including its header, footer, and styles,
 before the reader's row limit and response clipping apply.
 Held rows remain invisible. Their separate 2,000-row ring removes oldest rows in
@@ -248,6 +317,9 @@ The relay logs a reason, counts, and held share for a matcher freeze, without ro
 text. Per-pane minute counters report admission classes, retirements, replacements,
 held additions/evictions/expiry, current held size, reverse retractions, and pair
 work. Boundary admissions are counted separately from matcher freezes.
+`boundary_reconciled_rows`, `boundary_refused`, and `boundary_seam_kept` count
+boundary results for physical and legacy destinations. Shared-read followers
+reuse the owner's admission and do not add another boundary count.
 
 `FooterLines=6` splits the replaceable footer when a page exceeds six rows.
 Taller chrome can enter retained history; shorter chrome can leave transcript
@@ -300,14 +372,23 @@ Shutdown closes admission, joins capture/persistence work, and saves dirty
 state without waiting for its deadline. Clean loaded caches remain unchanged.
 A crash before a successful save can still lose recent samples.
 
-Loaded history becomes a frozen prefix at its first physical or known-zero
-no-scrollback admission after restart, even if numeric PTY epochs and lease
-revisions repeat. Earlier scrollback or unknown-metric legacy admissions do
-not consume that restart fence. Scrollback legacy reads resume matching,
-including older-format files.
-Restart fencing does not infer the source or width of rows from older files.
+`snapshot_version=1` stays unchanged. Valid legacy state resumes its active
+segment after restart, including known-zero panes and valid v0.22.10 flat
+files, which upgrade in place. Valid physical state continues when stored and
+incoming columns are equal and positive. Missing physical width or invalid
+metadata retains a conservative boundary; invalid provenance cannot authorize
+suffix deletion. Source changes remain boundaries across restart.
+
+Archive generation, the cleared-slot return record, comparison views, and
+history descriptor ownership stay in memory. They add no saved JSON field.
 The shared pane-ID cache layout is unchanged; separate relays still need
 separate cache roots to avoid shared-cache interference.
+
+Legacy matching can accept a blank-row tail overlap before trying a substantive
+sequence match. If blank padding matches just the incoming first row,
+`mergeLegacyBody` keeps the archived prefix and appends the incoming rows after
+that blank, which can repeat transcript content. This pre-existing limit is
+unchanged by this release.
 
 This release includes a new phone-app build. It estimates leased prose using
 the effective shared width and adjusts short/blank anchors for contextual
@@ -326,11 +407,12 @@ client-side history merger is introduced.
 - **Desktop fights** — when the desktop resizes the pane while it is leased,
   the change becomes the new restore point and the lease is applied again at
   the next renewal or reconcile, so the shared size can flip back and forth.
-- **Identity residuals** — the check trusts Herdr's `terminal_id` and
-  `shell_pid` and `ps`'s TTY name. Defeating it would need the shell to exit
-  and its pid to be reused by a process on a reused PTY with the same name,
-  while Herdr still reports the old terminal for the pane. The pinning claim
-  rests on the kernel behavior above, measured on macOS only so far.
+- **Identity residuals** — mutation validation trusts Herdr's pane/process
+  reports and the platform's controlling-TTY evidence. Linux checks shell
+  process birth; Darwin retains its `ps` path. The Linux read pin can remain
+  stale after same-terminal-ID respawn until a documented invalidation signal.
+  A retired pin with a blocked borrower can keep that pane's later physical
+  captures refused; shutdown reports the unresolved descriptor.
 - **Platforms** — darwin and linux only; other builds do not advertise it.
 - **Phone qualification incomplete** — unit, real-PTY, relay blackbox and
   browser tests do not establish an end-to-end real-phone resize/restore pass.

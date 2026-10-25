@@ -300,12 +300,15 @@ Held eviction and archive-pin expiry produce count logs. Before activation and
 after restore cleanup, the unleased legacy matcher resumes with earlier
 segments retained.
 
-This is sampled history, not a complete transcript. Source changes start
-segments for each pane. Lease changes, observed PTY changes, and relay restarts
-start segments for physical and known-zero no-scrollback contexts. These
-boundaries can repeat one page. Panes with scrollback keep legacy matching
-across leases, PTY resizes, and relay restarts. Sampling gaps and the
-three-second resize-settling pause can lose output. The six-row footer split is
+This is sampled history, not a complete transcript. Legacy matching continues
+across lease changes, PTY resizes, and relay restarts, including known-zero
+panes. Physical matching continues when columns remain equal and known,
+including height changes, restart, and reacquisition. Source changes and
+changed or unknown physical columns start boundaries. A bounded whole-row
+suffix proof can remove an overlapping archive copy; refusal retains it, and
+a partial seam can retain one overlapping row. Sampling gaps and this relay's
+three-second resize-settling pause can lose output. Unleased legacy reads do
+not sample external PTY resizes. The six-row footer split is
 a heuristic. Ordered matching archives supported old-coordinate ranges and
 keeps the raw current page before the reader's row limit and response clipping.
 A supported slot or tail of one to three physical
@@ -321,9 +324,10 @@ For direct reads, an unchanged-content response can keep an earlier truncation
 notice until a content change or watch frame updates it.
 
 Footer updates refresh without a body change. Dirty admitted pages save on a
-deadline even after output stops. Physical and no-scrollback history starts a
-fresh segment after restart; scrollback legacy reads resume matching. A crash
-before a successful save can still lose recent samples. This release also
+deadline even after output stops. Valid legacy files resume matching after
+restart, including v0.22.10 saves; equal-known-column physical state also
+continues. Invalid provenance keeps a conservative boundary. A crash before a
+successful save can still lose recent samples. This release also
 includes a new app build for effective-width height estimates and short/blank
 prepend anchors; use the matching build for those frontend corrections. See
 [sampled fullscreen history](pane-size-leasing.md#sampled-fullscreen-history)

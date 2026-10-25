@@ -50,7 +50,7 @@ func (g *lifecycleTasks) Stop() {
 	_ = g.StopContext(context.Background())
 }
 
-func (g *lifecycleTasks) StopContext(ctx context.Context) error {
+func (g *lifecycleTasks) cancelWork() {
 	g.mu.Lock()
 	if !g.closed {
 		g.closed = true
@@ -60,6 +60,10 @@ func (g *lifecycleTasks) StopContext(ctx context.Context) error {
 		}
 	}
 	g.mu.Unlock()
+}
+
+func (g *lifecycleTasks) StopContext(ctx context.Context) error {
+	g.cancelWork()
 	select {
 	case <-g.done:
 		return nil

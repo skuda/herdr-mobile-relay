@@ -291,10 +291,8 @@ func watchMessage(watch *paneWatch) map[string]any {
 	}
 }
 
-// applyPaneReadLease never trusts a client-supplied read geometry. A client
-// that itself holds an active lease on the pane reads it at the leased size
-// (the viewport-only read path); every other client, including readers and
-// controllers with Resize Session off, reads the pane at Herdr's own size.
+// applyPaneReadLease drops client-supplied read geometry. For a client with an
+// active lease on the pane, it sets the geometry that ReadGeometry returns.
 func (s *Server) applyPaneReadLease(clientID string, message map[string]any) {
 	delete(message, "terminal_columns")
 	delete(message, "terminal_rows")

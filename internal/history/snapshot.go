@@ -15,13 +15,13 @@ const (
 )
 
 type SnapshotContext struct {
-	TerminalID    string
-	ReadSource    string
-	GeometryEpoch uint64
-	LeaseRevision uint64
-	Columns       int
-	Rows          int
-	NoScrollback  bool
+	TerminalID          string
+	ReadSource          string
+	GeometryEpoch       uint64
+	LeaseRevision       uint64
+	Columns             int
+	Rows                int
+	ClaudePromptGrammar bool
 }
 
 type SnapshotAdmission struct {
@@ -69,7 +69,7 @@ func (m *Manager) PreviewSnapshot(paneID, rawContent string, context SnapshotCon
 		m.mu.Unlock()
 		return rawContent, false
 	}
-	if context.ReadSource == SourceRecent {
+	if context.ReadSource == SourceRecent && !state.snapshotBoundary(context) {
 		rows := slices.Clone(state.History[:state.LiveStart])
 		m.mu.Unlock()
 		rows = append(rows, strings.Split(rawContent, "\n")...)
@@ -109,17 +109,12 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		m.states[paneID] = state
 		delete(m.lastSave, paneID)
 	}
-	if context.GeometryEpoch == 0 && context.ReadSource == SourceLegacy && state.ReadSource == context.ReadSource && !state.loaded {
-		context.GeometryEpoch, context.Columns, context.Rows = state.GeometryEpoch, state.Columns, state.Rows
-	}
-	legacyUpgrade := context.ReadSource == SourceLegacy && state.SnapshotVersion == 0 && !state.snapshotInvalid
+	legacyUpgrade := state.SnapshotVersion == 0 && !state.snapshotInvalid
 	if legacyUpgrade {
 		state.SegmentStart, state.LiveStart = 0, len(state.History)
+		state.ReadSource = SourceLegacy
 	}
-	physicalWidthBoundary := context.ReadSource == SourceRecent &&
-		(state.Columns <= 0 || context.Columns <= 0 || state.Columns != context.Columns)
-	boundary := state.snapshotInvalid || state.SnapshotVersion != snapshotVersion && !legacyUpgrade ||
-		state.ReadSource != context.ReadSource || physicalWidthBoundary
+	boundary := state.snapshotBoundary(context)
 	body, footer := splitSnapshot(rawContent)
 	boundaryMatch := boundaryResult{}
 	if boundary {
@@ -129,7 +124,7 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		}
 		state.LiveStart = len(state.History)
 		if len(state.History) > 0 {
-			supported := !state.snapshotInvalid && state.SnapshotVersion == snapshotVersion &&
+			supported := context.ClaudePromptGrammar && !state.snapshotInvalid && (state.SnapshotVersion == snapshotVersion || legacyUpgrade) &&
 				(state.ReadSource == SourceLegacy || state.ReadSource == SourceRecent && state.Columns > 0) &&
 				(context.ReadSource == SourceLegacy || context.Columns > 0)
 			boundaryMatch = reconcileBoundary(state, body, supported)
@@ -138,11 +133,9 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		state.LastHash = ""
 		state.StaleRefusals = 0
 	}
-	if context.ReadSource == SourceRecent {
-		state.loaded = false
-	}
 	state.setSnapshotContext(context)
 	state.Footer = slices.Clone(footer)
+	priorReturn := state.zeroDisplacementReturn
 	admission := SnapshotAdmission{Class: "legacy"}
 	if context.ReadSource == SourceRecent {
 		admission = m.mergePhysical(state, body)
@@ -160,7 +153,18 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 	if boundaryMatch.refused {
 		admission.BoundaryRefused = 1
 	}
+	candidate := state.zeroDisplacementReturn
+	if candidate == priorReturn {
+		candidate = nil
+	} else {
+		state.zeroDisplacementReturn = nil
+	}
 	expired := trimSnapshotState(state)
+	if candidate != nil && len(candidate.rows) <= state.LiveStart-state.SegmentStart &&
+		slices.Equal(candidate.rows, physicalComparisonRows(state.History[state.LiveStart-len(candidate.rows):state.LiveStart])) {
+		candidate.segment, candidate.generation = state.SegmentStart, state.archiveGeneration
+		state.zeroDisplacementReturn = candidate
+	}
 	evicted := trimHeldCapacity(state)
 	admission.HeldExpiredRows, admission.HeldEvictedRows, admission.HeldTotalRows = expired, evicted, heldRowCount(state.Held)
 	admission.Admitted = true
@@ -181,6 +185,17 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 	}
 	content, clipped := joinContent(state, limit)
 	return content, clipped, admission
+}
+
+func (state *PaneState) snapshotBoundary(context SnapshotContext) bool {
+	legacyFlat := state.SnapshotVersion == 0 && !state.snapshotInvalid
+	source := state.ReadSource
+	if legacyFlat {
+		source = SourceLegacy
+	}
+	return state.snapshotInvalid || state.SnapshotVersion != snapshotVersion && !legacyFlat ||
+		source != context.ReadSource || context.ReadSource == SourceRecent &&
+		(state.Columns <= 0 || context.Columns <= 0 || state.Columns != context.Columns)
 }
 
 func (state *PaneState) snapshotContext() SnapshotContext {
@@ -210,6 +225,14 @@ func limitSnapshotLines(lines []string, limit int) (string, bool) {
 		lines = lines[len(lines)-limit:]
 	}
 	return strings.Join(lines, "\n"), clipped
+}
+
+func ownedRows(rows []string) []string {
+	owned := make([]string, len(rows))
+	for i, row := range rows {
+		owned[i] = strings.Clone(row)
+	}
+	return owned
 }
 
 func cloneHeldRecords(records []HeldRecord) []HeldRecord {
@@ -252,11 +275,7 @@ func appendHeldRows(state *PaneState, rows []string, position, segment int, now 
 	if !nonblank {
 		return 0
 	}
-	owned := make([]string, len(rows))
-	for i, row := range rows {
-		owned[i] = strings.Clone(row)
-	}
-	state.Held = append(state.Held, HeldRecord{Rows: owned, Position: position, Segment: segment, FirstSeenAt: now.UTC()})
+	state.Held = append(state.Held, HeldRecord{Rows: ownedRows(rows), Position: position, Segment: segment, FirstSeenAt: now.UTC()})
 	return len(rows)
 }
 

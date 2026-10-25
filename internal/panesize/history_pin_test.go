@@ -1,10 +1,13 @@
 package panesize
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -860,7 +863,7 @@ func TestHistoryPinReplacementsWaitForPriorTerminalBorrow(t *testing.T) {
 		if next != nil {
 			_ = next.Close()
 		}
-		if !errors.Is(err, ErrHistoryReadUnsafe) {
+		if !errors.Is(err, ErrHistoryPinPending) {
 			t.Errorf("replacement published before prior borrow drained: %v", err)
 		}
 		f.m.mu.Lock()
@@ -1119,6 +1122,160 @@ func TestHistoryPinSameIdentityRespawnSignals(t *testing.T) {
 				t.Errorf("post-signal refresh=%+v", geometry)
 			}
 			f.m.ForgetHistoryPane("p", "terminal-p")
+		})
+	}
+}
+
+func TestForegroundTurnoverKeepsHistoryGeometryAndPin(t *testing.T) {
+	if !platformHistoryPin {
+		t.Skip("manager pin platform")
+	}
+	f := newFixture(t)
+	f.addPane("p", 100, "/dev/pts/1", 1)
+	f.herdr.update("p", func(p *fakePane) { p.shellPID = 0; p.fgPID = 200 })
+	r := &fingerprintTTYResolver{TTYResolver: f.ttys, start: 10, path: "/dev/pts/1", rdev: 1}
+	f.m.resolver = r
+	f.acquire("owner", "p", 60, 20)
+	f.clock.Advance(HistorySettleWindow)
+	finishSafe(t, historyRead(t, f, "p"))
+	state := f.m.historyGeometry["p"]
+	changed, revision := state.geometry.ChangedAt, state.geometry.LeaseRevision
+	f.m.historyUnknown("p", "terminal-p")
+	f.herdr.update("p", func(p *fakePane) { p.fgPID = 201 })
+	r.start = 20
+	finishSafe(t, historyRead(t, f, "p"))
+	pin := f.m.historyGeometry["p"].pin
+	f.acquire("owner", "p", 60, 20)
+	got := f.m.historyGeometry["p"]
+	if got != state || got.geometry.ChangedAt != changed || got.geometry.LeaseRevision != revision || got.pin != pin || got.identity.processPID != 201 {
+		t.Error("foreground turnover replaced geometry, settling, lease revision, or pin")
+	}
+	f.m.ForgetHistoryPane("p", "terminal-p")
+}
+
+type historyCloseFailureTerminal struct {
+	Terminal
+	calls int
+}
+
+func (t *historyCloseFailureTerminal) Close() error {
+	t.calls++
+	_ = t.Terminal.Close()
+	return errors.New("injected close failure")
+}
+
+func TestOtherPanePinCloseFailureDoesNotFailFinish(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux pin gate")
+	}
+	f, _ := historyCountFixture(t, true)
+	f.addPane("other", 200, "/dev/pts/2", 2)
+	f.acquire("owner", "other", 60, 20)
+	f.clock.Advance(HistorySettleWindow)
+	other := historyRead(t, f, "other")
+	finishSafe(t, other)
+	read := historyRead(t, f, "p")
+	var logs bytes.Buffer
+	f.m.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	f.m.mu.Lock()
+	state := f.m.historyGeometry["other"]
+	terminal := &historyCloseFailureTerminal{Terminal: state.pin.terminal}
+	state.pin.terminal = terminal
+	f.m.retireHistoryPinLocked(state)
+	f.m.mu.Unlock()
+	if _, err := read.Finish(); err != nil {
+		t.Errorf("other pane close failure contaminated Finish: %v", err)
+	}
+	f.m.closeRetiredHistoryPins()
+	if terminal.calls != 1 || strings.Count(logs.String(), "injected close failure") != 1 || !strings.Contains(logs.String(), "pane_id=other") {
+		t.Errorf("close failure not logged once with pane attribution: calls=%d log=%s", terminal.calls, logs.String())
+	}
+	f.m.ForgetHistoryPane("p", "terminal-p")
+}
+
+func TestRetiredPinCloseFailureDiagnostic(t *testing.T) {
+	if !platformHistoryPin {
+		t.Skip("manager pin platform")
+	}
+	for _, via := range []string{"Close", "shutdown"} {
+		t.Run(via, func(t *testing.T) {
+			f, _ := historyCountFixture(t, true)
+			read := historyRead(t, f, "p")
+			var logs bytes.Buffer
+			f.m.logger = slog.New(slog.NewTextHandler(&logs, nil))
+			f.m.mu.Lock()
+			terminal := &historyCloseFailureTerminal{Terminal: read.pin.terminal}
+			read.pin.terminal = terminal
+			f.m.mu.Unlock()
+			if via == "Close" {
+				f.m.ForgetHistoryPane("p", "terminal-p")
+				defer read.Close()
+				_ = read.Close()
+			} else {
+				if err := f.m.Shutdown(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.m.closeRetiredHistoryPins()
+			if terminal.calls != 1 || strings.Count(logs.String(), "injected close failure") != 1 || !strings.Contains(logs.String(), "pane_id=p") {
+				t.Errorf("retired close failure not logged once: closes=%d log=%s", terminal.calls, logs.String())
+			}
+		})
+	}
+}
+
+func TestHistoryDescriptorDeadlineSeparateFromRestore(t *testing.T) {
+	if !platformHistoryPin {
+		t.Skip("manager pin platform")
+	}
+	for _, restoreFailure := range []bool{false, true} {
+		t.Run(map[bool]string{false: "restored", true: "both"}[restoreFailure], func(t *testing.T) {
+			f, parts := historyCountFixture(t, true)
+			finishSafe(t, historyRead(t, f, "p"))
+			entered, release := make(chan struct{}), make(chan struct{})
+			var blocked atomic.Bool
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			t.Cleanup(unblock)
+			parts.beforeSize = func() {
+				if blocked.CompareAndSwap(false, true) {
+					close(entered)
+					<-release
+				}
+			}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				read, _ := f.m.BeginHistoryRead(context.Background(), "p", "terminal-p")
+				if read != nil {
+					_ = read.Close()
+				}
+			}()
+			<-entered
+			if restoreFailure {
+				f.ops.mu.Lock()
+				f.ops.devices["/dev/pts/1"].setErr = errors.New("restore failed")
+				f.ops.mu.Unlock()
+			}
+			var logs bytes.Buffer
+			f.m.logger = slog.New(slog.NewTextHandler(&logs, nil))
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			err := f.m.Shutdown(ctx)
+			cancel()
+			if err == nil || !strings.Contains(err.Error(), "history descriptors") {
+				t.Errorf("missing descriptor deadline: %v", err)
+			}
+			if !strings.Contains(logs.String(), "history descriptors did not drain at shutdown") {
+				t.Error("missing separate history descriptor warning")
+			}
+			if !restoreFailure && (strings.Contains(err.Error(), "pane sizes") || strings.Contains(logs.String(), "pane sizes")) {
+				t.Errorf("descriptor deadline described as restore failure: %v; %s", err, logs.String())
+			}
+			if restoreFailure && (!strings.Contains(err.Error(), "pane sizes") || !strings.Contains(logs.String(), "pane sizes")) {
+				t.Error("missing actual restore diagnostic")
+			}
+			unblock()
+			<-done
 		})
 	}
 }

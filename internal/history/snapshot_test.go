@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 )
 
 func physicalContext(epoch uint64, columns int) SnapshotContext {
-	return SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceRecent, GeometryEpoch: epoch, LeaseRevision: 1, Columns: columns, Rows: 82}
+	return SnapshotContext{ClaudePromptGrammar: true, TerminalID: "terminal-1", ReadSource: SourceRecent, GeometryEpoch: epoch, LeaseRevision: 1, Columns: columns, Rows: 82}
 }
 
 func snapshotPage(body ...string) string {
@@ -262,7 +263,7 @@ func TestSnapshotWeakScrollAnchorHoldsMissingRows(t *testing.T) {
 func TestSnapshotLegacyMatchingDoesNotSearchFrozenPrefix(t *testing.T) {
 	m := NewManager(t.TempDir())
 	m.MergeSnapshot("p", snapshotPage("A", "B", "frozen suffix"), physicalContext(1, 40))
-	ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, LeaseRevision: 2}
+	ctx := SnapshotContext{ClaudePromptGrammar: true, TerminalID: "terminal-1", ReadSource: SourceLegacy, LeaseRevision: 2}
 	m.MergeSnapshot("p", snapshotPage("current X", "current Y"), ctx)
 	got := m.MergeSnapshot("p", snapshotPage("prefix", "A", "B", "new suffix"), ctx)
 	assertSnapshotContent(t, got, "A", "B", "frozen suffix", "current X", "current Y", "prefix", "A", "B", "new suffix")
@@ -440,7 +441,7 @@ func TestSnapshotLegacyLoadRestartAndSourceBoundary(t *testing.T) {
 		}
 		got := m.MergeSnapshot("p", snapshotPage("A", "B", "new"), physicalContext(1, 40))
 		assertSnapshotContent(t, got, "A", "B", "old", "A", "B", "new")
-		legacy := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, LeaseRevision: 2}
+		legacy := SnapshotContext{ClaudePromptGrammar: true, TerminalID: "terminal-1", ReadSource: SourceLegacy, LeaseRevision: 2}
 		got = m.MergeSnapshot("p", snapshotPage("A", "B", "legacy"), legacy)
 		assertSnapshotContent(t, got, "A", "B", "old", "A", "B", "new", "A", "B", "legacy")
 		ctx := physicalContext(1, 40)
@@ -488,7 +489,6 @@ func TestFirstRuntimePhysicalAdmissionContinuesAtEqualKnownColumns(t *testing.T)
 	dir := t.TempDir()
 	first := NewManager(dir)
 	ctx := physicalContext(1, 40)
-	ctx.NoScrollback = true
 	first.MergeSnapshot("p", snapshotPage("A", "B", "old"), ctx)
 	if err := first.SaveAll(); err != nil {
 		t.Fatal(err)
@@ -505,7 +505,7 @@ func TestFirstRuntimeLegacyAdmissionContinuesIdenticalNumericEpoch(t *testing.T)
 	dir := t.TempDir()
 	first := NewManager(dir)
 	ctx := physicalContext(1, 40)
-	ctx.ReadSource, ctx.NoScrollback = SourceLegacy, true
+	ctx.ReadSource = SourceLegacy
 	assertLegacyBaselineAdmission(t, first, ctx, legacyBaselineFrame{"A\nB\nold", "A\nB\nold"})
 	if err := first.SaveAll(); err != nil {
 		t.Fatal(err)
@@ -522,7 +522,6 @@ func TestUnknownEpochEstablishesBaselineWithoutLaterBoundary(t *testing.T) {
 			root := t.TempDir()
 			m := NewManager(root)
 			ctx := physicalContext(7, 54)
-			ctx.NoScrollback = true
 			if mode != "fresh" {
 				m.AdmitSnapshot("p", snapshotPage("old A", "old B"), ctx, 0)
 			}
@@ -551,7 +550,7 @@ func TestUnknownEpochEstablishesBaselineWithoutLaterBoundary(t *testing.T) {
 	}
 }
 
-func TestLegacyUnknownMetricBecomingKnownZeroContinuesLoadedSegment(t *testing.T) {
+func TestLegacyRepeatedReadContinuesReloadedSegmentBeforeSourceBoundary(t *testing.T) {
 	root := t.TempDir()
 	m := NewManager(root)
 	ctx := physicalContext(1, 54)
@@ -562,7 +561,6 @@ func TestLegacyUnknownMetricBecomingKnownZeroContinuesLoadedSegment(t *testing.T
 	}
 	m = NewManager(root)
 	assertLegacyBaselineAdmission(t, m, ctx, legacyBaselineFrame{"A\nB", "A\nB"})
-	ctx.NoScrollback = true
 	assertLegacyBaselineAdmission(t, m, ctx, legacyBaselineFrame{"A\nB", "A\nB"})
 	ctx.ReadSource = SourceRecent
 	got, _, admission := m.AdmitSnapshot("p", snapshotPage("A", "B"), ctx, 0)
@@ -579,7 +577,7 @@ func TestSourceGateCycleContinuesEqualWidthWithoutIntermediateRead(t *testing.T)
 	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage("A", "B", "new"), ctx), "A", "B", "new")
 }
 
-func TestUnleasedNoScrollbackExistingFixturesRemainByteIdentical(t *testing.T) {
+func TestLegacyExistingFixturesRemainByteIdentical(t *testing.T) {
 	// Expected bytes were measured with Manager.Merge at bc4dd58.
 	fixtures := []struct {
 		frames []string
@@ -604,7 +602,7 @@ func TestUnleasedNoScrollbackExistingFixturesRemainByteIdentical(t *testing.T) {
 		for index, raw := range fixture.frames {
 			for name, got := range map[string]string{
 				"Merge":         legacy.Merge("p", raw),
-				"MergeSnapshot": segmented.MergeSnapshot("p", raw, SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy}),
+				"MergeSnapshot": segmented.MergeSnapshot("p", raw, SnapshotContext{ClaudePromptGrammar: true, TerminalID: "terminal-1", ReadSource: SourceLegacy}),
 			} {
 				if got != fixture.want[index] {
 					t.Fatalf("%s parity: got %q, want %q", name, got, fixture.want[index])
@@ -614,7 +612,7 @@ func TestUnleasedNoScrollbackExistingFixturesRemainByteIdentical(t *testing.T) {
 	}
 	m := NewManager(t.TempDir())
 	m.MergeSnapshot("p", snapshotPage("physical A", "physical B"), physicalContext(1, 40))
-	ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, LeaseRevision: 2}
+	ctx := SnapshotContext{ClaudePromptGrammar: true, TerminalID: "terminal-1", ReadSource: SourceLegacy, LeaseRevision: 2}
 	m.MergeSnapshot("p", snapshotPage("H1", "H2", "A", "B", "C", "D", "E"), ctx)
 	assertSnapshotContent(t, m.MergeSnapshot("p", snapshotPage("H1", "H2", "C", "D", "E", "F", "G"), ctx), "physical A", "physical B", "H1", "H2", "A", "B", "C", "D", "E", "F", "G")
 }
@@ -632,4 +630,60 @@ func TestSnapshotTerminalReplacementResetsButSessionDiscoveryDoesNot(t *testing.
 	restarted := NewManager(filepath.Dir(m.dir))
 	ctx.TerminalID = "terminal-replaced-again"
 	assertSnapshotContent(t, restarted.MergeSnapshot("p", snapshotPage("replacement A", "replacement B"), ctx), "replacement A", "replacement B")
+}
+
+func TestFlatHistoryFirstPhysicalBoundary(t *testing.T) {
+	for _, invalid := range []bool{false, true} {
+		t.Run(fmt.Sprint(invalid), func(t *testing.T) {
+			m := NewManager(t.TempDir())
+			stored := map[string]any{"history": boundaryProse, "footer": []string{"f1", "f2", "f3", "f4", "f5", "f6"}}
+			if invalid {
+				stored["snapshot_version"] = 1
+				stored["read_source"] = "broken"
+			}
+			data, err := json.Marshal(stored)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(m.stateFile("p"), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx := physicalContext(1, 62)
+			raw := snapshotPage(strings.Join(boundaryProse, " "))
+			content, _, d := m.AdmitSnapshot("p", raw, ctx, 0)
+			if invalid {
+				if d.BoundaryRefused != 1 || len(m.states["p"].History) <= 1 {
+					t.Fatalf("invalid provenance allowed a cut: %+v", d)
+				}
+				return
+			}
+			if d.BoundaryReconciledRows != len(boundaryProse) || content != raw {
+				t.Errorf("flat first physical boundary duplicated the page: %+v", d)
+			}
+		})
+	}
+}
+
+func TestBoundaryPreviewEqualsAdmissionWithoutMutation(t *testing.T) {
+	m := NewManager(t.TempDir())
+	legacy := physicalContext(1, 150)
+	legacy.ReadSource = SourceLegacy
+	m.AdmitSnapshot("p", snapshotPage(append([]string{"earlier archive"}, boundaryProse...)...), legacy, 0)
+	state := m.states["p"]
+	state.Held = []HeldRecord{{Rows: []string{"held residue"}, Position: 0, Segment: 0, FirstSeenAt: m.now()}}
+	state.archiveGeneration = 17
+	before := *state
+	before.History = slices.Clone(state.History)
+	before.Footer = slices.Clone(state.Footer)
+	before.Held = cloneHeldRecords(state.Held)
+	raw := snapshotPage(strings.Join(boundaryProse, " "))
+	ctx := physicalContext(2, 62)
+	preview, ok := m.PreviewSnapshot("p", raw, ctx)
+	if !ok || !reflect.DeepEqual(before, *state) {
+		t.Fatal("boundary preview changed the live state")
+	}
+	content, _, _ := m.AdmitSnapshot("p", raw, ctx, 0)
+	if preview != content {
+		t.Error("boundary preview differs from admitted composition")
+	}
 }

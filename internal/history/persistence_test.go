@@ -90,7 +90,7 @@ func TestLegacyV02210KnownZeroUpgradePersistsWithoutCopy(t *testing.T) {
 	root := t.TempDir()
 	m := NewManager(root)
 	writeLegacyBaselineFile(t, m, "A\nB\nC")
-	ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, NoScrollback: true}
+	ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy}
 	assertLegacyBaselineAdmission(t, m, ctx, legacyBaselineFrame{"B\nC\nD", "A\nB\nC\nD"})
 	if err := m.SaveAll(); err != nil {
 		t.Fatal(err)

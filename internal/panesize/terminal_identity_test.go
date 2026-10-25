@@ -172,3 +172,37 @@ func TestProcessFingerprintUncertaintyRefusesInitialCapture(t *testing.T) {
 		})
 	}
 }
+
+func TestHistoryTerminalComparisonKeepsIdentityBoundaries(t *testing.T) {
+	base := terminalIdentity{terminalID: "terminal", ttyPath: "/dev/pts/1", rdev: 1, processPID: 200, processStart: 10}
+	for _, field := range []string{"foreground", "ttyPath", "rdev", "terminalID", "shellPID", "shell-birth"} {
+		t.Run(field, func(t *testing.T) {
+			a, b := base, base
+			switch field {
+			case "foreground":
+				b.processPID, b.processStart = 201, 20
+			case "ttyPath":
+				b.ttyPath = "/dev/pts/2"
+			case "rdev":
+				b.rdev = 2
+			case "terminalID":
+				b.terminalID = "another"
+			case "shellPID":
+				b.shellPID = 200
+			case "shell-birth":
+				a.shellPID, b.shellPID, b.processStart = 200, 200, 20
+			}
+			if sameHistoryTerminal(a, b) != (field == "foreground") {
+				t.Error("history terminal comparison lost an identity boundary")
+			}
+			f := newFixture(t)
+			f.m.mu.Lock()
+			before := f.m.historyStateLocked("p", a)
+			after := f.m.historyStateLocked("p", b)
+			f.m.mu.Unlock()
+			if (before == after) != (field == "foreground") || after.identity != b {
+				t.Error("geometry replacement or identity refresh differs from terminal comparison")
+			}
+		})
+	}
+}

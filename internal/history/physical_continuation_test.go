@@ -35,10 +35,12 @@ func TestPhysicalEqualColumnsLifecycleContinues(t *testing.T) {
 				}
 				d := admitPhysicalOccurrence(t, m, page, ctx, "A", 1)
 				state := m.states["p"]
-				if d.Class == "boundary" || state.SegmentStart != 0 || state.LiveStart != 0 || state.loaded {
-					t.Errorf("equal-column lifecycle forced boundary: class=%s segment=%d live=%d loaded=%v", d.Class, state.SegmentStart, state.LiveStart, state.loaded)
+				if d.Class == "boundary" || state.SegmentStart != 0 || state.LiveStart != 0 {
+					t.Errorf("equal-column lifecycle forced boundary: class=%s segment=%d live=%d", d.Class, state.SegmentStart, state.LiveStart)
 				}
-				if state.snapshotContext() != ctx || !d.MetadataChanged && lifecycle != "restart" || !state.dirty && lifecycle != "restart" {
+				storedContext := ctx
+				storedContext.ClaudePromptGrammar = false
+				if state.snapshotContext() != storedContext || !d.MetadataChanged && lifecycle != "restart" || !state.dirty && lifecycle != "restart" {
 					t.Errorf("continued metadata not stored: got=%+v want=%+v admission=%+v", state.snapshotContext(), ctx, d)
 				}
 			})

@@ -36,7 +36,7 @@ func (t *ioctlTerminal) Device() (uint64, bool, error) {
 	if err := unix.Fstat(t.fd, &stat); err != nil {
 		return 0, false, err
 	}
-	return deviceNumber(stat), uint32(stat.Mode)&unix.S_IFMT == unix.S_IFCHR, nil
+	return statDevice(stat)
 }
 
 func (t *ioctlTerminal) Size() (Winsize, error) {
@@ -65,6 +65,10 @@ func (t *ioctlTerminal) SetSize(size Winsize) error {
 
 func (t *ioctlTerminal) Close() error {
 	return unix.Close(t.fd)
+}
+
+func statDevice(stat unix.Stat_t) (uint64, bool, error) {
+	return deviceNumber(stat), uint32(stat.Mode)&unix.S_IFMT == unix.S_IFCHR, nil
 }
 
 // deviceNumber widens st_rdev (int32 on darwin, uint64 on linux) the same way

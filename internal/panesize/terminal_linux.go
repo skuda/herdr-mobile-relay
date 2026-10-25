@@ -30,7 +30,7 @@ func procTTYDevice(path string) (uint64, bool, error) {
 	if err := unix.Stat(path, &stat); err != nil {
 		return 0, false, err
 	}
-	return uint64(stat.Rdev), stat.Mode&unix.S_IFMT == unix.S_IFCHR, nil
+	return statDevice(stat)
 }
 
 func parseProcTTYStat(data []byte, pid int) (procTTYStat, error) {
@@ -62,8 +62,7 @@ func parseProcTTYStat(data []byte, pid int) (procTTYStat, error) {
 }
 
 func procTTYPath(tty uint32) (string, uint64, error) {
-	major := (tty >> 8) & 0xfff
-	minor := (tty & 0xff) | ((tty >> 12) & 0xfff00)
+	major, minor := unix.Major(uint64(tty)), unix.Minor(uint64(tty))
 	if major != 136 {
 		return "", 0, ErrTTYUnavailable
 	}

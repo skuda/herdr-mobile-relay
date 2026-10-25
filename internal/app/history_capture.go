@@ -126,10 +126,11 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		}
 	}
 	var geometryFence panesize.HistoryFence
-	if handle == nil {
+	retainedUnsafe := false
+	if !request.Physical {
 		geometryFence = s.paneSizeM.HistoryReadFence(request.PaneID, token.identity.terminalID)
+		retainedUnsafe = s.paneSizeM.HistoryReadUnsafe(request.PaneID, token.identity.terminalID)
 	}
-	retainedUnsafe := s.paneSizeM != nil && s.paneSizeM.HistoryReadUnsafe(request.PaneID, token.identity.terminalID)
 	if captureShape {
 		s.historyPendingMu.Lock()
 		var expired bool
@@ -168,9 +169,8 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 	}
 	result := coordinator.PaneReadResult{Read: read, Response: response,
 		Capture: coordinator.PaneReadCapture{Sequence: token.sequence, TerminalID: token.identity.terminalID, Generation: token.identity.generation}}
-	if handle != nil && geometryErr != nil {
+	if (handle != nil && geometryErr != nil) || errors.Is(geometryErr, panesize.ErrHistoryPinPending) {
 		response["resize_settling"] = true
-
 	}
 	interaction, _ := response["interaction"].(*question.Interaction)
 	eligible := request.Format == "ansi" &&
@@ -179,15 +179,15 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 	if request.Physical {
 		eligible = eligible && handle != nil && geometryErr == nil && token.geometry.Known && token.geometry.Leased
 	} else {
-		if handle == nil && s.paneSizeM != nil {
+		if s.paneSizeM != nil {
 			retainedUnsafe = retainedUnsafe || s.paneSizeM.HistoryReadUnsafe(request.PaneID, token.identity.terminalID)
 			retainedUnsafe = retainedUnsafe || geometryFence != s.paneSizeM.HistoryReadFence(request.PaneID, token.identity.terminalID)
 		}
-		eligible = eligible && !request.Resized && !retainedUnsafe && (handle == nil || geometryErr == nil)
+		eligible = eligible && !request.Resized && !retainedUnsafe
 	}
 	snapshotContext := history.SnapshotContext{TerminalID: token.identity.terminalID, ReadSource: history.SourceLegacy,
 		GeometryEpoch: token.geometry.Epoch, LeaseRevision: token.leaseRevision,
-		Columns: token.geometry.Columns, Rows: token.geometry.Rows, NoScrollback: agent.UsesNoScrollbackHistory()}
+		Columns: token.geometry.Columns, Rows: token.geometry.Rows, ClaudePromptGrammar: strings.Contains(strings.ToLower(agent.Agent), "claude")}
 	if request.Physical {
 		snapshotContext.ReadSource = history.SourceRecent
 	}
@@ -203,7 +203,7 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 			response["content"] = content
 			result.Composed = true
 		}
-		if !(request.Physical && geometryErr != nil) {
+		if !layoutHint && !(request.Physical && geometryErr != nil) {
 			response["history_retry"] = true
 		}
 	}
@@ -236,10 +236,7 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		s.historyAdmissionObserver(token, admission)
 	}
 	if admission.Admitted {
-		if snapshotContext.ReadSource == history.SourceRecent || admission.BoundaryReconciledRows > 0 || admission.BoundaryRefused > 0 ||
-			admission.HeldExpiredRows > 0 || admission.HeldEvictedRows > 0 || s.historyCounters[token.paneID] != nil {
-			s.recordHistoryAdmissionLocked(token, admission)
-		}
+		s.recordHistoryAdmissionLocked(token, admission)
 		diagnostic = &admission
 		response["content"] = content
 		result.Capture.Admitted = true
@@ -282,15 +279,19 @@ func (s *Server) captureTerminalHistory(ctx context.Context, paneID string) (str
 }
 
 type historyMinuteCounters struct {
-	started                                                                                      time.Time
-	admissions, initial, boundary, stationary, replaced, forward, held, reverse, legacy, freezes int
-	heldMajority, pairBudget                                                                     int
-	matchedRows, retiredRows, replacedRows, heldAddedRows, heldEvictedRows, heldExpiredRows      int
-	retractionEvents, retractedRows, dpPairs, maxDPPairs, currentHeldRows                        int
-	boundaryReconciledRows, boundaryRefused, boundarySeamKept                                    int
+	started                                                                                 time.Time
+	admissions, initial, boundary, stationary, replaced, forward, held, reverse, freezes    int
+	heldMajority, pairBudget                                                                int
+	matchedRows, retiredRows, replacedRows, heldAddedRows, heldEvictedRows, heldExpiredRows int
+	retractionEvents, retractedRows, dpPairs, maxDPPairs, currentHeldRows                   int
+	boundaryReconciledRows, boundaryRefused, boundarySeamKept                               int
 }
 
 func (s *Server) recordHistoryAdmissionLocked(token historyReadToken, d history.SnapshotAdmission) {
+	if d.Class == "legacy" && d.BoundaryReconciledRows == 0 && d.BoundaryRefused == 0 && d.BoundarySeamKept == 0 &&
+		d.HeldExpiredRows == 0 && d.HeldEvictedRows == 0 && s.historyCounters[token.paneID] == nil {
+		return
+	}
 	if s.historyCounters == nil {
 		s.historyCounters = make(map[string]*historyMinuteCounters)
 	}
@@ -324,8 +325,6 @@ func (s *Server) recordHistoryAdmissionLocked(token historyReadToken, d history.
 		counter.held++
 	case "reverse":
 		counter.reverse++
-	case "legacy":
-		counter.legacy++
 	case "freeze":
 		counter.freezes++
 		if d.Reason == "held_majority" {
@@ -386,7 +385,7 @@ func (s *Server) flushHistoryCounters(now time.Time) {
 	for _, report := range reports {
 		c := report.counters
 		s.logger.Info("physical history minute", "pane_id", report.paneID, "admissions", c.admissions,
-			"initial", c.initial, "boundary", c.boundary, "stationary", c.stationary, "replaced", c.replaced, "forward", c.forward, "held", c.held, "reverse", c.reverse, "legacy", c.legacy,
+			"initial", c.initial, "boundary", c.boundary, "stationary", c.stationary, "replaced", c.replaced, "forward", c.forward, "held", c.held, "reverse", c.reverse,
 			"freezes", c.freezes, "held_majority", c.heldMajority, "pair_budget", c.pairBudget,
 			"matched_rows", c.matchedRows, "retired_rows", c.retiredRows, "replaced_rows", c.replacedRows,
 			"held_added_rows", c.heldAddedRows, "held_evicted_rows", c.heldEvictedRows, "held_expired_rows", c.heldExpiredRows, "held_total_rows", c.currentHeldRows,

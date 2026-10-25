@@ -18,13 +18,15 @@ project follows [Semantic Versioning](https://semver.org/).
   reacquisition, and height changes. Source changes and changed or unknown
   physical columns start boundaries. Bounded word agreement can remove a
   proved whole-row archive suffix; a partial seam keeps one overlapping row,
-  and refusal retains the boundary copy. One substantive-row reverse and a
-  generation-bound cleared-slot return can retract supported recent copies;
-  this does not deduplicate stored history globally. Physical matching retires
-  supported rows in old-coordinate order and preserves the
-  raw current page before reader-row limits and response clipping. Supported
-  slots or tails of one to three physical rows
-  can change in place when the new slot is at least as large; their old values
+  and refusal retains the boundary copy. Qoder boundaries keep the copy without
+  reconciliation. Compared rows with unsplit paths, code punctuation, or
+  combining marks, including variation selectors, can refuse reconciliation.
+  One substantive-row reverse and a generation-bound cleared-slot return can
+  retract supported recent copies; this does not deduplicate stored history
+  globally. Physical matching retires supported rows in old-coordinate order
+  and preserves the raw current page before reader-row limits and response
+  clipping. Supported slots or tails of one to three physical rows can change
+  in place when the new slot is at least as large; their old values
   are not archived. Unresolved rows stay invisible in a separate 2,000-row
   oldest-first held ring beyond the 10,000 history rows, with removal counts in
   logs. Short clears can replace or hold an exchange under these generic rules.
@@ -41,7 +43,12 @@ project follows [Semantic Versioning](https://semver.org/).
   descriptors and its `ps` resolver.
   Same-terminal-ID respawn can leave a Linux read pin stale until an
   invalidation signal. A retired pin with a blocked borrower keeps later
-  physical captures refused. Storage stays at `snapshot_version=1`.
+  physical capture admission refused. A physical display read blocked in Size
+  keeps its shared-read entry; later display reads with that key, from other
+  clients too, join it and fail at their command deadline until the key changes
+  or the relay restarts.
+  Legacy reads can temporarily merge a replacement terminal's page into the old
+  archive before inventory reports it. Storage stays at `snapshot_version=1`.
 - Clip oldest response rows so a single composed frame no longer exceeds the
   per-message limit. This includes large unleased history responses; fitting
   content stays unchanged, and a response with no fitting row succeeds with

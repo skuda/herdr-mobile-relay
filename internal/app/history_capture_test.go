@@ -2130,3 +2130,18 @@ func TestLateHistoryTickCannotBurstWithPromptTick(t *testing.T) {
 		t.Fatalf("capture did not resume after actual-time floor: reads=%d", got)
 	}
 }
+
+func TestHistoryCapturePromptGrammarOptIn(t *testing.T) {
+	for _, agentName := range []string{"Claude Code", "CLAUDE", "qoder"} {
+		t.Run(agentName, func(t *testing.T) {
+			s, _, _ := captureServer(t, false)
+			agent, _ := s.state.Agent("pane-1")
+			agent.Agent = agentName
+			s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+			result := executeCapture(t, s, capturePage("A", "B"), false)
+			if !result.Capture.Admitted || result.Capture.Snapshot.ClaudePromptGrammar != strings.Contains(strings.ToLower(agentName), "claude") {
+				t.Errorf("incorrect prompt grammar opt-in: %+v", result.Capture)
+			}
+		})
+	}
+}

@@ -564,3 +564,27 @@ func TestPhysicalArchiveGenerationMutationSites(t *testing.T) {
 	state.Held = []HeldRecord{{Rows: []string{"held"}, Position: state.LiveStart, Segment: state.SegmentStart, FirstSeenAt: time.Now().UTC()}}
 	physicalHeld(t, state)
 }
+
+func TestFullHistoryClearedSlotReturn(t *testing.T) {
+	m := NewManager(t.TempDir())
+	ctx := physicalContext(1, 54)
+	old, blank := []string{"H", "X", "T", "U"}, []string{"H", "", "T", "U"}
+	admitPhysicalOccurrence(t, m, old, ctx, "X", 1)
+	state := m.states["p"]
+	prefix := make([]string, MaxLines-len(old))
+	for i := range prefix {
+		prefix[i] = fmt.Sprintf("archive-%d", i)
+	}
+	state.History = append(prefix, state.History...)
+	state.LiveStart = len(prefix)
+	for cycle := range 3 {
+		admitPhysicalOccurrence(t, m, blank, ctx, "X", 1)
+		if state.zeroDisplacementReturn == nil {
+			t.Errorf("cycle %d: same-admission trim cleared the new return record", cycle)
+		}
+		d := admitPhysicalOccurrence(t, m, old, ctx, "X", 1)
+		if d.RetractedRows != 1 {
+			t.Errorf("cycle %d: full-history return did not retract: %+v", cycle, d)
+		}
+	}
+}

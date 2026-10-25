@@ -1594,14 +1594,20 @@ func (s *Server) drainLifecycleWork() error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var failures []error
-	for _, group := range []struct {
+	groups := []struct {
 		name  string
 		tasks *lifecycleTasks
 	}{
 		{"transition", s.transitionTasks},
 		{"history capture", s.historyTasks},
 		{"history persistence", s.persistenceTasks},
-	} {
+	}
+	for _, group := range groups {
+		if group.tasks != nil {
+			group.tasks.cancelWork()
+		}
+	}
+	for _, group := range groups {
 		if group.tasks == nil {
 			continue
 		}
@@ -1613,7 +1619,11 @@ func (s *Server) drainLifecycleWork() error {
 		s.recordSafeError("final pane history save failed", err)
 		s.logger.Warn("final pane history save failed", "error", err)
 	}
-	return errors.Join(failures...)
+	err := errors.Join(failures...)
+	if err != nil {
+		s.logger.Warn("lifecycle work did not drain at shutdown", "error", err)
+	}
+	return err
 }
 
 func (s *Server) reconcileRecoveredPush(ctx context.Context, agents []*coordinator.AgentState) {

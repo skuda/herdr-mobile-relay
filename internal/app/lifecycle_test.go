@@ -1,8 +1,10 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -97,7 +99,7 @@ func TestShutdownBlockedHistorySampleStillSaves(t *testing.T) {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	err := s.paneSizeM.Shutdown(shutdownCtx)
 	cancel()
-	if err == nil || !strings.Contains(err.Error(), "history descriptors (shutdown deadline: context deadline exceeded)") {
+	if err == nil || !strings.Contains(err.Error(), "unresolved history descriptors at shutdown: context deadline exceeded") {
 		t.Fatalf("manager did not report the blocked descriptor: %v", err)
 	}
 	s.lifecycleDrainTimeout = 25 * time.Millisecond
@@ -236,5 +238,22 @@ func TestLifecycleTasksStopCancelsDrainsAndClosesAdmission(t *testing.T) {
 	}
 	if tasks.Start(func(context.Context) {}) {
 		t.Fatal("task admitted after Stop")
+	}
+}
+
+func TestLifecycleDrainFailureIsLogged(t *testing.T) {
+	s, _, _ := captureServer(t, false)
+	var logs bytes.Buffer
+	s.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	s.historyTasks = newLifecycleTasks(context.Background())
+	release := make(chan struct{})
+	s.historyTasks.Start(func(context.Context) { <-release })
+	t.Cleanup(func() { close(release); s.historyTasks.Stop() })
+	s.lifecycleDrainTimeout = time.Millisecond
+	if err := s.drainLifecycleWork(); err == nil {
+		t.Fatal("fixture did not time out")
+	}
+	if !strings.Contains(logs.String(), "unfinished history capture work") {
+		t.Error("lifecycle failure has no diagnostic when Run preserves an earlier error")
 	}
 }

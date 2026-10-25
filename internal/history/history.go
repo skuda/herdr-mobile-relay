@@ -49,7 +49,6 @@ type PaneState struct {
 	archiveGeneration      uint64
 	zeroDisplacementReturn *physicalReturnRecord
 
-	loaded          bool
 	snapshotInvalid bool
 	heldInvalid     bool
 	dirty           bool
@@ -261,7 +260,6 @@ func (m *Manager) loadState(paneID string) *PaneState {
 		if json.Unmarshal(data, s) != nil {
 			*s = PaneState{}
 		} else {
-			s.loaded = true
 			validateSnapshotState(s)
 			trimSnapshotState(s)
 		}

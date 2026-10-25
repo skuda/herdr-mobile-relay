@@ -3,6 +3,7 @@ package history
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -13,19 +14,6 @@ var boundaryProse = []string{
 	"Amber lanterns guide quiet ships beside distant rocky shores.",
 	"Patient keepers tend bright lamps through heavy winter storms.",
 	"Morning sunlight reveals calm waters beyond the sheltered harbor.",
-}
-
-func boundaryCounter(d SnapshotAdmission, name string) int {
-	switch name {
-	case "BoundaryReconciledRows":
-		return d.BoundaryReconciledRows
-	case "BoundaryRefused":
-		return d.BoundaryRefused
-	case "BoundarySeamKept":
-		return d.BoundarySeamKept
-	default:
-		return 0
-	}
 }
 
 func TestBoundaryRepeatedBlocksAcrossSeparatorsRefuse(t *testing.T) {
@@ -207,7 +195,7 @@ func TestBoundaryWholeRowSuffixReconciliation(t *testing.T) {
 			if content != snapshotPage(append([]string{old[0]}, incoming...)...) {
 				t.Error("reconciliation did not preserve prefix plus exact raw page")
 			}
-			if boundaryCounter(d, "BoundaryReconciledRows") != 3 || boundaryCounter(d, "BoundaryRefused") != 0 {
+			if d.BoundaryReconciledRows != 3 || d.BoundaryRefused != 0 {
 				t.Errorf("boundary diagnostics=%+v", d)
 			}
 		})
@@ -222,7 +210,7 @@ func TestBoundaryPartialSeamKeepsOneArchiveRow(t *testing.T) {
 	ctx.Columns = 62
 	_, _, d := m.AdmitSnapshot("p", snapshotPage(boundaryProse...), ctx, 0)
 	state := m.states["p"]
-	if state.LiveStart != 2 || !slices.Equal(state.History[:state.LiveStart], old[:2]) || boundaryCounter(d, "BoundarySeamKept") != 1 || boundaryCounter(d, "BoundaryReconciledRows") != 2 {
+	if state.LiveStart != 2 || !slices.Equal(state.History[:state.LiveStart], old[:2]) || d.BoundarySeamKept != 1 || d.BoundaryReconciledRows != 2 {
 		t.Errorf("partial seam live=%d diagnostics=%+v", state.LiveStart, d)
 	}
 }
@@ -240,7 +228,7 @@ func TestBoundaryDeletionClampsHeldAndInvalidatesReturn(t *testing.T) {
 	generation := state.archiveGeneration
 	ctx.Columns = 62
 	_, _, d := m.AdmitSnapshot("p", snapshotPage(boundaryProse[0], "", boundaryProse[1]), ctx, 0)
-	if state.LiveStart != 1 || state.SegmentStart != 1 || state.archiveGeneration <= generation || boundaryCounter(d, "BoundaryReconciledRows") != 3 {
+	if state.LiveStart != 1 || state.SegmentStart != 1 || state.archiveGeneration <= generation || d.BoundaryReconciledRows != 3 {
 		t.Errorf("suffix deletion coordinates live=%d segment=%d generation=%d diagnostics=%+v", state.LiveStart, state.SegmentStart, state.archiveGeneration, d)
 	}
 	for i, record := range state.Held {
@@ -556,9 +544,45 @@ func TestBoundaryRefusalGuards(t *testing.T) {
 			ctx.Columns = 62
 			_, _, d := m.AdmitSnapshot("p", snapshotPage(test.next...), ctx, 0)
 			state := m.states["p"]
-			if state.LiveStart != len(test.old) || boundaryCounter(d, "BoundaryRefused") != 1 {
+			if state.LiveStart != len(test.old) || d.BoundaryRefused != 1 {
 				t.Errorf("unsupported boundary deleted rows or omitted refusal: live=%d want=%d diagnostics=%+v", state.LiveStart, len(test.old), d)
 			}
 		})
+	}
+}
+
+func TestPairedBoundaryPreviewEqualsAdmission(t *testing.T) {
+	pages := boundaryReplayPages(t)
+	m := NewManager(t.TempDir())
+	for _, page := range pages[:2] {
+		ctx := physicalContext(1, page.Columns)
+		ctx.ReadSource = page.Source
+		m.AdmitSnapshot("p", strings.Join(page.Rows, "\n"), ctx, 0)
+	}
+	page := pages[2]
+	ctx := physicalContext(2, page.Columns)
+	raw := strings.Join(page.Rows, "\n")
+	state := m.states["p"]
+	before := *state
+	before.History, before.Footer, before.Held = slices.Clone(state.History), slices.Clone(state.Footer), cloneHeldRecords(state.Held)
+	preview, ok := m.PreviewSnapshot("p", raw, ctx)
+	if !ok || !reflect.DeepEqual(before, *state) {
+		t.Fatal("paired preview changed history state")
+	}
+	content, _, d := m.AdmitSnapshot("p", raw, ctx, 0)
+	if preview != content || d.BoundaryReconciledRows != 39 {
+		t.Fatal("paired preview differs from the boundary admission")
+	}
+}
+
+func TestQoderPromptBoundaryKeepsArchive(t *testing.T) {
+	m := NewManager(t.TempDir())
+	ctx := SnapshotContext{TerminalID: "terminal", ReadSource: SourceLegacy}
+	m.AdmitSnapshot("p", snapshotPage(boundaryProse...), ctx, 0)
+	ctx.ReadSource, ctx.Columns = SourceRecent, 62
+	incoming := append([]string{" > Repeat this answer: " + boundaryProse[0]}, boundaryProse[1:]...)
+	_, _, d := m.AdmitSnapshot("p", snapshotPage(incoming...), ctx, 0)
+	if d.BoundaryRefused != 1 || d.BoundaryReconciledRows != 0 || !slices.Equal(m.states["p"].History[:len(boundaryProse)], boundaryProse) {
+		t.Errorf("Qoder prompt deleted the stored answer: %+v", d)
 	}
 }

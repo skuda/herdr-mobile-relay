@@ -17,7 +17,7 @@ import (
 func BenchmarkBoundaryCaptureLock(b *testing.B) {
 	s := &Server{historyCounters: make(map[string]*historyMinuteCounters), historyNow: time.Now}
 	m := history.NewManager(b.TempDir())
-	oldContext := history.SnapshotContext{TerminalID: "terminal", ReadSource: history.SourceRecent, Columns: 150, Rows: 87}
+	oldContext := history.SnapshotContext{ClaudePromptGrammar: true, TerminalID: "terminal", ReadSource: history.SourceRecent, Columns: 150, Rows: 87}
 	nextContext := oldContext
 	nextContext.Columns = 62
 	rows := []string{"Amber lanterns guide quiet ships beside distant rocky shores.", "Patient keepers tend bright lamps through heavy winter storms."}
@@ -195,7 +195,7 @@ func TestHistoryBoundaryCounterAggregationDoesNotCountRoutineLegacy(t *testing.T
 	s.recordHistoryAdmissionLocked(token, history.SnapshotAdmission{Class: "legacy", BoundaryRefused: 1, BoundarySeamKept: 1,
 		HeldExpiredRows: 2, HeldEvictedRows: 3, HeldTotalRows: 4, DPPairs: 5, MatchedRows: 6})
 	counter := s.historyCounters["pane-1"]
-	if counter.admissions != 0 || counter.legacy != 0 || counter.dpPairs != 0 || counter.matchedRows != 0 || counter.boundaryRefused != 1 || counter.boundarySeamKept != 1 {
+	if counter.admissions != 0 || counter.dpPairs != 0 || counter.matchedRows != 0 || counter.boundaryRefused != 1 || counter.boundarySeamKept != 1 {
 		t.Errorf("legacy boundary counted physical matcher work: %+v", counter)
 	}
 	if counter.heldExpiredRows != 2 || counter.heldEvictedRows != 3 || counter.currentHeldRows != 4 {

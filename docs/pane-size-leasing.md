@@ -80,8 +80,8 @@ Linux's procfs resolver checks process birth and controlling-TTY identity
 before and after inspecting the candidate `/dev/pts/<minor>` device. The
 candidate must be a character device with the decoded device number. Shell
 validation compares the recorded PID and start time. When Herdr reports no
-shell, validation resolves the current foreground leader and checks its TTY
-path and device instead; foreground-process turnover on that terminal is
+shell, validation resolves the process selected by `foregroundPID` and checks
+its TTY path and device instead; foreground-process turnover on that terminal is
 permitted. These process fingerprints stay in memory.
 
 A missing `terminal_id`, unavailable shell/foreground identity, or unavailable
@@ -148,11 +148,10 @@ the pane's generation is incremented so a cleanup attempt planned earlier can
 never write over or delete the newer lease.
 
 Lease acquisition, reconciliation, and restore work use a per-pane lock.
-History reads validate held descriptors separately and check geometry revisions
-around their samples. Bookkeeping uses a separate short lock. Each cleanup
-attempt runs with a 3 s timeout, and the sweep handles due panes concurrently.
-Shutdown stops accepting leases and makes one
-concurrent restore attempt per pane within a 5 s overall deadline; panes it
+History reads check geometry revisions around their samples. Bookkeeping uses
+a separate short lock. Each cleanup attempt runs with a 3 s timeout, and the
+sweep handles due panes concurrently. Shutdown stops accepting leases and makes
+one concurrent restore attempt per pane within a 5 s overall deadline; panes it
 could not restore are logged and returned as an error, never reported as
 restored.
 
@@ -178,7 +177,9 @@ names containing `claude` or `qoder` with a known zero
 and nonempty terminal identity; event topology commits retain current
 same-terminal evidence. Missing metrics do not qualify. Zero describes a lack
 of scrollback, not an explicit alternate-screen mode: a fresh primary-screen
-pane can satisfy this heuristic.
+pane can satisfy this heuristic. A failed `pane.list` makes metrics unknown.
+A leased pane then leaves the physical route until metrics return. Admitting a
+legacy page and then a physical page adds two representation boundaries.
 
 `LeaseHistoryState` includes resolved lease state, navigation grace, expired
 leases awaiting cleanup, and pending restore work. The gate ends when cleanup
@@ -217,8 +218,11 @@ validation failure or identity mismatch, observed departure through
 shutdown retire the matching pin. Closure waits for its borrowers to release.
 The manager retains at most one history pin per pane, including a retired pin
 that is still draining. If a borrower's Size call does not return, later
-physical captures of that pane remain refused; the manager reports unresolved
-history descriptors at its deadline. The server then bounds its lifecycle join
+physical capture admission remains refused. A physical display read blocked in
+Size keeps its shared-read entry. Later display reads with that key, from other
+clients too, join it and fail at their command deadline until the key changes
+or the relay restarts. The manager reports unresolved history descriptors at
+its shutdown deadline. The server then bounds its lifecycle join
 to five seconds. It can return with the borrower still blocked.
 
 A held descriptor identifies a PTY instance, not the runtime Herdr currently
@@ -262,8 +266,11 @@ Raw-length checks precede normalization and comparison-view allocation; a
 second raw normalization pass is charged separately. Exhaustion, unsupported
 structure, or occurrence ambiguity refuses the cut and retains the boundary
 copy. Code/table structure, split paths or URLs, split words, repeated prose,
-and competing occurrences can cause refusal. Comparison tokens do not
-reconstruct the displayed page or split stored ANSI rows.
+and competing occurrences can cause refusal. Unsplit paths, code punctuation
+(backticks, braces, brackets, pipes, slashes, or backslashes), and combining
+marks, including variation selectors, in compared rows can also cause refusal.
+Comparison tokens do not reconstruct the displayed page or split stored ANSI
+rows.
 
 Previously frozen physical prefixes stay outside destructive legacy matching.
 An external A→B→A change entirely between physical samples remains undetectable.
@@ -294,12 +301,13 @@ the combined occurrence proof. A zero-displacement cleared-slot return uses one
 runtime record: it binds the archived tail to its segment, archive generation,
 agreed neighbours, coordinates, and intervening layout. The slot must remain
 blank under that support until the rows return. Successful retraction consumes
-the record; archive mutation, trim, reload, terminal reset, or a representation
-boundary invalidates it. This is not global text deduplication and does not
-remove duplicates already stored. Same-segment matching does not search earlier
-segments. The response is the archive prefix
-followed by the raw current page, including its header, footer, and styles,
-before the reader's row limit and response clipping apply.
+the record; a later archive mutation, trim, reload, terminal reset, or a
+representation boundary invalidates it. A record created by an admission can
+survive that admission's prefix trim when its archived tail remains retained.
+This is not global text deduplication and does not remove duplicates already
+stored. Same-segment matching does not search earlier segments. The response is
+the archive prefix followed by the raw current page, including its header,
+footer, and styles, before the reader's row limit and response clipping apply.
 Held rows remain invisible. Their separate 2,000-row ring removes oldest rows in
 append order, including partial records, with eviction counts in logs. History
 prefix trimming can also expire held records whose archive pins fall before it.
@@ -400,9 +408,9 @@ unchanged by this release.
 
 This release includes a new phone-app build. It estimates leased prose using
 the effective shared width and adjusts short/blank anchors for contextual
-prepends. Use the matching app build; published 0.22.11 and older apps lack
-these frontend corrections. No new history capability or
-client-side history merger is introduced.
+prepends. Use the matching app build. For an ambiguous short or repeated
+anchor, the app applies no shift, so the view can jump. No new history
+capability or client-side history merger is introduced.
 
 ## Residual risks
 
@@ -417,7 +425,8 @@ client-side history merger is introduced.
   occurrence instead of two. So can a request repeated with identical text and
   an identical answer when the earlier copy is not on the incoming page. Answer
   text not separated from a preceding `❯` prompt row by a blank row is
-  classified as prompt text.
+  classified as prompt text. Qoder boundaries are not reconciled; they keep
+  the boundary copy.
 - **Value-equality restore heuristic** — see above.
 - **Desktop fights** — when the desktop resizes the pane while it is leased,
   the change becomes the new restore point and the lease is applied again at
@@ -426,9 +435,14 @@ client-side history merger is introduced.
   reports and the platform's controlling-TTY evidence. Linux checks shell
   process birth; Darwin retains its `ps` path. The Linux read pin can remain
   stale after same-terminal-ID respawn until a documented invalidation signal.
-  A retired pin with a blocked borrower can keep that pane's later physical
-  captures refused. Shutdown reports the unresolved descriptor, bounds its
-  lifecycle join, and saves admitted dirty history even if that join times out.
+  On the legacy route, a replacement terminal's page can merge into the old
+  terminal's archive until inventory reports the replacement.
+  A retired pin with a blocked borrower can keep physical capture admission
+  refused. A physical display read blocked in Size keeps its shared-read entry;
+  later display reads with that key, from other clients too, join it and fail at
+  their command deadline until the key changes or the relay restarts.
+  Shutdown reports the unresolved descriptor, bounds its lifecycle join, and
+  saves admitted dirty history even if that join times out.
 - **Platforms** — darwin and linux only; other builds do not advertise it.
 - **Phone qualification incomplete** — unit, real-PTY, relay blackbox and
   browser tests do not establish an end-to-end real-phone resize/restore pass.

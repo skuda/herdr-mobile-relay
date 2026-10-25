@@ -2,17 +2,24 @@ package panesize
 
 import (
 	"context"
-	"errors"
 	"fmt"
 )
 
 type historyPin struct {
 	terminal  Terminal
 	paneID    string
-	identity  terminalIdentity
 	borrowers int
 	retired   bool
 	queued    bool
+}
+
+func (m *Manager) paneHistoryPinnedLocked(paneID string) bool {
+	for pin := range m.historyPins {
+		if pin.paneID == paneID {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) notifyHistoryLocked() {
@@ -39,31 +46,29 @@ func (m *Manager) queueHistoryCloseLocked(pin *historyPin) {
 	}
 }
 
-func (m *Manager) closeRetiredHistoryPins() error {
+func (m *Manager) closeRetiredHistoryPins() {
 	m.mu.Lock()
 	closing := m.historyClosing
 	m.historyClosing = nil
 	m.mu.Unlock()
-	var failures []error
 	for _, pin := range closing {
 		if err := pin.terminal.Close(); err != nil {
-			failures = append(failures, err)
+			m.logger.Warn("retired history descriptor close failed", "pane_id", pin.paneID, "error", err)
 		}
 		m.mu.Lock()
 		delete(m.historyPins, pin)
 		m.notifyHistoryLocked()
 		m.mu.Unlock()
 	}
-	return errors.Join(failures...)
 }
 
-func (m *Manager) releaseHistoryPin(pin *historyPin) error {
+func (m *Manager) releaseHistoryPin(pin *historyPin) {
 	m.mu.Lock()
 	pin.borrowers--
 	m.queueHistoryCloseLocked(pin)
 	m.notifyHistoryLocked()
 	m.mu.Unlock()
-	return m.closeRetiredHistoryPins()
+	m.closeRetiredHistoryPins()
 }
 
 func (m *Manager) beginPinnedHistoryRead(ctx context.Context, paneID, terminalID string) (*HistoryRead, error) {
@@ -110,17 +115,11 @@ func (m *Manager) beginPinnedHistoryRead(ctx context.Context, paneID, terminalID
 				continue
 			}
 		}
-		blocked := false
-		for pin := range m.historyPins {
-			if pin.paneID == paneID {
-				blocked = true
-				break
-			}
-		}
+		blocked := m.paneHistoryPinnedLocked(paneID)
 		if blocked {
 			m.mu.Unlock()
-			_ = m.closeRetiredHistoryPins()
-			return nil, ErrHistoryReadUnsafe
+			m.closeRetiredHistoryPins()
+			return nil, ErrHistoryPinPending
 		}
 		wait := make(chan struct{})
 		state.resolving = wait
@@ -158,24 +157,27 @@ func (m *Manager) beginPinnedHistoryRead(ctx context.Context, paneID, terminalID
 			delete(m.historyResolving, wait)
 			m.notifyHistoryLocked()
 			m.mu.Unlock()
-			_ = m.closeRetiredHistoryPins()
+			m.closeRetiredHistoryPins()
 			if err != nil {
 				return nil, err
 			}
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			return nil, ErrHistoryReadUnsafe
+			return nil, ErrHistoryPinPending
 		}
-		if state.identity != identity {
+		if !sameHistoryTerminal(state.identity, identity) {
 			state = m.historyStateLocked(paneID, identity)
 			revision = state.geometry.Revision
 		}
 		state.identity = identity
+		if pane := m.panes[paneID]; pane != nil && sameHistoryTerminal(pane.identity, identity) {
+			pane.identity = identity
+		}
 		state.forceFresh = false
 		state.forgotten = false
 		state.geometry.PaneID, state.geometry.TerminalID = paneID, terminalID
-		pin := &historyPin{terminal: terminal, paneID: paneID, identity: identity, borrowers: 1}
+		pin := &historyPin{terminal: terminal, paneID: paneID, borrowers: 1}
 		state.pin = pin
 		m.historyPins[pin] = true
 		delete(m.historyResolving, wait)

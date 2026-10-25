@@ -300,8 +300,11 @@ func TestHeldFencesPreserveAndTerminalResetDrops(t *testing.T) {
 		case "source":
 			ctx.ReadSource = SourceLegacy
 		case "restart":
-			state.loaded = true
-			ctx.NoScrollback = true
+			if err := m.SaveAll(); err != nil {
+				t.Fatal(err)
+			}
+			m = NewManager(strings.TrimSuffix(m.dir, "/claude-history"))
+			state = m.loadState("p")
 		}
 		m.AdmitSnapshot("p", snapshotPage("new1", "new2"), ctx, 0)
 		if len(physicalHeldRows(t, state)) != 1 {

@@ -106,7 +106,7 @@ func TestBoundaryCompetingPromptClassification(t *testing.T) {
 		{"prompt-then-prose", []string{"❯ alpha bravo charlie delta echo", "foxtrot golf hotel india juliet kilo lima", "", boundaryProse[0], boundaryProse[1]}, 0, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			view := boundaryView{rows: test.rows, firstRow: test.firstRow}
+			view := boundaryView{rows: test.rows, firstRow: test.firstRow, contexts: boundaryRowContexts(test.rows)}
 			work := boundaryWork{}
 			for i, row := range test.rows {
 				tokens, ok := work.addTokens(row, test.firstRow+i)
@@ -128,7 +128,7 @@ func TestBoundaryTwoSubstantiveRowCompetingRunRefuses(t *testing.T) {
 		{"alpha bravo charlie delta echo foxtrot", "golf hotel india juliet kilo lima"},
 		{"alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima", "mike november"},
 	} {
-		view := boundaryView{rows: rows}
+		view := boundaryView{rows: rows, contexts: boundaryRowContexts(rows)}
 		work := boundaryWork{}
 		for i, row := range rows {
 			tokens, ok := work.addTokens(row, i)
@@ -176,7 +176,7 @@ func TestBoundaryPromptBlockBounds(t *testing.T) {
 		{"no-substantive", []string{"", "---"}, 0, 2, 0, 0, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			view := boundaryView{rows: test.rows, firstRow: test.firstRow}
+			view := boundaryView{rows: test.rows, firstRow: test.firstRow, contexts: boundaryRowContexts(test.rows)}
 			first, last, found := boundaryPromptBlock(view, test.before)
 			if first != test.first || last != test.last || found != test.found {
 				t.Errorf("prompt block=%d..%d/%v, want %d..%d/%v", first, last, found, test.first, test.last, test.found)

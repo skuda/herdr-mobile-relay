@@ -127,9 +127,8 @@ type Lease struct {
 	ExpiresAt time.Time
 }
 
-// terminalIdentity is captured at acquisition and re-validated before every
-// write. shellPID is zero only when Herdr reported no shell and the TTY was
-// found through the foreground process group leader instead.
+// terminalIdentity is captured at acquisition and re-validated before writes.
+// A zero shellPID uses the process selected by foregroundPID for TTY evidence.
 type terminalIdentity struct {
 	terminalID   string
 	shellPID     int
@@ -137,6 +136,14 @@ type terminalIdentity struct {
 	rdev         uint64
 	processPID   int
 	processStart uint64
+}
+
+func sameHistoryTerminal(a, b terminalIdentity) bool {
+	if a.shellPID == 0 && b.shellPID == 0 {
+		a.processPID, a.processStart = 0, 0
+		b.processPID, b.processStart = 0, 0
+	}
+	return a == b
 }
 
 type size struct {
@@ -327,7 +334,7 @@ func (m *Manager) Acquire(
 				m.historyUnknownLocked(paneID, history.identity.terminalID)
 			}
 			m.mu.Unlock()
-			_ = m.closeRetiredHistoryPins()
+			m.closeRetiredHistoryPins()
 			forget()
 			return 0, 0, err
 		}
@@ -338,7 +345,6 @@ func (m *Manager) Acquire(
 	}
 	terminal, err := m.openValidated(opCtx, paneID, &identity, created)
 	if err != nil {
-		m.historyUnknown(paneID, identity.terminalID)
 		if created {
 			forget()
 		} else if errors.Is(err, ErrTerminalGone) {
@@ -638,7 +644,8 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		}()
 	}
 	wg.Wait()
-	_ = m.closeRetiredHistoryPins()
+	m.closeRetiredHistoryPins()
+	var historyErr error
 historyDrain:
 	for {
 		m.mu.Lock()
@@ -651,17 +658,18 @@ historyDrain:
 		select {
 		case <-changed:
 		case <-ctx.Done():
-			unresolved = append(unresolved, "history descriptors (shutdown deadline: "+ctx.Err().Error()+")")
+			historyErr = fmt.Errorf("unresolved history descriptors at shutdown: %w", ctx.Err())
+			m.logger.Warn("history descriptors did not drain at shutdown", "error", historyErr)
 			break historyDrain
 		}
 	}
 	if len(unresolved) == 0 {
-		return nil
+		return historyErr
 	}
 	slices.Sort(unresolved)
 	m.logger.Warn("pane sizes were not restored at shutdown; resize these panes locally",
 		"panes", strings.Join(unresolved, "; "))
-	return fmt.Errorf("pane sizes not restored: %s", strings.Join(unresolved, "; "))
+	return errors.Join(fmt.Errorf("pane sizes not restored: %s", strings.Join(unresolved, "; ")), historyErr)
 }
 
 func (m *Manager) shutdownPane(ctx context.Context, paneID string, state *paneState) error {
@@ -692,9 +700,8 @@ func (m *Manager) shutdownPane(ctx context.Context, paneID string, state *paneSt
 	return err
 }
 
-// ReadGeometry reports the leased geometry a pane read should use, but only
-// for a client that itself holds an active lease on that pane: everyone else
-// reads the pane at Herdr's own size.
+// ReadGeometry supplies leased columns and rows for a client with an active
+// lease on the pane.
 func (m *Manager) ReadGeometry(clientID, paneID string) (int, int, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -835,8 +842,8 @@ func (m *Manager) lookupIdentity(ctx context.Context, paneID string) (terminalId
 // that the held descriptor is a character device with the recorded device
 // number, and only then (c) re-validates the pane with fresh lookups: the same
 // Herdr terminal_id, the same shell pid, and that pid's TTY is still the
-// cached path. The caller performs its ioctls on the returned descriptor and
-// closes it; a successful check is never reused for a later write.
+// cached path. Mutation callers close the descriptor after their ioctls;
+// history reads can retain it in a manager-owned pin.
 //
 // The order is the point. A pseudo-terminal is not returned to the allocator
 // while any descriptor on it is open: Linux frees a devpts index only when the
@@ -847,19 +854,18 @@ func (m *Manager) lookupIdentity(ctx context.Context, paneID string) (terminalId
 // held descriptor is that shell's terminal and cannot be a reused PTY that now
 // belongs to another pane. Checking first and opening second would leave
 // exactly that window open.
-//
-// With capture (acquisition), the device number is recorded instead of
-// compared.
 func (m *Manager) openValidated(ctx context.Context, paneID string, identity *terminalIdentity, capture bool) (result Terminal, resultErr error) {
 	defer func() {
 		m.mu.Lock()
 		if state := m.historyGeometry[paneID]; state != nil && state.identity.terminalID == identity.terminalID {
-			if resultErr != nil || capture && state.pin != nil && state.identity != *identity {
+			if resultErr != nil || capture && state.pin != nil && !sameHistoryTerminal(state.identity, *identity) {
 				m.historyUnknownLocked(paneID, identity.terminalID)
+			} else if capture && sameHistoryTerminal(state.identity, *identity) {
+				state.identity = *identity
 			}
 		}
 		m.mu.Unlock()
-		_ = m.closeRetiredHistoryPins()
+		m.closeRetiredHistoryPins()
 	}()
 	terminal, err := m.ops.Open(identity.ttyPath)
 	if err != nil {
@@ -942,7 +948,7 @@ func (m *Manager) validateIdentity(ctx context.Context, paneID string, identity 
 		if identity.processStart == 0 || identity.rdev != rdev || identity.ttyPath != tty {
 			return gone("pane controlling terminal changed")
 		}
-		if identity.shellPID > 0 && (identity.processPID != pid || identity.processStart != start) {
+		if identity.shellPID > 0 && identity.processStart != start {
 			return gone("pane shell process changed")
 		}
 		return nil
@@ -1000,7 +1006,6 @@ func (m *Manager) reconcileActive(ctx context.Context, paneID string, state *pan
 	m.mu.Unlock()
 	terminal, err := m.openValidated(ctx, paneID, &identity, false)
 	if err != nil {
-		m.historyUnknown(paneID, identity.terminalID)
 		if errors.Is(err, ErrTerminalGone) {
 			m.dropGone(paneID, state, err)
 		}
@@ -1112,7 +1117,6 @@ func (m *Manager) restoreOnce(ctx context.Context, paneID string, state *paneSta
 	}
 	terminal, err := m.openValidated(ctx, paneID, &identity, false)
 	if err != nil {
-		m.historyUnknown(paneID, identity.terminalID)
 		return err
 	}
 	defer terminal.Close()

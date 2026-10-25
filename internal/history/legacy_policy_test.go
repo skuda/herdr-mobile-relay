@@ -52,7 +52,7 @@ func TestFullscreenLegacyMatchesAcrossResizeAndRestart(t *testing.T) {
 			t.Run(fmt.Sprintf("old_format=%v/%s", oldFormat, name), func(t *testing.T) {
 				dir := t.TempDir()
 				m := NewManager(dir)
-				ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, GeometryEpoch: 1, NoScrollback: true}
+				ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, GeometryEpoch: 1}
 				if oldFormat {
 					writeLegacyBaselineFile(t, m, frames[0].body)
 				}
@@ -167,7 +167,7 @@ func TestFullscreenLegacyMatchesAcrossLeaseRevisions(t *testing.T) {
 		for name, frames := range legacyBaselineCases() {
 			t.Run(fmt.Sprintf("old_format=%v/%s", oldFormat, name), func(t *testing.T) {
 				m := NewManager(t.TempDir())
-				ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, GeometryEpoch: 1, NoScrollback: true}
+				ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, GeometryEpoch: 1}
 				if oldFormat {
 					writeLegacyBaselineFile(t, m, frames[0].body)
 				}
@@ -184,7 +184,7 @@ func TestFullscreenLegacyMatchesAcrossLeaseRevisions(t *testing.T) {
 	}
 }
 
-func TestLegacyKnownZeroInvalidMetadataKeepsFrozenPrefix(t *testing.T) {
+func TestLegacyInvalidMetadataKeepsFrozenPrefix(t *testing.T) {
 	for name, metadata := range map[string]string{
 		"held-type":     `"snapshot_version":1,"read_source":"legacy","live_start":3,"held":{}`,
 		"held-position": `"snapshot_version":1,"read_source":"legacy","live_start":3,"held":[{"rows":["held"],"position":4,"segment":0,"first_seen_at":"2026-01-02T03:04:05Z"}]`,
@@ -199,7 +199,7 @@ func TestLegacyKnownZeroInvalidMetadataKeepsFrozenPrefix(t *testing.T) {
 			if err := os.WriteFile(m.stateFile("p"), []byte(data), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, NoScrollback: true}
+			ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy}
 			for range 2 {
 				got, _, _ := m.AdmitSnapshot("p", "A\nB\nnew"+legacyBaselineFooter, ctx, 0)
 				if got != "A\nB\nretained\nA\nB\nnew"+legacyBaselineFooter || m.states["p"].SegmentStart != 3 {
@@ -214,11 +214,11 @@ func TestLegacyKnownZeroInvalidMetadataKeepsFrozenPrefix(t *testing.T) {
 	}
 }
 
-func TestLegacyKnownZeroDoesNotSearchPhysicalPrefix(t *testing.T) {
+func TestLegacyDoesNotSearchPhysicalPrefix(t *testing.T) {
 	root := t.TempDir()
 	m := NewManager(root)
 	m.AdmitSnapshot("p", snapshotPage("A", "B", "physical retained"), physicalContext(1, 54), 0)
-	ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, NoScrollback: true}
+	ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy}
 	m.AdmitSnapshot("p", "current X\ncurrent Y"+legacyBaselineFooter, ctx, 0)
 	for _, revision := range []uint64{0, 7, 0} {
 		ctx.GeometryEpoch, ctx.LeaseRevision = revision+1, revision
@@ -233,10 +233,10 @@ func TestLegacyKnownZeroDoesNotSearchPhysicalPrefix(t *testing.T) {
 	}
 }
 
-func TestLegacyKnownZeroPredicateCouplings(t *testing.T) {
+func TestLegacyRuntimeResizeAndFlatUpgradeContinuity(t *testing.T) {
 	t.Run("runtime-boundary", func(t *testing.T) {
 		m := NewManager(t.TempDir())
-		ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, GeometryEpoch: 1, NoScrollback: true}
+		ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, GeometryEpoch: 1}
 		assertLegacyBaselineAdmission(t, m, ctx, legacyBaselineFrame{"A\nB", "A\nB"})
 		ctx.GeometryEpoch = 2
 		assertLegacyBaselineAdmission(t, m, ctx, legacyBaselineFrame{"A\nB", "A\nB"})
@@ -244,32 +244,30 @@ func TestLegacyKnownZeroPredicateCouplings(t *testing.T) {
 	t.Run("flat-file-upgrade", func(t *testing.T) {
 		m := NewManager(t.TempDir())
 		writeLegacyBaselineFile(t, m, "A\nB")
-		ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, NoScrollback: true}
+		ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy}
 		assertLegacyBaselineAdmission(t, m, ctx, legacyBaselineFrame{"A\nB", "A\nB"})
 	})
 }
 
-func TestLegacyLifecycleLiteralBaselineAcrossScrollMetrics(t *testing.T) {
-	for _, metric := range []string{"known-zero", "positive", "unknown"} {
-		for _, oldFormat := range []bool{false, true} {
-			for name, frames := range legacyBaselineCases() {
-				t.Run(fmt.Sprintf("%s/old_format=%v/%s", metric, oldFormat, name), func(t *testing.T) {
-					root := t.TempDir()
-					m := NewManager(root)
-					ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, NoScrollback: metric == "known-zero"}
-					if oldFormat {
-						writeLegacyBaselineFile(t, m, frames[0].body)
+func TestLegacyLifecycleLiteralBaseline(t *testing.T) {
+	for _, oldFormat := range []bool{false, true} {
+		for name, frames := range legacyBaselineCases() {
+			t.Run(fmt.Sprintf("old_format=%v/%s", oldFormat, name), func(t *testing.T) {
+				root := t.TempDir()
+				m := NewManager(root)
+				ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy}
+				if oldFormat {
+					writeLegacyBaselineFile(t, m, frames[0].body)
+				}
+				for i, revision := range []uint64{0, 7, 0} {
+					ctx.GeometryEpoch, ctx.LeaseRevision = uint64(i+1), revision
+					assertLegacyBaselineAdmission(t, m, ctx, frames[min(i, len(frames)-1)])
+					if err := m.SaveAll(); err != nil {
+						t.Fatal(err)
 					}
-					for i, revision := range []uint64{0, 7, 0} {
-						ctx.GeometryEpoch, ctx.LeaseRevision = uint64(i+1), revision
-						assertLegacyBaselineAdmission(t, m, ctx, frames[min(i, len(frames)-1)])
-						if err := m.SaveAll(); err != nil {
-							t.Fatal(err)
-						}
-						m = NewManager(root)
-					}
-				})
-			}
+					m = NewManager(root)
+				}
+			})
 		}
 	}
 }

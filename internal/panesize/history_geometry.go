@@ -11,6 +11,7 @@ import (
 const HistorySettleWindow = 3 * time.Second
 
 var (
+	ErrHistoryPinPending = errors.New("pane history pin is not ready")
 	ErrHistoryReadUnsafe = errors.New("pane history read crossed an unsafe interval")
 	ErrHistoryReadClosed = errors.New("pane history read is closed")
 )
@@ -86,7 +87,8 @@ func (m *Manager) nextHistoryRevisionLocked() uint64 {
 
 func (m *Manager) historyStateLocked(paneID string, identity terminalIdentity) *historyGeometryState {
 	state := m.historyGeometry[paneID]
-	if state != nil && state.identity == identity {
+	if state != nil && sameHistoryTerminal(state.identity, identity) {
+		state.identity = identity
 		state.forgotten = false
 		return state
 	}
@@ -134,7 +136,7 @@ func (m *Manager) historyUnknown(paneID, terminalID string) {
 	m.mu.Lock()
 	m.historyUnknownLocked(paneID, terminalID)
 	m.mu.Unlock()
-	_ = m.closeRetiredHistoryPins()
+	m.closeRetiredHistoryPins()
 }
 
 func (m *Manager) historyLeaseChangedLocked(paneID string, identity terminalIdentity) {
@@ -146,10 +148,11 @@ func (m *Manager) setHistorySize(paneID string, identity terminalIdentity, termi
 	defer m.closeRetiredHistoryPins()
 	m.mu.Lock()
 	state := m.historyGeometry[paneID]
-	if state == nil || state.identity != identity {
+	if state == nil || !sameHistoryTerminal(state.identity, identity) {
 		state = m.historyStateLocked(paneID, identity)
 		state.forgotten = true
 	}
+	state.identity = identity
 	m.observeHistoryLocked(state, current)
 	next, changed := resized(current, want)
 	if !changed {
@@ -200,19 +203,16 @@ func (m *Manager) BeginHistoryRead(ctx context.Context, paneID, terminalID strin
 			m.retireHistoryPinLocked(state)
 		}
 		m.mu.Unlock()
-		_ = m.closeRetiredHistoryPins()
+		m.closeRetiredHistoryPins()
 		if !leased && !settling {
 			m.mu.Lock()
-			blocked := false
-			for pin := range m.historyPins {
-				if pin.paneID == paneID {
-					blocked = true
-					break
-				}
-			}
+			blocked := m.paneHistoryPinnedLocked(paneID)
 			m.mu.Unlock()
 			if blocked {
-				return nil, ErrHistoryReadUnsafe
+				if !matching && state != nil {
+					return nil, gone("history terminal was replaced")
+				}
+				return nil, ErrHistoryPinPending
 			}
 		}
 		if leased || settling {
@@ -377,7 +377,7 @@ func (r *HistoryRead) completeLocked(geometry HistoryGeometry, err error) {
 	}
 	var closeErr error
 	if r.pin != nil {
-		closeErr = r.manager.releaseHistoryPin(r.pin)
+		r.manager.releaseHistoryPin(r.pin)
 	} else {
 		closeErr = r.terminal.Close()
 	}

@@ -23,10 +23,7 @@ func physicalSubstantive(row string) bool {
 	return strings.ContainsFunc(row, func(c rune) bool { return unicode.IsLetter(c) || unicode.IsDigit(c) })
 }
 func comparisonBody(body []string) []string {
-	rows := make([]string, len(body))
-	for i, row := range body {
-		rows[i] = physicalComparisonRow(row)
-	}
+	rows := physicalComparisonRows(body)
 	for len(rows) > 0 && rows[len(rows)-1] == "" {
 		rows = rows[:len(rows)-1]
 	}
@@ -502,19 +499,13 @@ func physicalReturnCandidate(old, next []string, plan *physicalTransition) *phys
 			return nil
 		}
 	}
-	rows := make([]string, end-start)
-	for i, row := range old[start:end] {
-		rows[i] = strings.Clone(row)
-	}
+	rows := ownedRows(old[start:end])
 	record := &physicalReturnRecord{
 		rows: rows, neighbours: [2]string{strings.Clone(old[left]), strings.Clone(old[right])},
 		neighbourCoordinates: [2]int{left, right}, slot: start,
 	}
 	for side, bounds := range [][2]int{{left + 1, start}, {end, right}} {
-		record.layout[side] = make([]string, bounds[1]-bounds[0])
-		for i, row := range old[bounds[0]:bounds[1]] {
-			record.layout[side][i] = strings.Clone(row)
-		}
+		record.layout[side] = ownedRows(old[bounds[0]:bounds[1]])
 	}
 	return record
 }

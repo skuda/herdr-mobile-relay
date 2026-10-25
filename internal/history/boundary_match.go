@@ -53,9 +53,8 @@ const (
 )
 
 type boundaryRun struct {
-	side                                             string
-	firstRow, lastRow, needleFirstRow, needleLastRow int
-	words                                            int
+	firstRow, lastRow int
+	words             int
 }
 
 type boundaryResult struct {
@@ -166,13 +165,17 @@ func (work *boundaryWork) addTokens(row string, index int) ([]boundaryToken, boo
 	}
 	return tokens, true
 }
+func boundaryPromptRow(row string) bool {
+	return strings.HasPrefix(strings.TrimSpace(row), "❯")
+}
+
 func boundaryRowContexts(rows []string) []boundaryContext {
 	contexts := make([]boundaryContext, len(rows))
 	state := boundaryContextUnknown
 	for i, row := range rows {
 		if row == "" {
 			state = boundaryContextProse
-		} else if strings.HasPrefix(strings.TrimSpace(row), "❯") {
+		} else if boundaryPromptRow(row) {
 			state = boundaryContextPrompt
 		}
 		contexts[i] = state
@@ -258,14 +261,8 @@ func boundaryOccurrences(haystack, needle []boundaryToken, work *boundaryWork) (
 
 func boundaryCompetingRun(haystack, needle []boundaryToken, view boundaryView, work *boundaryWork) (boundaryRun, bool) {
 	prose := make([]bool, len(view.rows))
-	prompt := false
 	for i, row := range view.rows {
-		if row == "" {
-			prompt = false
-		} else if strings.HasPrefix(strings.TrimSpace(row), "❯") {
-			prompt = true
-		}
-		prose[i] = !prompt && physicalSubstantive(row)
+		prose[i] = view.contexts[i] != boundaryContextPrompt && physicalSubstantive(row)
 	}
 	starts := make(map[string][]int)
 	for start := 0; start+MinBoundaryWords <= len(needle); start++ {
@@ -290,7 +287,6 @@ func boundaryCompetingRun(haystack, needle []boundaryToken, view boundaryView, w
 				if j+1 >= MinBoundaryWords && proseRows >= MinBoundaryRows {
 					return boundaryRun{
 						firstRow: haystack[start].row, lastRow: row,
-						needleFirstRow: needle[candidate].row, needleLastRow: needle[candidate+j].row,
 						words: j + 1,
 					}, true
 				}
@@ -300,18 +296,9 @@ func boundaryCompetingRun(haystack, needle []boundaryToken, view boundaryView, w
 	return boundaryRun{}, true
 }
 
-func boundaryPrecedingSubstantive(view boundaryView, before int) int {
-	for row := before - 1; row >= view.firstRow; row-- {
-		if physicalSubstantive(view.rows[row-view.firstRow]) {
-			return row
-		}
-	}
-	return -1
-}
-
 func boundaryPromptBlock(view boundaryView, before int) (first, last int, found bool) {
 	for row := before - 1; row >= view.firstRow; row-- {
-		if !strings.HasPrefix(strings.TrimSpace(view.rows[row-view.firstRow]), "❯") {
+		if !boundaryPromptRow(view.rows[row-view.firstRow]) {
 			continue
 		}
 		last = row
@@ -343,7 +330,7 @@ func boundaryArchivePrompt(history []string, view *boundaryView, before int, wor
 			earlierRows = append(earlierRows, text)
 			earlierTokens = append(earlierTokens, tokens)
 		}
-		if strings.HasPrefix(strings.TrimSpace(text), "❯") {
+		if boundaryPromptRow(text) {
 			first, found = row, true
 			break
 		}
@@ -357,6 +344,7 @@ func boundaryArchivePrompt(history []string, view *boundaryView, before int, wor
 		}
 		view.tokens = append(tokens, view.tokens...)
 		view.firstRow -= len(earlierRows)
+		view.contexts = boundaryRowContexts(view.rows)
 	}
 	if !found {
 		return 0, 0, false, true
@@ -383,7 +371,7 @@ func boundaryBlockTokens(view boundaryView, first, last int) []boundaryToken {
 func boundaryRowStartMarker(view boundaryView, index int) bool {
 	row := view.tokens[index].row
 	return (index == 0 || view.tokens[index-1].row != row) &&
-		strings.HasPrefix(strings.TrimSpace(view.rows[row-view.firstRow]), "❯")
+		boundaryPromptRow(view.rows[row-view.firstRow])
 }
 
 func boundaryBlankGap(view boundaryView, previous, current int) bool {
@@ -477,7 +465,7 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 				contextKnown = true
 				break
 			}
-			if strings.HasPrefix(strings.TrimSpace(row), "❯") {
+			if boundaryPromptRow(row) {
 				prompt = true
 			}
 		}
@@ -492,7 +480,7 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 				prompt = false
 				continue
 			}
-			if strings.HasPrefix(strings.TrimSpace(row), "❯") {
+			if boundaryPromptRow(row) {
 				prompt = true
 			}
 			if boundaryUnsafeRow(row) {
@@ -531,7 +519,7 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 			if text == "" {
 				break
 			}
-			if !strings.HasPrefix(strings.TrimSpace(text), "❯") {
+			if !boundaryPromptRow(text) {
 				continue
 			}
 			if row != incomingRow || newStart > 0 && next.tokens[newStart-1].row == incomingRow {
@@ -617,10 +605,6 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 				return result
 			}
 			if competing.words > 0 {
-				competing.side = "incoming"
-				if side == 0 {
-					competing.side = "archive"
-				}
 				result.reason, result.competing = boundaryPartialRun, competing
 				return result
 			}

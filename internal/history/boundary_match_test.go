@@ -239,7 +239,7 @@ func TestBoundaryDeletionClampsHeldAndInvalidatesReturn(t *testing.T) {
 	state.Held = []HeldRecord{{Rows: []string{"before"}, Position: 0, FirstSeenAt: stamp}, {Rows: []string{"at"}, Position: 1, Segment: 1, FirstSeenAt: stamp}, {Rows: []string{"after"}, Position: 2, Segment: 2, FirstSeenAt: stamp}, {Rows: []string{"equal"}, Position: 2, Segment: 2, FirstSeenAt: stamp}}
 	generation := state.archiveGeneration
 	ctx.Columns = 62
-	_, _, d := m.AdmitSnapshot("p", snapshotPage(boundaryProse[:2]...), ctx, 0)
+	_, _, d := m.AdmitSnapshot("p", snapshotPage(boundaryProse[0], "", boundaryProse[1]), ctx, 0)
 	if state.LiveStart != 1 || state.SegmentStart != 1 || state.archiveGeneration <= generation || boundaryCounter(d, "BoundaryReconciledRows") != 3 {
 		t.Errorf("suffix deletion coordinates live=%d segment=%d generation=%d diagnostics=%+v", state.LiveStart, state.SegmentStart, state.archiveGeneration, d)
 	}

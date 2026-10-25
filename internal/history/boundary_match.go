@@ -344,6 +344,15 @@ func boundaryRowStartMarker(view boundaryView, index int) bool {
 		strings.HasPrefix(strings.TrimSpace(view.rows[row-view.firstRow]), "❯")
 }
 
+func boundaryBlankGap(view boundaryView, previous, current int) bool {
+	for row := previous + 1; row < current; row++ {
+		if view.rows[row-view.firstRow] == "" {
+			return true
+		}
+	}
+	return false
+}
+
 func matchBoundarySuffix(history []string, floor int, incoming []string) boundaryResult {
 	result := boundaryResult{cut: len(history), refused: true, reason: boundaryNoCandidate}
 	work := &result.work
@@ -499,6 +508,14 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 			incomingContext := next.contexts[next.tokens[newStart+k].row-next.firstRow]
 			if archiveContext != boundaryContextUnknown && incomingContext != boundaryContextUnknown && archiveContext != incomingContext {
 				result.reason = boundaryIncomingPrompt
+				return result
+			}
+		}
+		for k := 1; k < n; k++ {
+			archiveGap := boundaryBlankGap(old, old.tokens[start+k-1].row, old.tokens[start+k].row)
+			incomingGap := boundaryBlankGap(next, next.tokens[newStart+k-1].row, next.tokens[newStart+k].row)
+			if archiveGap != incomingGap {
+				result.reason = boundaryUnsafeStructure
 				return result
 			}
 		}

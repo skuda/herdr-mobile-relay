@@ -368,6 +368,103 @@ func TestBoundaryIncomingUnknownPromptContinuationCanMatch(t *testing.T) {
 	}
 }
 
+func TestBoundaryMatchedBlankGapsMustAgree(t *testing.T) {
+	prompt := []string{"❯ Explain how patient harbor keepers maintain bright lamps", "through long winter storms and guide the ships safely."}
+	old := append(append(slices.Clone(prompt), ""), boundaryProse...)
+	incoming := append([]string{prompt[1]}, boundaryProse...)
+	incoming = append(incoming, "", "A different response starts now.")
+	for _, test := range []struct {
+		name          string
+		old, incoming []string
+	}{
+		{"removed-prompt-answer-blank", old, incoming},
+		{"added-answer-blank", boundaryProse, []string{boundaryProse[0], "", boundaryProse[1], boundaryProse[2]}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := matchBoundarySuffix(test.old, 0, test.incoming)
+			if !result.refused || result.reason != boundaryUnsafeStructure {
+				t.Errorf("blank-gap mismatch result=%+v, want unsafe-structure", result)
+			}
+			assertBoundaryCopyRetained(t, test.old, test.incoming)
+		})
+	}
+}
+
+func TestBoundaryBlankGapUsesViewOffset(t *testing.T) {
+	view := boundaryView{firstRow: 7, rows: []string{"first", "---", "", "last"}}
+	for _, test := range []struct {
+		previous, current int
+		want              bool
+	}{
+		{7, 7, false}, {7, 8, false}, {7, 10, true}, {9, 10, false},
+	} {
+		if got := boundaryBlankGap(view, test.previous, test.current); got != test.want {
+			t.Errorf("gap %d..%d=%v, want %v", test.previous, test.current, got, test.want)
+		}
+	}
+}
+
+func TestBoundaryPairedBlankGapLayout(t *testing.T) {
+	m := NewManager(t.TempDir())
+	for i, page := range boundaryReplayPages(t) {
+		body, _ := splitSnapshot(strings.Join(page.Rows, "\n"))
+		if i == 2 || i == 4 || i == 5 || i == 6 || i == 7 {
+			state := m.states["p"]
+			result := matchBoundarySuffix(state.History, state.SegmentStart, body)
+			if result.refused {
+				work := boundaryWork{}
+				next, ok := boundaryIncoming(body, &work)
+				if !ok {
+					t.Fatal("diagnostic incoming view exceeded budget")
+				}
+				limit := 0
+				for _, row := range next.rows {
+					limit += len(row)
+				}
+				old, ok := boundaryArchive(state.History, state.SegmentStart, limit, &work)
+				if !ok {
+					t.Fatal("diagnostic archive view exceeded budget")
+				}
+				for end := range next.tokens {
+					n := 0
+					for n < len(old.tokens) && n <= end && old.tokens[len(old.tokens)-1-n].text == next.tokens[end-n].text {
+						n++
+					}
+					if n < MinBoundaryWords {
+						continue
+					}
+					start, newStart := len(old.tokens)-n, end-n+1
+					for k := 1; k < n; k++ {
+						a0, a1 := old.tokens[start+k-1].row, old.tokens[start+k].row
+						i0, i1 := next.tokens[newStart+k-1].row, next.tokens[newStart+k].row
+						archiveBlanks, incomingBlanks := 0, 0
+						for row := a0 + 1; row < a1; row++ {
+							if old.rows[row-old.firstRow] == "" {
+								archiveBlanks++
+							}
+						}
+						for row := i0 + 1; row < i1; row++ {
+							if next.rows[row-next.firstRow] == "" {
+								incomingBlanks++
+							}
+						}
+						if (archiveBlanks > 0) != (incomingBlanks > 0) {
+							t.Logf("transition=%d..%d token_offset=%d archive_rows=%d..%d archive_blanks=%d incoming_rows=%d..%d incoming_blanks=%d", i-1, i, k, a0, a1, archiveBlanks, i0, i1, incomingBlanks)
+						}
+					}
+				}
+				t.Fatalf("paired transition=%d..%d refused=%s", i-1, i, result.reason)
+			}
+		}
+		ctx := physicalContext(uint64(i+1), page.Columns)
+		ctx.ReadSource = page.Source
+		if page.Source == SourceLegacy {
+			ctx.Columns = 0
+		}
+		m.AdmitSnapshot("p", strings.Join(page.Rows, "\n"), ctx, 0)
+	}
+}
+
 func TestBoundaryResidualUnrelatedPromptPrefixRefuses(t *testing.T) {
 	// Accepted refusal residual (class 1): an unrelated preceding prompt keeps the copy.
 	prompt := "❯ Describe the coastal lights."

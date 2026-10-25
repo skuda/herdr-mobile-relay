@@ -449,11 +449,13 @@ func verifiedPhysicalReverse(state *PaneState, old, next []string, plan *physica
 }
 
 type physicalReturnRecord struct {
-	rows       []string
-	neighbours [2]string
-	slot       int
-	segment    int
-	generation uint64
+	rows                 []string
+	neighbours           [2]string
+	neighbourCoordinates [2]int
+	layout               [2][]string
+	slot                 int
+	segment              int
+	generation           uint64
 }
 
 func (state *PaneState) archiveMutated() {
@@ -467,6 +469,9 @@ func clonePhysicalReturn(record *physicalReturnRecord) *physicalReturnRecord {
 	}
 	clone := *record
 	clone.rows = slices.Clone(record.rows)
+	for i := range clone.layout {
+		clone.layout[i] = slices.Clone(record.layout[i])
+	}
 	return &clone
 }
 
@@ -479,8 +484,17 @@ func physicalReturnCandidate(old, next []string, plan *physicalTransition) *phys
 	for start > 0 && plan.outcome[start-1] == physicalRetired {
 		start--
 	}
-	if start == 0 || end >= len(old) || end >= len(next) ||
-		plan.agreedIndex[start-1] != start-1 || plan.agreedIndex[end] != end {
+	if start == end || start == 0 || end >= len(old) || end >= len(next) {
+		return nil
+	}
+	left, right := start-1, end
+	for left >= 0 && !physicalSubstantive(old[left]) && old[left] == next[left] {
+		left--
+	}
+	for right < min(len(old), len(next)) && !physicalSubstantive(old[right]) && old[right] == next[right] {
+		right++
+	}
+	if left < 0 || right >= min(len(old), len(next)) || plan.agreedIndex[left] != left || plan.agreedIndex[right] != right {
 		return nil
 	}
 	for _, row := range next[start:end] {
@@ -492,7 +506,17 @@ func physicalReturnCandidate(old, next []string, plan *physicalTransition) *phys
 	for i, row := range old[start:end] {
 		rows[i] = strings.Clone(row)
 	}
-	return &physicalReturnRecord{rows: rows, neighbours: [2]string{strings.Clone(old[start-1]), strings.Clone(old[end])}, slot: start}
+	record := &physicalReturnRecord{
+		rows: rows, neighbours: [2]string{strings.Clone(old[left]), strings.Clone(old[right])},
+		neighbourCoordinates: [2]int{left, right}, slot: start,
+	}
+	for side, bounds := range [][2]int{{left + 1, start}, {end, right}} {
+		record.layout[side] = make([]string, bounds[1]-bounds[0])
+		for i, row := range old[bounds[0]:bounds[1]] {
+			record.layout[side][i] = strings.Clone(row)
+		}
+	}
+	return record
 }
 
 func verifiedPhysicalSlotReturn(state *PaneState, old, next []string, plan *physicalTransition) int {
@@ -502,11 +526,14 @@ func verifiedPhysicalSlotReturn(state *PaneState, old, next []string, plan *phys
 	}
 	n, start := len(record.rows), record.slot
 	end := start + n
+	left, right := record.neighbourCoordinates[0], record.neighbourCoordinates[1]
 	if record.generation != state.archiveGeneration || record.segment != state.SegmentStart || n == 0 ||
-		n > state.LiveStart-state.SegmentStart || start <= 0 || end >= len(old) || end >= len(next) ||
+		n > state.LiveStart-state.SegmentStart || left < 0 || left >= start || right < end || right >= len(old) || right >= len(next) ||
 		!slices.Equal(record.rows, physicalComparisonRows(state.History[state.LiveStart-n:state.LiveStart])) ||
-		old[start-1] != record.neighbours[0] || old[end] != record.neighbours[1] ||
-		next[start-1] != record.neighbours[0] || next[end] != record.neighbours[1] || plan.diagnostic.Class == "freeze" {
+		old[left] != record.neighbours[0] || old[right] != record.neighbours[1] ||
+		next[left] != record.neighbours[0] || next[right] != record.neighbours[1] ||
+		!slices.Equal(old[left+1:start], record.layout[0]) || !slices.Equal(next[left+1:start], record.layout[0]) ||
+		!slices.Equal(old[end:right], record.layout[1]) || !slices.Equal(next[end:right], record.layout[1]) || plan.diagnostic.Class == "freeze" {
 		state.zeroDisplacementReturn = nil
 		return 0
 	}
@@ -525,12 +552,12 @@ func verifiedPhysicalSlotReturn(state *PaneState, old, next []string, plan *phys
 		return 0
 	}
 	proof := physicalConsensus(old, next, true)
-	left, right := false, false
+	leftAgreed, rightAgreed := false, false
 	for _, pair := range proof.agreed {
-		left = left || pair == (physicalPair{start - 1, start - 1})
-		right = right || pair == (physicalPair{end, end})
+		leftAgreed = leftAgreed || pair == (physicalPair{left, left})
+		rightAgreed = rightAgreed || pair == (physicalPair{right, right})
 	}
-	if proof.budget || !left || !right {
+	if proof.budget || !leftAgreed || !rightAgreed {
 		state.zeroDisplacementReturn = nil
 		return 0
 	}
@@ -540,13 +567,14 @@ func verifiedPhysicalSlotReturn(state *PaneState, old, next []string, plan *phys
 	proofOld := slices.Clone(old)
 	copy(proofOld[start:end], record.rows)
 	proof = physicalConsensus(proofOld, next, true)
-	left, right, returned := false, false, 0
+	leftAgreed, rightAgreed = false, false
+	returned := 0
 	for _, pair := range proof.agreed {
 		if pair.Old != pair.Next {
 			continue
 		}
-		left = left || pair.Old == start-1
-		right = right || pair.Old == end
+		leftAgreed = leftAgreed || pair.Old == left
+		rightAgreed = rightAgreed || pair.Old == right
 		if pair.Old >= start && pair.Old < end {
 			returned++
 		}
@@ -557,7 +585,7 @@ func verifiedPhysicalSlotReturn(state *PaneState, old, next []string, plan *phys
 			substantive++
 		}
 	}
-	if proof.budget || !left || !right || !blank && returned != substantive {
+	if proof.budget || !leftAgreed || !rightAgreed || returned != substantive {
 		state.zeroDisplacementReturn = nil
 		return 0
 	}

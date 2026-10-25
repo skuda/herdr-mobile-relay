@@ -153,6 +153,88 @@ func TestPhysicalZeroDisplacementReturn(t *testing.T) {
 	}
 }
 
+func TestPhysicalReturnAcrossNonSubstantiveLayout(t *testing.T) {
+	for _, layout := range []string{"", "---", "both-sides"} {
+		t.Run(fmt.Sprintf("layout=%q", layout), func(t *testing.T) {
+			m := NewManager(t.TempDir())
+			ctx := physicalContext(1, 54)
+			old := []string{"H", layout, "X", "T", "U"}
+			blank := []string{"H", layout, "", "T", "U"}
+			if layout == "both-sides" {
+				old = []string{"H", "---", "", "X", "===", "", "T", "U"}
+				blank = []string{"H", "---", "", "", "===", "", "T", "U"}
+			}
+			for i, page := range [][]string{old, blank, old, blank} {
+				d := admitPhysicalOccurrence(t, m, page, ctx, "X", 1)
+				if i == 1 && !physicalReturnPending(m.states["p"]) {
+					t.Error("unchanged layout blocked the zero-displacement record")
+				}
+				if i == 2 && (d.RetractedRows != 1 || physicalReturnPending(m.states["p"])) {
+					t.Errorf("return across unchanged layout=%+v pending=%v", d, physicalReturnPending(m.states["p"]))
+				}
+			}
+		})
+	}
+}
+
+func TestPhysicalReturnLayoutCloneOwnsBothSides(t *testing.T) {
+	m := NewManager(t.TempDir())
+	ctx := physicalContext(1, 54)
+	admitPhysicalOccurrence(t, m, []string{"H", "---", "", "X", "===", "", "T", "U"}, ctx, "X", 1)
+	admitPhysicalOccurrence(t, m, []string{"H", "---", "", "", "===", "", "T", "U"}, ctx, "X", 1)
+	record := m.states["p"].zeroDisplacementReturn
+	if record == nil || record.neighbourCoordinates != [2]int{0, 6} || record.slot != 3 || len(record.rows) != 1 ||
+		!slices.Equal(record.layout[0], []string{"---", ""}) || !slices.Equal(record.layout[1], []string{"===", ""}) {
+		t.Fatalf("layout record=%+v", record)
+	}
+	clone := clonePhysicalReturn(record)
+	clone.layout[0][0], clone.layout[1][0] = "changed left", "changed right"
+	clone.neighbourCoordinates[0]++
+	if record.layout[0][0] != "---" || record.layout[1][0] != "===" || record.neighbourCoordinates[0] != 0 {
+		t.Error("layout clone aliases comparison rows or anchor coordinates")
+	}
+}
+
+func TestPhysicalReturnChangedInterveningLayoutRefuses(t *testing.T) {
+	for _, change := range []struct {
+		name      string
+		old, next []string
+	}{
+		{"left", []string{"H", "", "X", "T", "U"}, []string{"H", "---", "", "T", "U"}},
+		{"right", []string{"H", "X", "---", "T", "U"}, []string{"H", "", "===", "T", "U"}},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			m := NewManager(t.TempDir())
+			ctx := physicalContext(1, 54)
+			admitPhysicalOccurrence(t, m, change.old, ctx, "X", 1)
+			blank := slices.Clone(change.old)
+			for i, row := range blank {
+				if row == "X" {
+					blank[i] = ""
+				}
+			}
+			admitPhysicalOccurrence(t, m, blank, ctx, "X", 1)
+			if !physicalReturnPending(m.states["p"]) {
+				t.Error("missing layout-aware record before layout change")
+			}
+			admitPhysicalOccurrence(t, m, change.next, ctx, "X", 1)
+			if physicalReturnPending(m.states["p"]) {
+				t.Error("changed intervening layout left the record valid")
+			}
+			returned := slices.Clone(change.next)
+			for i, row := range change.old {
+				if row == "X" {
+					returned[i] = "X"
+				}
+			}
+			d := admitPhysicalOccurrence(t, m, returned, ctx, "X", 2)
+			if d.RetractedRows != 0 {
+				t.Error("changed layout authorized an unsupported return")
+			}
+		})
+	}
+}
+
 func TestPhysicalReturnRecordCloneOwnsNestedRows(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 54)

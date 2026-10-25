@@ -284,6 +284,35 @@ func boundaryPrecedingSubstantive(view boundaryView, before int) int {
 	return -1
 }
 
+func boundaryPromptBlock(view boundaryView, before int) (first, last int, found bool) {
+	last = boundaryPrecedingSubstantive(view, before)
+	if last < 0 {
+		return 0, 0, false
+	}
+	for row := last; row >= view.firstRow; row-- {
+		text := view.rows[row-view.firstRow]
+		if text == "" {
+			break
+		}
+		if strings.HasPrefix(strings.TrimSpace(text), "❯") {
+			return row, last, true
+		}
+	}
+	return 0, 0, false
+}
+
+func boundaryBlockTokens(view boundaryView, first, last int) []boundaryToken {
+	start := 0
+	for start < len(view.tokens) && view.tokens[start].row < first {
+		start++
+	}
+	end := start
+	for end < len(view.tokens) && view.tokens[end].row <= last {
+		end++
+	}
+	return view.tokens[start:end]
+}
+
 func matchBoundarySuffix(history []string, floor int, incoming []string) boundaryResult {
 	result := boundaryResult{cut: len(history), refused: true, reason: boundaryNoCandidate}
 	work := &result.work
@@ -413,21 +442,29 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 			result.reason = boundaryPromptContext
 			continue
 		}
-		incomingAnchor := boundaryPrecedingSubstantive(next, next.tokens[newStart].row)
-		if incomingAnchor >= 0 && strings.HasPrefix(strings.TrimSpace(next.rows[incomingAnchor]), "❯") {
-			archiveAnchor := boundaryPrecedingSubstantive(old, first)
-			if archiveAnchor < 0 || !strings.HasPrefix(strings.TrimSpace(old.rows[archiveAnchor-old.firstRow]), "❯") {
+		incomingFirst, incomingLast, incomingPrompt := boundaryPromptBlock(next, next.tokens[newStart].row)
+		if incomingPrompt {
+			archiveFirst, archiveLast, archivePrompt := boundaryPromptBlock(old, first)
+			if !archivePrompt {
 				result.reason = boundaryIncomingPrompt
 				return result
 			}
-			equal, ok := work.equal(next.rows[incomingAnchor], old.rows[archiveAnchor-old.firstRow])
-			if !ok {
-				result.reason = boundaryBudget
-				return result
-			}
-			if !equal {
+			incomingTokens := boundaryBlockTokens(next, incomingFirst, incomingLast)
+			archiveTokens := boundaryBlockTokens(old, archiveFirst, archiveLast)
+			if len(incomingTokens) != len(archiveTokens) {
 				result.reason = boundaryIncomingPrompt
 				return result
+			}
+			for i, token := range incomingTokens {
+				equal, ok := work.equal(token.text, archiveTokens[i].text)
+				if !ok {
+					result.reason = boundaryBudget
+					return result
+				}
+				if !equal {
+					result.reason = boundaryIncomingPrompt
+					return result
+				}
 			}
 		}
 		needle := old.tokens[start:]

@@ -159,6 +159,98 @@ func TestBoundaryFloatingOverlapMismatchRefuses(t *testing.T) {
 	assertBoundaryCopyRetained(t, old, incoming)
 }
 
+func TestBoundaryPromptBlockBounds(t *testing.T) {
+	for _, test := range []struct {
+		name                          string
+		rows                          []string
+		firstRow, before, first, last int
+		found                         bool
+	}{
+		{"wrapped-with-layout", []string{"❯ explain the harbor", "and its keepers", "", "---"}, 7, 11, 7, 8, true},
+		{"last-marker", []string{"❯ earlier request", "❯ later request", "wrapped continuation"}, 4, 7, 5, 6, true},
+		{"blank-ends-group", []string{"❯ earlier request", "", "answer prose"}, 0, 3, 0, 0, false},
+		{"clipped-continuation", []string{"wrapped continuation", "more words"}, 9, 11, 0, 0, false},
+		{"before-view", []string{"❯ request"}, 5, 5, 0, 0, false},
+		{"no-substantive", []string{"", "---"}, 0, 2, 0, 0, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			view := boundaryView{rows: test.rows, firstRow: test.firstRow}
+			first, last, found := boundaryPromptBlock(view, test.before)
+			if first != test.first || last != test.last || found != test.found {
+				t.Errorf("prompt block=%d..%d/%v, want %d..%d/%v", first, last, found, test.first, test.last, test.found)
+			}
+		})
+	}
+}
+
+func TestBoundaryWrappedRequestRetainsNewOccurrence(t *testing.T) {
+	incoming := append([]string{"❯ Please repeat the previous answer exactly", "with the same words and no introduction.", ""}, boundaryProse...)
+	if result := matchBoundarySuffix(boundaryProse, 0, incoming); result.reason != boundaryIncomingPrompt {
+		t.Errorf("wrapped request reason=%s cut=%d rows=%d", result.reason, result.cut, result.rows)
+	}
+	assertBoundaryCopyRetained(t, boundaryProse, incoming)
+}
+
+func TestBoundaryRewrappedPromptBlockAnchorsRerender(t *testing.T) {
+	prompt := []string{"❯ Explain how patient harbor keepers maintain bright lamps", "through long winter storms and guide the ships safely."}
+	old := append(append(slices.Clone(prompt), "", "---"), boundaryProse...)
+	incoming := append([]string{strings.Join(prompt, " "), "", "------"}, boundaryProse...)
+	result := matchBoundarySuffix(old, 0, incoming)
+	if result.refused || result.cut != 4 || result.rows != 3 || result.seam != 0 {
+		t.Errorf("rewrapped prompt did not anchor the suffix: %+v", result)
+	}
+	m := NewManager(t.TempDir())
+	ctx := physicalContext(1, 150)
+	m.AdmitSnapshot("p", snapshotPage(old...), ctx, 0)
+	ctx.Columns = 62
+	got, _, d := m.AdmitSnapshot("p", snapshotPage(incoming...), ctx, 0)
+	if d.BoundaryReconciledRows != 3 || d.BoundaryRefused != 0 || got != snapshotPage(append(slices.Clone(old[:4]), incoming...)...) {
+		t.Errorf("rewrapped prompt boundary did not preserve prefix plus raw page: %+v", d)
+	}
+	for _, kind := range []string{"changed-prompt-word", "archive-without-prompt"} {
+		t.Run(kind, func(t *testing.T) {
+			archive, next := slices.Clone(old), slices.Clone(incoming)
+			if kind == "changed-prompt-word" {
+				next[0] = strings.Replace(next[0], "patient", "careful", 1)
+			} else {
+				archive[0] = strings.TrimPrefix(archive[0], "❯ ")
+				next = append(append(slices.Clone(prompt), "", "------"), boundaryProse...)
+			}
+			if result := matchBoundarySuffix(archive, 0, next); result.reason != boundaryIncomingPrompt {
+				t.Errorf("unanchored block reason=%s cut=%d rows=%d", result.reason, result.cut, result.rows)
+			}
+			assertBoundaryCopyRetained(t, archive, next)
+		})
+	}
+}
+
+func TestBoundaryIdenticalWrappedPromptLayoutKeepsOutcome(t *testing.T) {
+	prompt := []string{"❯ Explain how patient harbor keepers maintain bright lamps", "through long winter storms and guide the ships safely.", "", "---"}
+	rows := append(slices.Clone(prompt), boundaryProse...)
+	result := matchBoundarySuffix(rows, 0, rows)
+	if result.refused || result.cut != 0 || result.rows != len(rows) || result.seam != 0 {
+		t.Errorf("identical wrapped prompt outcome changed: %+v", result)
+	}
+}
+
+func TestBoundaryResidualUnclosedPromptCanReconcile(t *testing.T) {
+	// Accepted residual: answer text without a blank after a prompt counts as prompt text.
+	old := append([]string{"❯ Original request"}, boundaryProse[1:]...)
+	old = append(append(old, ""), boundaryProse...)
+	result := matchBoundarySuffix(old, 0, boundaryProse)
+	if result.refused || result.cut != 4 || result.rows != 3 || result.seam != 0 {
+		t.Errorf("unclosed-prompt residual outcome changed: %+v", result)
+	}
+}
+
+func TestBoundaryResidualRequestOutsideIncomingPageCanReconcile(t *testing.T) {
+	// Accepted residual: a repeat with no request on the incoming page can match a re-render.
+	result := matchBoundarySuffix(boundaryProse, 0, boundaryProse)
+	if result.refused || result.cut != 0 || result.rows != 3 || result.seam != 0 {
+		t.Errorf("promptless residual outcome changed: %+v", result)
+	}
+}
+
 func TestBoundarySplitLongWordAndPathAt62ColumnsRefuse(t *testing.T) {
 	for _, test := range []struct {
 		name, token string

@@ -253,8 +253,9 @@ Non-substantive layout between proved rows can join that suffix. If the new
 page begins partway through an archive row, the matcher retains that partial
 seam row and removes the proved rows after it.
 
-Reconciliation reads only rows of the departing segment, within the budgets below. Its budgets are 1 MiB of raw inspection, 256 KiB of
-normalized input, 16,384 tokens, 64 candidate seams, and 65,536 token comparisons.
+Reconciliation reads only rows of the departing segment. Its budgets are
+1 MiB of raw inspection, 256 KiB of normalized input, 16,384 tokens, 64 candidate
+seams, and 65,536 token comparisons.
 Raw-length checks precede normalization and comparison-view allocation; a
 second raw normalization pass is charged separately. Exhaustion, unsupported
 structure, or occurrence ambiguity refuses the cut and retains the boundary
@@ -403,6 +404,12 @@ client-side history merger is introduced.
   narrow copies of their output, or stale status bars after height changes,
   in the scrollback. Resizing may also truncate scrollback and lose older
   output. It cannot be cleaned up afterwards.
+- **Boundary reconciliation residuals** — bounded inspection does not see a
+  repeat wholly outside its comparison view. A repeated answer whose request
+  is not on the incoming page can reconcile as a re-render and keep one stored
+  occurrence instead of two. Answer text not separated from a preceding `❯`
+  prompt row by a blank row is classified as prompt text, so it does not count
+  as a competing occurrence.
 - **Value-equality restore heuristic** — see above.
 - **Desktop fights** — when the desktop resizes the pane while it is leased,
   the change becomes the new restore point and the lease is applied again at

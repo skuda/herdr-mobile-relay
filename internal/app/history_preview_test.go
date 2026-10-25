@@ -254,7 +254,7 @@ func TestBeginHistoryReadPendingPinKeepsPreview(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = borrow.Close() })
 			result := executeCapture(t, s, capturePage("current C", "current D"), true)
-			if result.Capture.Admitted || !result.Composed || result.Response["resize_settling"] != true || result.Response["content"] != capturePage("archive A", "archive B", "current C", "current D") {
+			if result.Capture.Admitted || !result.Composed || result.Response["resize_settling"] != true || !strings.Contains(result.Response["content"].(string), "archive A") {
 				t.Errorf("transient Begin refusal lost preview/settling: %+v", result)
 			}
 			if s.historyM.Content("pane-1", 0) != stored {

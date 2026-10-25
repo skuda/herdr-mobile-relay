@@ -69,8 +69,7 @@ func (m *Manager) PreviewSnapshot(paneID, rawContent string, context SnapshotCon
 		m.mu.Unlock()
 		return rawContent, false
 	}
-	if context.ReadSource == SourceRecent &&
-		(context.Columns <= 0 && state.ReadSource == SourceRecent || !state.snapshotBoundary(context)) {
+	if context.ReadSource == SourceRecent && !state.snapshotBoundary(context) {
 		rows := slices.Clone(state.History[:state.LiveStart])
 		m.mu.Unlock()
 		rows = append(rows, strings.Split(rawContent, "\n")...)

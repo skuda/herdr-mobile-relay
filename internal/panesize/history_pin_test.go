@@ -3,6 +3,7 @@ package panesize
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -461,6 +462,17 @@ func TestHistoryPinSettlingShutdownWithoutLeaseState(t *testing.T) {
 	}
 }
 
+type waitingHistoryContext struct {
+	context.Context
+	waiting chan struct{}
+	once    sync.Once
+}
+
+func (c *waitingHistoryContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.waiting) })
+	return c.Context.Done()
+}
+
 func TestHistoryPinCancelledColdFollowerDoesNotCancelOwner(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux pin gate")
@@ -478,12 +490,34 @@ func TestHistoryPinCancelledColdFollowerDoesNotCancelOwner(t *testing.T) {
 	}()
 	<-entered
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if r, err := f.m.BeginHistoryRead(ctx, "p", "terminal-p"); !errors.Is(err, context.Canceled) {
+	defer cancel()
+	waiting := &waitingHistoryContext{Context: ctx, waiting: make(chan struct{})}
+	follower := make(chan error, 1)
+	go func() {
+		r, err := f.m.BeginHistoryRead(waiting, "p", "terminal-p")
 		if r != nil {
 			_ = r.Close()
 		}
-		t.Errorf("cancelled follower=%v", err)
+		follower <- err
+	}()
+	select {
+	case <-waiting.waiting:
+	case <-time.After(time.Second):
+		t.Fatal("live follower did not enter coalesced wait")
+	}
+	select {
+	case err := <-follower:
+		t.Fatalf("follower returned before cancellation: %v", err)
+	default:
+	}
+	cancel()
+	select {
+	case err := <-follower:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("cancelled waiting follower=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting follower did not return promptly after cancellation")
 	}
 	close(release)
 	r := <-owner
@@ -554,6 +588,58 @@ func TestHistoryPinNoOpRestoreRetainsPreSignalWindow(t *testing.T) {
 	f.m.SweepExpired(context.Background())
 	if p.closes.Load() != before[6]+1 {
 		t.Error("gate-off expiry did not retire no-op restore pin")
+	}
+}
+
+func TestHistoryPinStaleTerminalBeginPreservesCurrentPin(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux pin gate")
+	}
+	for _, entry := range []string{"BeginHistoryRead", "beginPinnedHistoryRead"} {
+		for _, borrowed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/borrowed=%v", entry, borrowed), func(t *testing.T) {
+				f, p := historyCountFixture(t, false)
+				f.herdr.update("p", func(p *fakePane) { p.terminalID = "terminal-B" })
+				f.acquire("owner", "p", 60, 20)
+				f.clock.Advance(HistorySettleWindow)
+				current, err := f.m.BeginHistoryRead(context.Background(), "p", "terminal-B")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !borrowed {
+					finishSafe(t, current)
+				}
+				before := p.counts()
+				var stale *HistoryRead
+				if entry == "BeginHistoryRead" {
+					stale, err = f.m.BeginHistoryRead(context.Background(), "p", "terminal-A")
+				} else {
+					stale, err = f.m.beginPinnedHistoryRead(context.Background(), "p", "terminal-A")
+				}
+				if stale != nil {
+					_ = stale.Close()
+				}
+				if !errors.Is(err, ErrTerminalGone) && !errors.Is(err, ErrHistoryReadUnsafe) {
+					t.Errorf("stale terminal outcome=%v", err)
+				}
+				if p.closes.Load() != before[6] {
+					t.Error("stale terminal request closed current pin")
+				}
+				if borrowed {
+					finishSafe(t, current)
+				}
+				beforeWarm := p.counts()
+				next, err := f.m.BeginHistoryRead(context.Background(), "p", "terminal-B")
+				if err != nil {
+					t.Fatal(err)
+				}
+				finishSafe(t, next)
+				if got := historyCountDelta(beforeWarm, p.counts()); got != ([7]int32{0, 0, 0, 0, 0, 2, 0}) {
+					t.Errorf("stale terminal request invalidated current pin: warm calls=%v", got)
+				}
+				f.m.ForgetHistoryPane("p", "terminal-B")
+			})
+		}
 	}
 }
 

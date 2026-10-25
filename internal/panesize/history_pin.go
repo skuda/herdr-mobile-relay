@@ -79,6 +79,11 @@ func (m *Manager) beginPinnedHistoryRead(ctx context.Context, paneID, terminalID
 			m.historyGeometry[paneID] = state
 		}
 		if state.identity.terminalID != terminalID {
+			currentLease, _ := m.leaseHistoryStateLocked(paneID, terminalID)
+			if !currentLease {
+				m.mu.Unlock()
+				return nil, gone("history terminal was replaced")
+			}
 			m.retireHistoryPinLocked(state)
 			state = &historyGeometryState{identity: terminalIdentity{terminalID: terminalID}}
 			m.historyGeometry[paneID] = state
@@ -107,7 +112,7 @@ func (m *Manager) beginPinnedHistoryRead(ctx context.Context, paneID, terminalID
 		}
 		blocked := false
 		for pin := range m.historyPins {
-			if pin.paneID == paneID {
+			if pin.paneID == paneID && pin.identity.terminalID == terminalID {
 				blocked = true
 				break
 			}

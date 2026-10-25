@@ -194,8 +194,9 @@ func (m *Manager) BeginHistoryRead(ctx context.Context, paneID, terminalID strin
 		m.mu.Lock()
 		leased, _ := m.leaseHistoryStateLocked(paneID, terminalID)
 		state := m.historyGeometry[paneID]
-		settling := state != nil && state.identity.terminalID == terminalID && historyIntervalUnsafe(state.geometry, m.now())
-		if !leased && !settling {
+		matching := state != nil && state.identity.terminalID == terminalID
+		settling := matching && historyIntervalUnsafe(state.geometry, m.now())
+		if !leased && !settling && matching {
 			m.retireHistoryPinLocked(state)
 		}
 		m.mu.Unlock()
@@ -204,7 +205,7 @@ func (m *Manager) BeginHistoryRead(ctx context.Context, paneID, terminalID strin
 			m.mu.Lock()
 			blocked := false
 			for pin := range m.historyPins {
-				if pin.paneID == paneID {
+				if pin.paneID == paneID && pin.identity.terminalID == terminalID {
 					blocked = true
 					break
 				}

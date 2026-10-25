@@ -162,6 +162,7 @@ type Server struct {
 	historyRequestSequence   uint64
 	historyAcknowledgements  uint64
 	historyClosed            bool
+	lifecycleDrainTimeout    time.Duration
 	historyNow               func() time.Time
 	historyCounters          map[string]*historyMinuteCounters
 	persistenceTasks         *lifecycleTasks
@@ -590,7 +591,12 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	})
 	s.state.SetOnStatusTransition(s.enqueueHistoryTransition)
-	defer s.drainLifecycleWork()
+	lifecycleDrained := false
+	defer func() {
+		if !lifecycleDrained {
+			_ = s.drainLifecycleWork()
+		}
+	}()
 	if s.uploadM != nil {
 		defer s.uploadM.Close()
 	}
@@ -1440,7 +1446,10 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = s.udp.Close()
 	}
 	bg.Wait()
-	s.drainLifecycleWork()
+	lifecycleDrained = true
+	if err := s.drainLifecycleWork(); runErr == nil && err != nil {
+		runErr = fmt.Errorf("lifecycle shutdown: %w", err)
+	}
 	if s.dispatcher != nil {
 		dispatcherCloseCtx, cancelDispatcher := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := s.dispatcher.Close(dispatcherCloseCtx); runErr == nil && err != nil {
@@ -1569,7 +1578,7 @@ func canonicalHTTPPath(raw string) bool {
 	return true
 }
 
-func (s *Server) drainLifecycleWork() {
+func (s *Server) drainLifecycleWork() error {
 	s.historyCaptureMu.Lock()
 	s.historyClosed = true
 	s.historyPendingMu.Lock()
@@ -1578,19 +1587,33 @@ func (s *Server) drainLifecycleWork() {
 	s.historyCaptureMu.Unlock()
 	s.state.SetOnTransition(nil)
 	s.state.SetOnStatusTransition(nil)
-	if s.transitionTasks != nil {
-		s.transitionTasks.Stop()
+	timeout := s.lifecycleDrainTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
 	}
-	if s.historyTasks != nil {
-		s.historyTasks.Stop()
-	}
-	if s.persistenceTasks != nil {
-		s.persistenceTasks.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var failures []error
+	for _, group := range []struct {
+		name  string
+		tasks *lifecycleTasks
+	}{
+		{"transition", s.transitionTasks},
+		{"history capture", s.historyTasks},
+		{"history persistence", s.persistenceTasks},
+	} {
+		if group.tasks == nil {
+			continue
+		}
+		if err := group.tasks.StopContext(ctx); err != nil {
+			failures = append(failures, fmt.Errorf("unfinished %s work: %w", group.name, err))
+		}
 	}
 	if err := s.historyM.SaveAll(); err != nil {
 		s.recordSafeError("final pane history save failed", err)
 		s.logger.Warn("final pane history save failed", "error", err)
 	}
+	return errors.Join(failures...)
 }
 
 func (s *Server) reconcileRecoveredPush(ctx context.Context, agents []*coordinator.AgentState) {

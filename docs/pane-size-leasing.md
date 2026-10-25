@@ -217,8 +217,9 @@ validation failure or identity mismatch, observed departure through
 shutdown retire the matching pin. Closure waits for its borrowers to release.
 The manager retains at most one history pin per pane, including a retired pin
 that is still draining. If a borrower's Size call does not return, later
-physical captures of that pane remain refused; shutdown reports unresolved
-history descriptors at its deadline.
+physical captures of that pane remain refused; the manager reports unresolved
+history descriptors at its deadline. The server then bounds its lifecycle join
+to five seconds. It can return with the borrower still blocked.
 
 A held descriptor identifies a PTY instance, not the runtime Herdr currently
 serves. Herdr can respawn a shell on a new PTY without changing `terminal_id`.
@@ -336,7 +337,10 @@ archived read. Reads that sample content in a different order use the same
 accounting rules: unresolved rows remain held unless a discontinuity freezes
 the old body. Verified current-segment overlap can retract the archive prefix.
 
-The relay skips archival inside or across the three-second settling interval.
+Physical reads skip archival inside or across the three-second settling interval.
+Legacy reads skip archival when either content-read endpoint is settling. They
+also reject local-resize crossings when retained geometry state, its revision,
+or the lease/restore gate differs between those endpoints.
 Rows appearing and disappearing during that pause are lost. Bursts larger
 than the sampled page between captures can also leave gaps. The background
 service checks on a four-second tick. Its interval accounting uses scheduling
@@ -370,8 +374,10 @@ and a five-actual-attempt bound. Native Conversation responses do not clear a
 separate pending terminal request. Dirty history has a scheduled save deadline:
 the first save is due immediately, later changes are due at the last successful
 save plus `SaveInterval=10s`, and write failures retain dirty state for retry.
-Shutdown closes admission, joins capture/persistence work, and saves dirty
-state without waiting for its deadline. Clean loaded caches remain unchanged.
+Shutdown closes history admission and joins lifecycle work with one five-second
+deadline. It then saves dirty state, including when the join times out, without
+waiting for the scheduled save deadline. A capture that resumes after admission
+closes can preview but cannot admit. Clean loaded caches remain unchanged.
 A crash before a successful save can still lose recent samples.
 
 `snapshot_version=1` stays unchanged. Valid legacy state resumes its active
@@ -421,7 +427,8 @@ client-side history merger is introduced.
   process birth; Darwin retains its `ps` path. The Linux read pin can remain
   stale after same-terminal-ID respawn until a documented invalidation signal.
   A retired pin with a blocked borrower can keep that pane's later physical
-  captures refused; shutdown reports the unresolved descriptor.
+  captures refused. Shutdown reports the unresolved descriptor, bounds its
+  lifecycle join, and saves admitted dirty history even if that join times out.
 - **Platforms** — darwin and linux only; other builds do not advertise it.
 - **Phone qualification incomplete** — unit, real-PTY, relay blackbox and
   browser tests do not establish an end-to-end real-phone resize/restore pass.

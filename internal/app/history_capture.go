@@ -125,6 +125,10 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 			defer handle.Close()
 		}
 	}
+	var geometryFence panesize.HistoryFence
+	if handle == nil {
+		geometryFence = s.paneSizeM.HistoryReadFence(request.PaneID, token.identity.terminalID)
+	}
 	retainedUnsafe := s.paneSizeM != nil && s.paneSizeM.HistoryReadUnsafe(request.PaneID, token.identity.terminalID)
 	if captureShape {
 		s.historyPendingMu.Lock()
@@ -177,6 +181,7 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 	} else {
 		if handle == nil && s.paneSizeM != nil {
 			retainedUnsafe = retainedUnsafe || s.paneSizeM.HistoryReadUnsafe(request.PaneID, token.identity.terminalID)
+			retainedUnsafe = retainedUnsafe || geometryFence != s.paneSizeM.HistoryReadFence(request.PaneID, token.identity.terminalID)
 		}
 		eligible = eligible && !request.Resized && !retainedUnsafe && (handle == nil || geometryErr == nil)
 	}
@@ -231,7 +236,8 @@ func (s *Server) executeHistoryRead(ctx context.Context, request coordinator.Pan
 		s.historyAdmissionObserver(token, admission)
 	}
 	if admission.Admitted {
-		if snapshotContext.ReadSource == history.SourceRecent || admission.BoundaryReconciledRows > 0 || admission.BoundaryRefused > 0 {
+		if snapshotContext.ReadSource == history.SourceRecent || admission.BoundaryReconciledRows > 0 || admission.BoundaryRefused > 0 ||
+			admission.HeldExpiredRows > 0 || admission.HeldEvictedRows > 0 || s.historyCounters[token.paneID] != nil {
 			s.recordHistoryAdmissionLocked(token, admission)
 		}
 		diagnostic = &admission
@@ -297,6 +303,9 @@ func (s *Server) recordHistoryAdmissionLocked(token historyReadToken, d history.
 	counter.boundaryRefused += d.BoundaryRefused
 	counter.boundarySeamKept += d.BoundarySeamKept
 	if d.Class == "legacy" {
+		counter.heldExpiredRows += d.HeldExpiredRows
+		counter.heldEvictedRows += d.HeldEvictedRows
+		counter.currentHeldRows = d.HeldTotalRows
 		return
 	}
 	counter.admissions++

@@ -572,7 +572,7 @@ func TestHistoryReadRefreshesCachedRespawnIdentity(t *testing.T) {
 	finishUnsafe(t, stale)
 }
 
-func TestForgottenHistoryGeometryReapedAfterSettling(t *testing.T) {
+func TestForgottenHistoryGeometryReapedAfterGateOffAndSettling(t *testing.T) {
 	for _, phase := range []string{"settling", "in progress"} {
 		t.Run(phase, func(t *testing.T) {
 			f := newFixture(t)
@@ -617,8 +617,20 @@ func TestForgottenHistoryGeometryReapedAfterSettling(t *testing.T) {
 			f.m.mu.Lock()
 			remaining := len(f.m.historyGeometry)
 			f.m.mu.Unlock()
+			if remaining != 1 {
+				t.Fatal("sweep removed forgotten settled geometry while the gate was on")
+			}
+			f.m.ops = f.ops
+			if err := f.m.Release(context.Background(), "owner", "p", true); err != nil {
+				t.Fatal(err)
+			}
+			f.clock.Advance(HistorySettleWindow)
+			f.m.SweepExpired(context.Background())
+			f.m.mu.Lock()
+			remaining = len(f.m.historyGeometry)
+			f.m.mu.Unlock()
 			if remaining != 0 {
-				t.Fatal("sweep retained forgotten settled geometry")
+				t.Fatal("sweep retained forgotten settled geometry after the gate turned off")
 			}
 		})
 	}

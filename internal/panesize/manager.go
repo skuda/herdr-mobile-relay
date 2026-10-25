@@ -538,7 +538,7 @@ func (m *Manager) SweepExpired(ctx context.Context) {
 		if !leased && !historyIntervalUnsafe(state.geometry, now) {
 			m.retireHistoryPinLocked(state)
 		}
-		if state.forgotten && !historyIntervalUnsafe(state.geometry, now) {
+		if state.forgotten && !leased && !historyIntervalUnsafe(state.geometry, now) {
 			delete(m.historyGeometry, paneID)
 		}
 	}

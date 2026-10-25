@@ -2,23 +2,24 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
-// lifecycleTasks owns asynchronous work that must not outlive Server.Run.
-// Stop closes admission before cancellation so sync.WaitGroup Add and Wait
-// cannot race.
+// lifecycleTasks closes admission before canceling its asynchronous work.
+// StopContext can return while work that ignores cancellation is still running.
 type lifecycleTasks struct {
 	mu     sync.Mutex
 	ctx    context.Context
 	cancel context.CancelFunc
 	closed bool
-	wg     sync.WaitGroup
+	active int
+	done   chan struct{}
 }
 
 func newLifecycleTasks(parent context.Context) *lifecycleTasks {
 	ctx, cancel := context.WithCancel(parent)
-	return &lifecycleTasks{ctx: ctx, cancel: cancel}
+	return &lifecycleTasks{ctx: ctx, cancel: cancel, done: make(chan struct{})}
 }
 
 func (g *lifecycleTasks) Start(work func(context.Context)) bool {
@@ -27,23 +28,47 @@ func (g *lifecycleTasks) Start(work func(context.Context)) bool {
 		g.mu.Unlock()
 		return false
 	}
-	g.wg.Add(1)
+	g.active++
 	ctx := g.ctx
 	g.mu.Unlock()
 
 	go func() {
-		defer g.wg.Done()
+		defer func() {
+			g.mu.Lock()
+			g.active--
+			if g.closed && g.active == 0 {
+				close(g.done)
+			}
+			g.mu.Unlock()
+		}()
 		work(ctx)
 	}()
 	return true
 }
 
 func (g *lifecycleTasks) Stop() {
+	_ = g.StopContext(context.Background())
+}
+
+func (g *lifecycleTasks) StopContext(ctx context.Context) error {
 	g.mu.Lock()
 	if !g.closed {
 		g.closed = true
 		g.cancel()
+		if g.active == 0 {
+			close(g.done)
+		}
 	}
 	g.mu.Unlock()
-	g.wg.Wait()
+	select {
+	case <-g.done:
+		return nil
+	default:
+	}
+	select {
+	case <-g.done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("unfinished lifecycle work: %w", ctx.Err())
+	}
 }

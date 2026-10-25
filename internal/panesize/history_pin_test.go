@@ -88,6 +88,192 @@ func historyCountDelta(a, b [7]int32) [7]int32 {
 	}
 	return d
 }
+func TestHistoryReadFenceTracksLeaseTargetChangesWithoutTTYWork(t *testing.T) {
+	for _, client := range []string{"owner", "second-client"} {
+		t.Run(client, func(t *testing.T) {
+			f, p := historyCountFixture(t, true)
+			beforeCalls := p.counts()
+			before := f.m.HistoryReadFence("p", "terminal-p")
+			if again := f.m.HistoryReadFence("p", "terminal-p"); again != before || p.counts() != beforeCalls {
+				t.Fatal("fence changed or performed terminal work without a mutation")
+			}
+			_, revision := f.m.LeaseHistoryState("p", "terminal-p")
+			f.acquire(client, "p", 50, 20)
+			afterWrites := p.counts()
+			after := f.m.HistoryReadFence("p", "terminal-p")
+			if _, next := f.m.LeaseHistoryState("p", "terminal-p"); next != revision {
+				t.Fatal("lease renewal changed the lifecycle revision")
+			}
+			if before == after {
+				t.Error("lease target resize did not change the history fence")
+			}
+			if p.counts() != afterWrites {
+				t.Error("fence read performed terminal work")
+			}
+		})
+	}
+}
+
+func TestHistoryReadFenceTracksGeometryStateLifecycle(t *testing.T) {
+	f, p := historyCountFixture(t, false)
+	absent := f.m.HistoryReadFence("p", "terminal-p")
+	if absent != f.m.HistoryReadFence("p", "terminal-p") || absent != (*Manager)(nil).HistoryReadFence("p", "terminal-p") {
+		t.Fatal("absent geometry does not have a stable zero fence")
+	}
+	f.acquire("owner", "p", 60, 20)
+	created := f.m.HistoryReadFence("p", "terminal-p")
+	if created == absent || f.m.HistoryReadFence("p", "another-terminal") != absent {
+		t.Fatal("fence does not qualify state creation by terminal")
+	}
+	f.m.historyUnknown("p", "terminal-p")
+	unknown := f.m.HistoryReadFence("p", "terminal-p")
+	if unknown == created {
+		t.Error("unknown geometry did not change the fence")
+	}
+	f.clock.Advance(4 * time.Second)
+	f.m.ForgetHistoryPane("p", "terminal-p")
+	deleted := f.m.HistoryReadFence("p", "terminal-p")
+	if deleted.state != nil || deleted.revision != 0 || !deleted.leased || deleted == unknown {
+		t.Error("deletion did not clear geometry while retaining the lease-history gate")
+	}
+	f.acquire("owner", "p", 50, 20)
+	recreated := f.m.HistoryReadFence("p", "terminal-p")
+	if recreated == created || recreated == unknown || recreated == absent {
+		t.Error("recreated state reused an earlier fence")
+	}
+	beforeCalls := p.counts()
+	f.m.mu.Lock()
+	identity := f.m.historyGeometry["p"].identity
+	identity.shellPID++
+	f.m.historyStateLocked("p", identity)
+	f.m.mu.Unlock()
+	if replaced := f.m.HistoryReadFence("p", "terminal-p"); replaced == recreated || replaced == absent {
+		t.Error("same-terminal state replacement did not change the fence")
+	}
+	if p.counts() != beforeCalls {
+		t.Error("in-memory replacement and fence read performed terminal work")
+	}
+}
+
+func TestHistoryReadFenceAbsentGeometryDetectsRestoreGateChange(t *testing.T) {
+	f, _ := historyCountFixture(t, true)
+	f.m.ForgetHistoryPane("p", "terminal-p")
+	before := f.m.HistoryReadFence("p", "terminal-p")
+	f.m.mu.Lock()
+	absent := f.m.historyGeometry["p"] == nil
+	f.m.mu.Unlock()
+	if !absent {
+		t.Fatal("fixture did not start with absent history geometry")
+	}
+	if leased, _ := f.m.LeaseHistoryState("p", "terminal-p"); !leased {
+		t.Fatal("fixture did not start with the lease-history gate on")
+	}
+	if err := f.m.Release(context.Background(), "owner", "p", true); err != nil {
+		t.Fatal(err)
+	}
+	if during := f.m.HistoryReadFence("p", "terminal-p"); during == before {
+		t.Fatal("restore did not create geometry state")
+	}
+	f.clock.Advance(HistorySettleWindow + time.Second)
+	f.m.SweepExpired(context.Background())
+	if after := f.m.HistoryReadFence("p", "terminal-p"); after == before {
+		t.Fatal("lease-history gate change did not change the absent-geometry fence")
+	}
+	f.m.mu.Lock()
+	absent = f.m.historyGeometry["p"] == nil
+	f.m.mu.Unlock()
+	if !absent {
+		t.Fatal("restore and sweep did not remove the forgotten geometry state")
+	}
+	if leased, _ := f.m.LeaseHistoryState("p", "terminal-p"); leased {
+		t.Fatal("fixture did not finish with the lease-history gate off")
+	}
+}
+
+func TestHistoryReadFenceRetainsForgottenReconcileStateWhileLeased(t *testing.T) {
+	f, _ := historyCountFixture(t, true)
+	f.m.ForgetHistoryPane("p", "terminal-p")
+	before := f.m.HistoryReadFence("p", "terminal-p")
+	f.m.mu.Lock()
+	absent := f.m.historyGeometry["p"] == nil
+	f.m.mu.Unlock()
+	if !absent {
+		t.Fatal("fixture did not start with absent history geometry")
+	}
+	f.ops.mu.Lock()
+	device := f.ops.devices["/dev/pts/1"]
+	device.size.Columns = 100
+	writes := len(device.writes)
+	f.ops.mu.Unlock()
+	state := f.state("p")
+	if err := state.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	err := f.m.reconcileActive(context.Background(), "p", state)
+	state.release()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.ops.mu.Lock()
+	resized := len(device.writes) == writes+1 && device.size.Columns == 60
+	f.ops.mu.Unlock()
+	if !resized {
+		t.Fatal("reconcile did not resize the terminal")
+	}
+	f.m.mu.Lock()
+	recreated := f.m.historyGeometry["p"]
+	forgotten := recreated != nil && recreated.forgotten
+	f.m.mu.Unlock()
+	if !forgotten {
+		t.Fatal("reconcile did not recreate forgotten geometry")
+	}
+	f.clock.Advance(HistorySettleWindow + time.Second)
+	f.m.SweepExpired(context.Background())
+	f.m.mu.Lock()
+	retained := f.m.historyGeometry["p"] == recreated
+	f.m.mu.Unlock()
+	if !retained {
+		t.Error("sweep removed forgotten geometry while the lease-history gate was on")
+	}
+	if after := f.m.HistoryReadFence("p", "terminal-p"); after == before {
+		t.Error("reconcile resize did not change the history fence")
+	}
+	if leased, _ := f.m.LeaseHistoryState("p", "terminal-p"); !leased {
+		t.Error("fixture did not retain its lease-history gate")
+	}
+}
+
+func TestHistoryReadFenceResidualAcquireForgetRestoreSweep(t *testing.T) {
+	f, _ := historyCountFixture(t, false)
+	before := f.m.HistoryReadFence("p", "terminal-p")
+	if before != (HistoryFence{}) {
+		t.Fatal("fixture did not start absent and unleased")
+	}
+	f.acquire("owner", "p", 60, 20)
+	f.clock.Advance(HistorySettleWindow + time.Second)
+	f.m.ForgetHistoryPane("p", "terminal-p")
+	if err := f.m.Release(context.Background(), "owner", "p", true); err != nil {
+		t.Fatal(err)
+	}
+	f.clock.Advance(HistorySettleWindow + time.Second)
+	f.m.SweepExpired(context.Background())
+	if after := f.m.HistoryReadFence("p", "terminal-p"); after != before {
+		t.Error("absent and unleased endpoints no longer compare equal")
+	}
+	f.m.mu.Lock()
+	absent := f.m.historyGeometry["p"] == nil
+	f.m.mu.Unlock()
+	if leased, _ := f.m.LeaseHistoryState("p", "terminal-p"); leased || !absent {
+		t.Error("fixture did not finish absent and unleased")
+	}
+	f.ops.mu.Lock()
+	restored := f.ops.devices["/dev/pts/1"].size.Columns == 120 && len(f.ops.devices["/dev/pts/1"].writes) == 2
+	f.ops.mu.Unlock()
+	if !restored {
+		t.Error("residual sequence did not apply and restore the leased size")
+	}
+}
+
 func TestHistoryDisabledPinA2Counts(t *testing.T) {
 	f, p := historyCountFixture(t, false)
 	f.m.disableHistoryPin = true

@@ -402,6 +402,29 @@ func (r *HistoryRead) Close() error {
 	return nil
 }
 
+// HistoryFence compares in-memory geometry identity, revision, and lease/restore gate.
+// Its zero value represents absent geometry with the gate off for the requested terminal.
+type HistoryFence struct {
+	state    *historyGeometryState
+	revision uint64
+	leased   bool
+}
+
+func (m *Manager) HistoryReadFence(paneID, terminalID string) HistoryFence {
+	if m == nil || terminalID == "" {
+		return HistoryFence{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	leased, _ := m.leaseHistoryStateLocked(paneID, terminalID)
+	fence := HistoryFence{leased: leased}
+	state := m.historyGeometry[paneID]
+	if state != nil && state.identity.terminalID == terminalID {
+		fence.state, fence.revision = state, state.geometry.Revision
+	}
+	return fence
+}
+
 func (m *Manager) HistoryReadUnsafe(paneID, terminalID string) bool {
 	if m == nil {
 		return false

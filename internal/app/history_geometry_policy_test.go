@@ -242,6 +242,56 @@ func TestLegacyHistoryRestoreCrossingRejectsWithoutReadGeometry(t *testing.T) {
 	}
 }
 
+func TestLegacyHistoryLocalResizeCrossingRejectsWithoutReadGeometry(t *testing.T) {
+	for _, client := range []string{"owner", "second-client"} {
+		t.Run(client, func(t *testing.T) {
+			s, g, advance := countingGeometryServer(t, true)
+			agent, _ := s.state.Agent("pane-1")
+			agent.ScrollMaxOffset = 10
+			s.state.CommitInventory([]*coordinator.AgentState{agent}, s.state.RevisionCounter())
+			baseline := capturePage("A", "B", "C")
+			if !executeCapture(t, s, baseline, false).Capture.Admitted {
+				t.Fatal("initial legacy read refused")
+			}
+			pendingDeparture(s, 1)
+			pending := s.historyPending["pane-1"]
+			acknowledgements := s.historyAcknowledgements
+			_, revision := s.paneSizeM.LeaseHistoryState("pane-1", "terminal-1")
+			before := g.calls()
+			var afterWrites [6]int32
+			request := captureRequest(s, false)
+			if request.Resized || request.Background {
+				t.Fatal("fixture is not an unresized legacy display read")
+			}
+			result, err := s.executeHistoryRead(context.Background(), request, func(context.Context, coordinator.PaneReadRequest) (herdr.PaneRead, error) {
+				assertNoHistoryGeometryCalls(t, g, before)
+				if _, _, err := s.paneSizeM.Acquire(context.Background(), client, "pane-1", 50, 20); err != nil {
+					return herdr.PaneRead{}, err
+				}
+				advance(panesize.HistorySettleWindow + time.Second)
+				afterWrites = g.calls()
+				return herdr.PaneRead{Content: []byte(capturePage("B", "C", "D"))}, nil
+			})
+			assertNoHistoryGeometryCalls(t, g, afterWrites)
+			if _, after := s.paneSizeM.LeaseHistoryState("pane-1", "terminal-1"); after != revision {
+				t.Fatal("resize changed the lease lifecycle revision")
+			}
+			if s.paneSizeM.HistoryReadUnsafe("pane-1", "terminal-1") {
+				t.Fatal("fixture did not leave settling")
+			}
+			if err != nil || result.Capture.Admitted || s.historyM.Content("pane-1", 0) != baseline {
+				t.Errorf("local resize crossing admitted or mutated history: capture=%+v error=%v", result.Capture, err)
+			}
+			if s.historyPending["pane-1"] != pending || s.historyAcknowledgements != acknowledgements {
+				t.Error("local resize crossing acknowledged the pending request")
+			}
+			if !result.Composed || result.Response["history_retry"] != true || result.Response["content"] != capturePage("A", "B", "C", "D") {
+				t.Errorf("local resize crossing lost the preview: composed=%v response=%+v", result.Composed, result.Response)
+			}
+		})
+	}
+}
+
 func TestPhysicalHistoryPendingRestoreStillSamplesGeometry(t *testing.T) {
 	s, g, advance := countingGeometryServer(t, true)
 	g.failSize.Store(true)

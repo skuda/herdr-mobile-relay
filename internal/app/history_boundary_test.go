@@ -11,6 +11,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
+	"github.com/0cv/herdr-mobile-relay/internal/panesize"
 )
 
 func BenchmarkBoundaryCaptureLock(b *testing.B) {
@@ -136,12 +137,72 @@ func TestHistoryBoundaryPhysicalSeamAndRefusalCounters(t *testing.T) {
 	}
 }
 
+func TestHistoryLegacyExpiryUpdatesHeldMinuteCounters(t *testing.T) {
+	s, _, advance := captureServer(t, true)
+	var logs bytes.Buffer
+	s.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	for _, body := range [][]string{
+		{"R", "A", "B", "C", "S1", "S2"},
+		{"A", "B", "C", "S1'", "S2'", "N"},
+		{"R", "A", "B", "C", "N"},
+	} {
+		executeCapture(t, s, capturePage(body...), true)
+	}
+	counter := s.historyCounters["pane-1"]
+	held := counter.currentHeldRows
+	if held != 2 {
+		t.Fatalf("physical transition held=%d, want 2", held)
+	}
+	admissions := counter.admissions
+	if err := s.paneSizeM.Release(context.Background(), "owner", "pane-1", true); err != nil {
+		t.Fatal(err)
+	}
+	advance(panesize.HistorySettleWindow + time.Second)
+	executeCapture(t, s, capturePage("legacy seed"), false)
+	rows := make([]string, history.MaxLines+1)
+	rows[0] = "legacy seed"
+	for i := 1; i < len(rows); i++ {
+		rows[i] = "legacy-row-" + strconv.Itoa(i)
+	}
+	var expired int
+	s.historyAdmissionObserver = func(_ historyReadToken, d history.SnapshotAdmission) { expired += d.HeldExpiredRows }
+	if !executeCapture(t, s, capturePage(rows...), false).Capture.Admitted || expired != held {
+		t.Fatalf("legacy trim did not expire fixture holds: expired=%d held=%d", expired, held)
+	}
+	if counter.admissions != admissions {
+		t.Error("legacy reads incremented physical admission counts")
+	}
+	s.flushHistoryCounters(s.historyNow().Add(time.Minute))
+	var minute string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "physical history minute") {
+			minute = line
+		}
+	}
+	for _, field := range []string{"held_total_rows=0", "held_expired_rows=" + strconv.Itoa(held), "admissions=" + strconv.Itoa(admissions)} {
+		if !strings.Contains(minute, field) {
+			t.Errorf("minute counter missing %s: %s", field, minute)
+		}
+	}
+}
+
 func TestHistoryBoundaryCounterAggregationDoesNotCountRoutineLegacy(t *testing.T) {
 	s, _, _ := captureServer(t, false)
 	token := historyReadToken{paneID: "pane-1"}
-	s.recordHistoryAdmissionLocked(token, history.SnapshotAdmission{Class: "legacy", BoundaryRefused: 1, BoundarySeamKept: 1})
+	if !executeCapture(t, s, capturePage("plain legacy"), false).Capture.Admitted || s.historyCounters["pane-1"] != nil {
+		t.Fatal("plain legacy admission created a minute counter")
+	}
+	s.recordHistoryAdmissionLocked(token, history.SnapshotAdmission{Class: "legacy", BoundaryRefused: 1, BoundarySeamKept: 1,
+		HeldExpiredRows: 2, HeldEvictedRows: 3, HeldTotalRows: 4, DPPairs: 5, MatchedRows: 6})
 	counter := s.historyCounters["pane-1"]
-	if counter.admissions != 0 || counter.legacy != 0 || counter.boundaryRefused != 1 || counter.boundarySeamKept != 1 {
+	if counter.admissions != 0 || counter.legacy != 0 || counter.dpPairs != 0 || counter.matchedRows != 0 || counter.boundaryRefused != 1 || counter.boundarySeamKept != 1 {
 		t.Errorf("legacy boundary counted physical matcher work: %+v", counter)
+	}
+	if counter.heldExpiredRows != 2 || counter.heldEvictedRows != 3 || counter.currentHeldRows != 4 {
+		t.Errorf("legacy held counts not updated: %+v", counter)
+	}
+	executeCapture(t, s, capturePage("plain legacy"), false)
+	if counter.currentHeldRows != 0 || counter.admissions != 0 {
+		t.Error("routine legacy read did not refresh the existing gauge without admission counts")
 	}
 }

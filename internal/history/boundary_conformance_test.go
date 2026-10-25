@@ -233,6 +233,65 @@ func TestBoundaryIdenticalWrappedPromptLayoutKeepsOutcome(t *testing.T) {
 	}
 }
 
+func TestBoundaryMatchStartingInsideIncomingPromptRefuses(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		incoming []string
+	}{
+		{"prompt-row", append([]string{"❯ Repeat this answer: " + boundaryProse[0]}, boundaryProse[1:]...)},
+		{"prompt-row-then-blank", append([]string{"❯ Repeat this answer: " + boundaryProse[0], ""}, boundaryProse[1:]...)},
+		{"continuation-row", append([]string{"❯ Repeat this answer:", "with the existing words and no introduction"}, boundaryProse...)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := matchBoundarySuffix(boundaryProse, 0, test.incoming)
+			if !result.refused || result.reason != boundaryIncomingPrompt {
+				t.Errorf("prompt echo result=%+v, want incoming-prompt", result)
+			}
+			assertBoundaryCopyRetained(t, boundaryProse, test.incoming)
+		})
+	}
+}
+
+func TestBoundaryPromptContinuationCannotReuseEarlierAnchor(t *testing.T) {
+	prompt := "❯ Repeat this answer:"
+	old := append([]string{prompt, "", "---"}, boundaryProse...)
+	incoming := append([]string{prompt}, boundaryProse...)
+	result := matchBoundarySuffix(old, 0, incoming)
+	if !result.refused || result.reason != boundaryIncomingPrompt {
+		t.Errorf("matched prompt continuation reused the earlier anchor: %+v", result)
+	}
+	assertBoundaryCopyRetained(t, old, incoming)
+}
+
+func TestBoundaryMatchStartingAtPromptMarkerKeepsEarlierProse(t *testing.T) {
+	incoming := append([]string{"❯ Explain how patient harbor keepers maintain bright lamps", "through long winter storms and guide the ships safely.", ""}, boundaryProse...)
+	old := append([]string{"earlier unrelated answer prose", ""}, incoming...)
+	result := matchBoundarySuffix(old, 0, incoming)
+	if result.refused || result.cut != 2 || result.rows != len(incoming) || result.seam != 0 {
+		t.Errorf("match beginning at the prompt marker changed: %+v", result)
+	}
+	m := NewManager(t.TempDir())
+	ctx := physicalContext(1, 150)
+	m.AdmitSnapshot("p", snapshotPage(old...), ctx, 0)
+	ctx.Columns = 62
+	got, _, d := m.AdmitSnapshot("p", snapshotPage(incoming...), ctx, 0)
+	if d.BoundaryRefused != 0 || d.BoundaryReconciledRows != len(incoming) || got != snapshotPage(old...) {
+		t.Errorf("prompt-marker match changed earlier prose or raw output: %+v", d)
+	}
+}
+
+func TestBoundaryResidualPunctuationPromptContinuationRefuses(t *testing.T) {
+	// Accepted refusal residual: this punctuation-row prompt continuation refuses and keeps the copy.
+	prompt := "❯ Explain why patient harbor keepers maintain bright lamps now"
+	old := append([]string{prompt + " ?", "", "---"}, boundaryProse...)
+	incoming := append([]string{prompt, "?", "", "------"}, boundaryProse...)
+	result := matchBoundarySuffix(old, 0, incoming)
+	if !result.refused || result.reason != boundaryIncomingPrompt {
+		t.Errorf("punctuation-continuation residual changed: %+v", result)
+	}
+	assertBoundaryCopyRetained(t, old, incoming)
+}
+
 func TestBoundaryResidualUnclosedPromptCanReconcile(t *testing.T) {
 	// Accepted residual: answer text without a blank after a prompt counts as prompt text.
 	old := append([]string{"❯ Original request"}, boundaryProse[1:]...)

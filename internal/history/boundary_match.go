@@ -442,7 +442,22 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 			result.reason = boundaryPromptContext
 			continue
 		}
-		incomingFirst, incomingLast, incomingPrompt := boundaryPromptBlock(next, next.tokens[newStart].row)
+		incomingRow := next.tokens[newStart].row
+		for row := incomingRow; row >= next.firstRow; row-- {
+			text := next.rows[row-next.firstRow]
+			if text == "" {
+				break
+			}
+			if !strings.HasPrefix(strings.TrimSpace(text), "❯") {
+				continue
+			}
+			if row != incomingRow || newStart > 0 && next.tokens[newStart-1].row == incomingRow {
+				result.reason = boundaryIncomingPrompt
+				return result
+			}
+			break
+		}
+		incomingFirst, incomingLast, incomingPrompt := boundaryPromptBlock(next, incomingRow)
 		if incomingPrompt {
 			archiveFirst, archiveLast, archivePrompt := boundaryPromptBlock(old, first)
 			if !archivePrompt {

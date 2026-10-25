@@ -106,11 +106,11 @@ func (m *Manager) AdmitSnapshot(paneID, rawContent string, context SnapshotConte
 		m.states[paneID] = state
 		delete(m.lastSave, paneID)
 	}
-	geometryBoundary := context.ReadSource == SourceRecent || context.NoScrollback
+	geometryBoundary := context.ReadSource == SourceRecent
 	if context.GeometryEpoch == 0 && state.ReadSource == context.ReadSource && !state.loaded {
 		context.GeometryEpoch, context.Columns, context.Rows = state.GeometryEpoch, state.Columns, state.Rows
 	}
-	legacyUpgrade := context.ReadSource == SourceLegacy && !context.NoScrollback && state.SnapshotVersion == 0 && !state.snapshotInvalid
+	legacyUpgrade := context.ReadSource == SourceLegacy && state.SnapshotVersion == 0 && !state.snapshotInvalid
 	if legacyUpgrade {
 		state.SegmentStart, state.LiveStart = 0, len(state.History)
 	}

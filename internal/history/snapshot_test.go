@@ -484,20 +484,34 @@ func TestSnapshotFrozenPrefixTrimmingClampsOffsets(t *testing.T) {
 }
 
 func TestFirstRuntimeAdmissionFencesIdenticalNumericEpoch(t *testing.T) {
-	for _, source := range []string{SourceRecent, SourceLegacy} {
-		dir := t.TempDir()
-		first := NewManager(dir)
-		ctx := physicalContext(1, 40)
-		ctx.ReadSource = source
-		ctx.NoScrollback = true
-		first.MergeSnapshot("p", snapshotPage("A", "B", "old"), ctx)
-		first.SaveAll()
-		restarted := NewManager(dir)
-		if got := restarted.Content("p", 0); got != snapshotPage("A", "B", "old") {
-			t.Fatalf("restart content before admission = %q", got)
-		}
-		assertSnapshotContent(t, restarted.MergeSnapshot("p", snapshotPage("A", "B", "new"), ctx), "A", "B", "old", "A", "B", "new")
-		assertSnapshotContent(t, restarted.MergeSnapshot("p", snapshotPage("A", "B", "new"), ctx), "A", "B", "old", "A", "B", "new")
+	dir := t.TempDir()
+	first := NewManager(dir)
+	ctx := physicalContext(1, 40)
+	ctx.NoScrollback = true
+	first.MergeSnapshot("p", snapshotPage("A", "B", "old"), ctx)
+	if err := first.SaveAll(); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewManager(dir)
+	if got := restarted.Content("p", 0); got != snapshotPage("A", "B", "old") {
+		t.Fatalf("restart content before admission = %q", got)
+	}
+	assertSnapshotContent(t, restarted.MergeSnapshot("p", snapshotPage("A", "B", "new"), ctx), "A", "B", "old", "A", "B", "new")
+	assertSnapshotContent(t, restarted.MergeSnapshot("p", snapshotPage("A", "B", "new"), ctx), "A", "B", "old", "A", "B", "new")
+}
+
+func TestFirstRuntimeLegacyAdmissionContinuesIdenticalNumericEpoch(t *testing.T) {
+	dir := t.TempDir()
+	first := NewManager(dir)
+	ctx := physicalContext(1, 40)
+	ctx.ReadSource, ctx.NoScrollback = SourceLegacy, true
+	assertLegacyBaselineAdmission(t, first, ctx, legacyBaselineFrame{"A\nB\nold", "A\nB\nold"})
+	if err := first.SaveAll(); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewManager(dir)
+	for range 2 {
+		assertLegacyBaselineAdmission(t, restarted, ctx, legacyBaselineFrame{"A\nB\nnew", "A\nB\nnew"})
 	}
 }
 
@@ -536,21 +550,23 @@ func TestUnknownEpochEstablishesBaselineWithoutLaterBoundary(t *testing.T) {
 	}
 }
 
-func TestUnknownMetricReadDoesNotConsumeLoadedFence(t *testing.T) {
+func TestLegacyUnknownMetricBecomingKnownZeroContinuesLoadedSegment(t *testing.T) {
 	root := t.TempDir()
 	m := NewManager(root)
 	ctx := physicalContext(1, 54)
 	ctx.ReadSource = SourceLegacy
-	m.AdmitSnapshot("p", snapshotPage("A", "B"), ctx, 0)
+	assertLegacyBaselineAdmission(t, m, ctx, legacyBaselineFrame{"A\nB", "A\nB"})
 	if err := m.SaveAll(); err != nil {
 		t.Fatal(err)
 	}
 	m = NewManager(root)
-	m.AdmitSnapshot("p", snapshotPage("A", "B"), ctx, 0)
+	assertLegacyBaselineAdmission(t, m, ctx, legacyBaselineFrame{"A\nB", "A\nB"})
 	ctx.NoScrollback = true
-	got, _, _ := m.AdmitSnapshot("p", snapshotPage("A", "B"), ctx, 0)
-	if got != snapshotPage("A", "B", "A", "B") || m.states["p"].SegmentStart != 2 {
-		t.Fatalf("unknown-metric first read consumed restart fence: %q", got)
+	assertLegacyBaselineAdmission(t, m, ctx, legacyBaselineFrame{"A\nB", "A\nB"})
+	ctx.ReadSource = SourceRecent
+	got, _, admission := m.AdmitSnapshot("p", snapshotPage("A", "B"), ctx, 0)
+	if got != "A\nB\nA\nB"+legacyBaselineFooter || m.states["p"].SegmentStart != 2 || admission.Class != "boundary" {
+		t.Fatalf("physical source did not preserve its source boundary: content=%q admission=%+v", got, admission)
 	}
 }
 

@@ -86,6 +86,30 @@ func TestSaveAllPreservesUnadmittedOldFormatCache(t *testing.T) {
 	}
 }
 
+func TestLegacyV02210KnownZeroUpgradePersistsWithoutCopy(t *testing.T) {
+	root := t.TempDir()
+	m := NewManager(root)
+	writeLegacyBaselineFile(t, m, "A\nB\nC")
+	ctx := SnapshotContext{TerminalID: "terminal-1", ReadSource: SourceLegacy, NoScrollback: true}
+	assertLegacyBaselineAdmission(t, m, ctx, legacyBaselineFrame{"B\nC\nD", "A\nB\nC\nD"})
+	if err := m.SaveAll(); err != nil {
+		t.Fatal(err)
+	}
+	stored := persistedState(t, m, "p")
+	if stored.SnapshotVersion != 1 || stored.ReadSource != SourceLegacy || stored.SegmentStart != 0 || stored.LiveStart != 4 || stored.TerminalID != ctx.TerminalID {
+		t.Fatalf("upgrade metadata=%+v", stored)
+	}
+	m = NewManager(root)
+	ctx.GeometryEpoch, ctx.LeaseRevision = 7, 7
+	assertLegacyBaselineAdmission(t, m, ctx, legacyBaselineFrame{"C\nD\nE", "A\nB\nC\nD\nE"})
+	if err := m.SaveAll(); err != nil {
+		t.Fatal(err)
+	}
+	if got := NewManager(root).Content("p", 0); got != "A\nB\nC\nD\nE"+legacyBaselineFooter {
+		t.Fatalf("upgraded reload content=%q", got)
+	}
+}
+
 func TestSaveAllWritesDirtyStateBeforeDeadline(t *testing.T) {
 	root := t.TempDir()
 	m := NewManager(root)

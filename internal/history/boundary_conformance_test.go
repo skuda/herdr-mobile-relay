@@ -168,7 +168,9 @@ func TestBoundaryPromptBlockBounds(t *testing.T) {
 	}{
 		{"wrapped-with-layout", []string{"❯ explain the harbor", "and its keepers", "", "---"}, 7, 11, 7, 8, true},
 		{"last-marker", []string{"❯ earlier request", "❯ later request", "wrapped continuation"}, 4, 7, 5, 6, true},
-		{"blank-ends-group", []string{"❯ earlier request", "", "answer prose"}, 0, 3, 0, 0, false},
+		{"blank-ends-group", []string{"❯ earlier request", "", "answer prose"}, 0, 3, 0, 0, true},
+		{"status-separated-request", []string{"❯ earlier request", "", "status words", "", "answer prose"}, 0, 5, 0, 0, true},
+		{"punctuation-continuation", []string{"❯ earlier request", "?", "", "status"}, 3, 7, 3, 4, true},
 		{"clipped-continuation", []string{"wrapped continuation", "more words"}, 9, 11, 0, 0, false},
 		{"before-view", []string{"❯ request"}, 5, 5, 0, 0, false},
 		{"no-substantive", []string{"", "---"}, 0, 2, 0, 0, false},
@@ -434,6 +436,10 @@ func TestBoundaryPairedBlankGapLayout(t *testing.T) {
 						continue
 					}
 					start, newStart := len(old.tokens)-n, end-n+1
+					promptView := old
+					archiveFirst, archiveLast, archiveFound, _ := boundaryArchivePrompt(state.History, &promptView, old.tokens[start].row, &work)
+					incomingFirst, incomingLast, incomingFound := boundaryPromptBlock(next, next.tokens[newStart].row)
+					t.Logf("transition=%d..%d reason=%s archive_prompt=%d..%d/%v incoming_prompt=%d..%d/%v", i-1, i, result.reason, archiveFirst, archiveLast, archiveFound, incomingFirst, incomingLast, incomingFound)
 					for k := 1; k < n; k++ {
 						a0, a1 := old.tokens[start+k-1].row, old.tokens[start+k].row
 						i0, i1 := next.tokens[newStart+k-1].row, next.tokens[newStart+k].row
@@ -477,16 +483,157 @@ func TestBoundaryResidualUnrelatedPromptPrefixRefuses(t *testing.T) {
 	assertBoundaryCopyRetained(t, old, incoming)
 }
 
-func TestBoundaryResidualPunctuationPromptContinuationRefuses(t *testing.T) {
-	// Accepted refusal residual: this punctuation-row prompt continuation refuses and keeps the copy.
+func TestBoundaryPunctuationPromptContinuationAnchors(t *testing.T) {
 	prompt := "❯ Explain why patient harbor keepers maintain bright lamps now"
 	old := append([]string{prompt + " ?", "", "---"}, boundaryProse...)
 	incoming := append([]string{prompt, "?", "", "------"}, boundaryProse...)
 	result := matchBoundarySuffix(old, 0, incoming)
+	if result.refused || result.cut != 3 || result.rows != 3 || result.seam != 0 {
+		t.Errorf("equal prompt punctuation tokens did not anchor the answer suffix: %+v", result)
+	}
+}
+
+func TestBoundaryControllingRequestAcrossStatusGroups(t *testing.T) {
+	prompt := "❯ Explain the coastal lights."
+	old := append([]string{prompt, ""}, boundaryProse...)
+	incoming := append([]string{"❯ Please give the same harbor answer again, word for word.", "", "Thought for 1s", ""}, boundaryProse...)
+	result := matchBoundarySuffix(old, 0, incoming)
 	if !result.refused || result.reason != boundaryIncomingPrompt {
-		t.Errorf("punctuation-continuation residual changed: %+v", result)
+		t.Errorf("new controlling request result=%+v, want incoming-prompt", result)
 	}
 	assertBoundaryCopyRetained(t, old, incoming)
+	m := NewManager(t.TempDir())
+	ctx := physicalContext(1, 150)
+	m.AdmitSnapshot("p", snapshotPage(old...), ctx, 0)
+	ctx.Columns = 62
+	m.AdmitSnapshot("p", snapshotPage(incoming...), ctx, 0)
+	for _, answerRow := range boundaryProse {
+		occurrences := 0
+		for _, row := range m.states["p"].History {
+			if row == answerRow {
+				occurrences++
+			}
+		}
+		if occurrences != 2 {
+			t.Errorf("requested-repeat answer row occurrences=%d, want 2", occurrences)
+		}
+	}
+}
+
+func TestBoundarySameControllingRequestKeepsSuffixProof(t *testing.T) {
+	prompt := "❯ Explain the coastal lights."
+	for _, test := range []struct {
+		name                      string
+		oldPrefix, incomingPrefix []string
+		cut                       int
+	}{
+		{"different-status", []string{prompt, "", "Thought for 2s", ""}, []string{prompt, "", "Thought for 1s", ""}, 4},
+		{"changed-paragraph", []string{prompt, "", "Thought for 2s", "", "Earlier explanation differs.", ""}, []string{prompt, "", "Thought for 1s", "", "Revised discussion changes.", ""}, 6},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			old := append(slices.Clone(test.oldPrefix), boundaryProse...)
+			incoming := append(slices.Clone(test.incomingPrefix), boundaryProse...)
+			result := matchBoundarySuffix(old, 0, incoming)
+			if result.refused || result.cut != test.cut || result.rows != 3 || result.seam != 0 {
+				t.Errorf("same controlling request did not prove the B suffix: %+v", result)
+			}
+		})
+	}
+}
+
+func TestBoundaryControllingRequestBeforeArchiveViewAnchors(t *testing.T) {
+	prompt := "❯ Explain the coastal lights."
+	old := []string{prompt, ""}
+	old = append(old, slices.Repeat([]string{"Earlier distinct context stays before the current answer.", ""}, 30)...)
+	old = append(old, boundaryProse...)
+	incoming := append([]string{prompt, "", "Thought for 1s", ""}, boundaryProse...)
+	work := boundaryWork{}
+	next, ok := boundaryIncoming(incoming, &work)
+	if !ok {
+		t.Fatal("synthetic incoming view exceeded budget")
+	}
+	limit := 0
+	for _, row := range next.rows {
+		limit += len(row)
+	}
+	view, ok := boundaryArchive(old, 0, limit, &work)
+	if !ok || view.firstRow <= 1 {
+		t.Fatalf("archive view did not exclude the request: first=%d ok=%v", view.firstRow, ok)
+	}
+	result := matchBoundarySuffix(old, 0, incoming)
+	if result.refused || result.cut != 62 || result.rows != 3 || result.seam != 0 {
+		t.Errorf("stored request before the view did not anchor the suffix: %+v", result)
+	}
+	result = matchBoundarySuffix(old, 62, incoming)
+	if result.refused || result.cut != 62 || result.rows != 3 {
+		t.Errorf("request before the segment floor did not anchor the segment suffix: %+v", result)
+	}
+	m := NewManager(t.TempDir())
+	ctx := physicalContext(1, 150)
+	m.AdmitSnapshot("p", snapshotPage(old...), ctx, 0)
+	m.states["p"].SegmentStart = 62
+	ctx.Columns = 62
+	_, _, d := m.AdmitSnapshot("p", snapshotPage(incoming...), ctx, 0)
+	state := m.states["p"]
+	if d.BoundaryRefused != 0 || d.BoundaryReconciledRows != 3 || state.LiveStart != 62 || !slices.Equal(state.History[:62], old[:62]) {
+		t.Errorf("request search changed the prefix before the departing segment: %+v", d)
+	}
+}
+
+func TestBoundaryArchiveRequestSearchChargesAndReusesRows(t *testing.T) {
+	prompt := "❯ Explain the coastal lights."
+	old := append([]string{strings.Repeat(" ", MaxBoundaryRawBytes+1), prompt, "?", "", "status words", ""}, boundaryProse...)
+	work := boundaryWork{}
+	view, ok := boundaryArchive(old, 6, 188, &work)
+	if !ok || view.firstRow != 6 {
+		t.Fatalf("synthetic view first=%d ok=%v", view.firstRow, ok)
+	}
+	before := work
+	first, last, found, ok := boundaryArchivePrompt(old, &view, 6, &work)
+	if !ok || !found || first != 1 || last != 2 || view.firstRow != 1 {
+		t.Fatalf("earlier request block=%d..%d found=%v ok=%v view=%d", first, last, found, ok, view.firstRow)
+	}
+	if work.normalizedRows != before.normalizedRows+5 || work.rawBytes <= before.rawBytes || work.tokens <= before.tokens || work.normalizedBytes <= before.normalizedBytes {
+		t.Errorf("earlier stored rows were not charged: before=%+v after=%+v", before, work)
+	}
+	if tokens := boundaryBlockTokens(view, first, last); len(tokens) != len(strings.Fields(prompt))+1 || tokens[0].row != 1 || tokens[len(tokens)-1].row != 2 {
+		t.Errorf("request token coordinates changed: count=%d", len(tokens))
+	}
+	charged := work
+	first, last, found, ok = boundaryArchivePrompt(old, &view, 6, &work)
+	if !ok || !found || first != 1 || last != 2 || work != charged {
+		t.Errorf("cached request rescanned raw rows: before=%+v after=%+v", charged, work)
+	}
+}
+
+func TestBoundaryArchiveRequestSearchExhaustionRefuses(t *testing.T) {
+	prompt := "❯ Explain the coastal lights."
+	incoming := append([]string{prompt, "", "Thought for 1s", ""}, boundaryProse...)
+	for _, test := range []struct {
+		name, earlier string
+	}{
+		{"raw", strings.Repeat(" ", MaxBoundaryRawBytes+1)},
+		{"normalized", strings.Repeat("x", MaxBoundaryNormalizedBytes)},
+		{"tokens", strings.Repeat("x ", MaxBoundaryTokens)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			old := append([]string{prompt, test.earlier, ""}, boundaryProse...)
+			result := matchBoundarySuffix(old, 3, incoming)
+			if !result.refused || result.reason != boundaryBudget || result.rows != 0 || result.work.rawBytes > MaxBoundaryRawBytes || result.work.normalizedBytes > MaxBoundaryNormalizedBytes || result.work.tokens > MaxBoundaryTokens {
+				t.Errorf("earlier request search escaped a work limit: %+v", result)
+			}
+			m := NewManager(t.TempDir())
+			ctx := physicalContext(1, 150)
+			m.AdmitSnapshot("p", snapshotPage(old...), ctx, 0)
+			m.states["p"].SegmentStart = 3
+			ctx.Columns = 62
+			_, _, d := m.AdmitSnapshot("p", snapshotPage(incoming...), ctx, 0)
+			state := m.states["p"]
+			if d.BoundaryRefused != 1 || d.BoundaryReconciledRows != 0 || state.LiveStart != len(old) || !slices.Equal(state.History[:state.LiveStart], old) {
+				t.Errorf("request-search exhaustion changed archived rows: %+v", d)
+			}
+		})
+	}
 }
 
 func TestBoundaryResidualUnclosedPromptCanReconcile(t *testing.T) {

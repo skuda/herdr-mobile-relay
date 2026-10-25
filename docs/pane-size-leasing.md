@@ -253,9 +253,10 @@ Non-substantive layout between proved rows can join that suffix. If the new
 page begins partway through an archive row, the matcher retains that partial
 seam row and removes the proved rows after it.
 
-Reconciliation reads only rows of the departing segment. Its budgets are
-1 MiB of raw inspection, 256 KiB of normalized input, 16,384 tokens, 64 candidate
-seams, and 65,536 token comparisons.
+Reconciliation deletes only rows of the departing segment. To anchor a visible
+incoming request, it can also read earlier stored rows back to the nearest prompt
+row. Its budgets are 1 MiB of raw inspection, 256 KiB of normalized input,
+16,384 tokens, 64 candidate seams, and 65,536 token comparisons.
 Raw-length checks precede normalization and comparison-view allocation; a
 second raw normalization pass is charged separately. Exhaustion, unsupported
 structure, or occurrence ambiguity refuses the cut and retains the boundary

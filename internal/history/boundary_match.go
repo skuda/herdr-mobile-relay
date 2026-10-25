@@ -310,20 +310,62 @@ func boundaryPrecedingSubstantive(view boundaryView, before int) int {
 }
 
 func boundaryPromptBlock(view boundaryView, before int) (first, last int, found bool) {
-	last = boundaryPrecedingSubstantive(view, before)
-	if last < 0 {
-		return 0, 0, false
-	}
-	for row := last; row >= view.firstRow; row-- {
-		text := view.rows[row-view.firstRow]
-		if text == "" {
-			break
+	for row := before - 1; row >= view.firstRow; row-- {
+		if !strings.HasPrefix(strings.TrimSpace(view.rows[row-view.firstRow]), "❯") {
+			continue
 		}
-		if strings.HasPrefix(strings.TrimSpace(text), "❯") {
-			return row, last, true
+		last = row
+		for last+1 < before && last+1 < view.firstRow+len(view.rows) && view.rows[last+1-view.firstRow] != "" {
+			last++
 		}
+		return row, last, true
 	}
 	return 0, 0, false
+}
+
+func boundaryArchivePrompt(history []string, view *boundaryView, before int, work *boundaryWork) (first, last int, found, ok bool) {
+	var earlierRows []string
+	var earlierTokens [][]boundaryToken
+	for row := before - 1; row >= 0; row-- {
+		var text string
+		if row >= view.firstRow {
+			text = view.rows[row-view.firstRow]
+		} else {
+			var valid bool
+			text, valid = work.row(history[row])
+			if !valid {
+				return 0, 0, false, false
+			}
+			tokens, valid := work.addTokens(text, row)
+			if !valid {
+				return 0, 0, false, false
+			}
+			earlierRows = append(earlierRows, text)
+			earlierTokens = append(earlierTokens, tokens)
+		}
+		if strings.HasPrefix(strings.TrimSpace(text), "❯") {
+			first, found = row, true
+			break
+		}
+	}
+	if len(earlierRows) > 0 {
+		slices.Reverse(earlierRows)
+		view.rows = append(earlierRows, view.rows...)
+		var tokens []boundaryToken
+		for i := len(earlierTokens) - 1; i >= 0; i-- {
+			tokens = append(tokens, earlierTokens[i]...)
+		}
+		view.tokens = append(tokens, view.tokens...)
+		view.firstRow -= len(earlierRows)
+	}
+	if !found {
+		return 0, 0, false, true
+	}
+	last = first
+	for last+1 < before && view.rows[last+1-view.firstRow] != "" {
+		last++
+	}
+	return first, last, true, true
 }
 
 func boundaryBlockTokens(view boundaryView, first, last int) []boundaryToken {
@@ -382,6 +424,7 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 		matchFloor = old.firstRow + i
 	}
 	last := old.tokens[len(old.tokens)-1].text
+	promptView := old
 	var accepted *boundaryResult
 	for end, token := range next.tokens {
 		equal, ok := work.equal(token.text, last)
@@ -521,13 +564,17 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 		}
 		incomingFirst, incomingLast, incomingPrompt := boundaryPromptBlock(next, incomingRow)
 		if incomingPrompt {
-			archiveFirst, archiveLast, archivePrompt := boundaryPromptBlock(old, first)
+			archiveFirst, archiveLast, archivePrompt, ok := boundaryArchivePrompt(history, &promptView, first, work)
+			if !ok {
+				result.reason = boundaryBudget
+				return result
+			}
 			if !archivePrompt {
 				result.reason = boundaryIncomingPrompt
 				return result
 			}
 			incomingTokens := boundaryBlockTokens(next, incomingFirst, incomingLast)
-			archiveTokens := boundaryBlockTokens(old, archiveFirst, archiveLast)
+			archiveTokens := boundaryBlockTokens(promptView, archiveFirst, archiveLast)
 			if len(incomingTokens) != len(archiveTokens) {
 				result.reason = boundaryIncomingPrompt
 				return result

@@ -112,7 +112,7 @@ func (m *Manager) beginPinnedHistoryRead(ctx context.Context, paneID, terminalID
 		}
 		blocked := false
 		for pin := range m.historyPins {
-			if pin.paneID == paneID && pin.identity.terminalID == terminalID {
+			if pin.paneID == paneID {
 				blocked = true
 				break
 			}

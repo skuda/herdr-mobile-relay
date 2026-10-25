@@ -643,6 +643,79 @@ func TestHistoryPinStaleTerminalBeginPreservesCurrentPin(t *testing.T) {
 	}
 }
 
+func TestHistoryPinReplacementsWaitForPriorTerminalBorrow(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux pin gate")
+	}
+	f, p := historyCountFixture(t, true)
+	finishSafe(t, historyRead(t, f, "p"))
+	currentID := "terminal-p"
+	for _, replacement := range []string{"terminal-B", "terminal-C"} {
+		entered, release := make(chan struct{}), make(chan struct{})
+		var blocked atomic.Bool
+		p.beforeSize = func() {
+			if blocked.CompareAndSwap(false, true) {
+				close(entered)
+				<-release
+			}
+		}
+		result := make(chan *HistoryRead, 1)
+		failures := make(chan error, 1)
+		oldID := currentID
+		go func() { r, err := f.m.BeginHistoryRead(context.Background(), "p", oldID); result <- r; failures <- err }()
+		<-entered
+		f.m.ForgetHistoryPane("p", currentID)
+		f.herdr.update("p", func(p *fakePane) { p.terminalID = replacement })
+		_, _, _ = f.m.Acquire(context.Background(), "owner", "p", 60, 20)
+		f.acquire("owner", "p", 60, 20)
+		f.clock.Advance(HistorySettleWindow)
+		before := p.counts()
+		next, err := f.m.BeginHistoryRead(context.Background(), "p", replacement)
+		if next != nil {
+			_ = next.Close()
+		}
+		if !errors.Is(err, ErrHistoryReadUnsafe) {
+			t.Errorf("replacement published before prior borrow drained: %v", err)
+		}
+		f.m.mu.Lock()
+		pins := 0
+		for pin := range f.m.historyPins {
+			if pin.paneID == "p" {
+				pins++
+			}
+		}
+		f.m.mu.Unlock()
+		if pins != 1 || p.opens.Load() != before[3] {
+			t.Errorf("replacement exceeded one retained pin: pins=%d calls=%v before=%v", pins, p.counts(), before)
+		}
+		close(release)
+		old := <-result
+		if err := <-failures; err != nil {
+			t.Fatal(err)
+		}
+		finishUnsafe(t, old)
+		p.beforeSize = nil
+		fresh, err := f.m.BeginHistoryRead(context.Background(), "p", replacement)
+		if err != nil {
+			t.Fatal(err)
+		}
+		finishSafe(t, fresh)
+		f.m.mu.Lock()
+		pins = 0
+		for pin := range f.m.historyPins {
+			if pin.paneID == "p" {
+				pins++
+			}
+		}
+		f.m.mu.Unlock()
+		if pins != 1 {
+			t.Errorf("drained replacement pin count=%d want=1", pins)
+		}
+		currentID = replacement
+	}
+	f.m.ForgetHistoryPane("p", currentID)
+}
+
 func TestHistoryPinWriteDescriptorsStayFresh(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux pin gate")

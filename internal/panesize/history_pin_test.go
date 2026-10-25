@@ -277,7 +277,7 @@ func TestHistoryReadFenceResidualAcquireForgetRestoreSweep(t *testing.T) {
 	}
 }
 
-func TestHistoryDisabledPinA2Counts(t *testing.T) {
+func TestHistoryDisabledPinReadCounts(t *testing.T) {
 	f, p := historyCountFixture(t, false)
 	f.m.disableHistoryPin = true
 	sample := func(name string, want [7]int32) {
@@ -287,7 +287,7 @@ func TestHistoryDisabledPinA2Counts(t *testing.T) {
 		got := historyCountDelta(before, p.counts())
 		t.Logf("%s [get process resolver open device size close]=%v", name, got)
 		if got != want {
-			t.Errorf("%s calls=%v want A2=%v", name, got, want)
+			t.Errorf("%s calls=%v want %v", name, got, want)
 		}
 	}
 	sample("cold", [7]int32{2, 2, 2, 1, 1, 2, 1})

@@ -1121,8 +1121,8 @@ func TestSingleFlightFollowerCannotRelabelOlderSnapshot(t *testing.T) {
 	if sequence != 2 || archived != 2 || follower.capture.PendingSequence != 0 {
 		t.Fatalf("follower changed admission bookkeeping: sequence=%d archived=%d pending=%d", sequence, archived, follower.capture.PendingSequence)
 	}
-	// The old assertion required an unsupported whole-page P prefix. A2 replaces
-	// this two-row body in place; the follower still cannot replace Q with P.
+	// Q replaces P's two-row body in place (ReplaceableTailLines), so history
+	// holds only Q; the follower's P result must not replace it.
 	if got := s.historyM.Content("pane-1", 0); got != pageQ {
 		t.Fatalf("follower replaced Q with P: %q", got)
 	}
@@ -1416,7 +1416,6 @@ func TestOtherRelayPTYResizeDoesNotEnablePhysicalSource(t *testing.T) {
 	}
 }
 
-// Replaces TestDifferentKeySamplingInversionTakesConservativeFallback's frozen Q prefix.
 func TestDifferentKeySamplingInversionHoldsPushedRows(t *testing.T) {
 	s, _, _ := captureServer(t, true)
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan coordinator.PaneReadResult, 1)

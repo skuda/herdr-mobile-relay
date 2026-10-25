@@ -841,9 +841,9 @@ func (m *Manager) lookupIdentity(ctx context.Context, paneID string) (terminalId
 // read-only without becoming its controlling process, (b) checks with fstat
 // that the held descriptor is a character device, and only then (c)
 // re-validates the pane with fresh lookups: the same Herdr terminal_id, the
-// same shell pid, and that pid's TTY is still the cached path. Mutation
-// callers close the descriptor after their ioctls; history reads can retain it
-// in a manager-owned pin.
+// same shell pid (or still no shell, using foregroundPID), and that process's
+// TTY is still the cached path. Mutation callers close the descriptor after
+// their ioctls; history reads can retain it in a manager-owned pin.
 //
 // The order is the point. A pseudo-terminal is not returned to the allocator
 // while any descriptor on it is open: Linux frees a devpts index only when the

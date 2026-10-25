@@ -101,8 +101,7 @@ func TestSnapshotRepeatedBlockScrollArchivesDisplacementOnce(t *testing.T) {
 	}
 }
 
-// Replaces TestPhysicalAlignmentsRepeatedBlockDoNotConflict's candidate tuple
-// assertions with stationary-slot behavior, independent of the old helpers.
+// Assert stationary-slot behavior.
 func TestPhysicalRepeatedBlockStationaryOccurrenceAgreement(t *testing.T) {
 	previous, next := repeatedBlockFixture(t)
 	for name, pair := range map[string][2][]string{

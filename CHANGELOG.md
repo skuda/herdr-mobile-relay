@@ -48,10 +48,11 @@ project follows [Semantic Versioning](https://semver.org/).
   clients too, join it and fail at their command deadline until the key changes
   or the relay restarts.
   Legacy reads can temporarily merge a replacement terminal's page into the old
-  archive before inventory reports it. Storage stays at `snapshot_version=1`.
-- Clip oldest response rows so a single composed frame no longer exceeds the
-  per-message limit. This includes large unleased history responses; fitting
-  content stays unchanged, and a response with no fitting row succeeds with
+  archive before inventory reports it. Saved history now records
+  `snapshot_version=1`.
+- Clip oldest response rows to fit an encoded budget 64 KiB below the per-message
+  limit. This includes large unleased history responses; fitting content stays
+  unchanged, and a response with no fitting row succeeds with
   empty truncated content. Stored history is not shortened by response
   clipping. The shared transport queue and its eviction policy are unchanged.
 - Correct the phone app's leased-width height estimates and contextual prepend

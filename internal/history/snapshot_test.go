@@ -127,7 +127,6 @@ func TestSnapshotScrollWithChangedProgressTailArchivesDisplacedRowsOnce(t *testi
 	}
 }
 
-// Replaces TestSnapshotTailLongerThanBoundFallsBack's whole-page fallback assertion.
 func TestSnapshotTailLongerThanBoundStaysHeld(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 40)
@@ -157,7 +156,6 @@ func TestSnapshotChangedTailMajorityFreezesAtMinimumEight(t *testing.T) {
 	assertSnapshotContent(t, got, append(slices.Clone(old), next...)...)
 }
 
-// Replaces TestSnapshotEquivalentCandidatesChooseSmallestTailThenDisplacementThenHeader.
 func TestSnapshotConsensusDoesNotChooseDisputedOccurrence(t *testing.T) {
 	result := physicalConsensus([]string{"A", "B", "A"}, []string{"A", "B"}, true)
 	if !slices.Equal(result.agreed, []physicalPair{{0, 0}, {1, 1}}) {
@@ -169,7 +167,6 @@ func TestSnapshotConsensusDoesNotChooseDisputedOccurrence(t *testing.T) {
 	}
 }
 
-// Replaces TestSnapshotConflictingDisplacedRangesFallBack's helper conflict and page copy.
 func TestSnapshotEqualPrefixTimerReplacesMiddle(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 40)
@@ -197,7 +194,6 @@ func TestSnapshotStreamingExtensionKeepsArchive(t *testing.T) {
 	}
 }
 
-// Replaces TestSnapshotStrictlyShorterPageRetainsPreviousBody's whole-page fallback assertion.
 func TestSnapshotStrictlyShorterPageHoldsContraction(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 40)
@@ -210,7 +206,6 @@ func TestSnapshotStrictlyShorterPageHoldsContraction(t *testing.T) {
 	}
 }
 
-// Replaces TestSnapshotReverseMovementFallsBackWithoutDeletingPriorPage's mandatory page copy.
 func TestSnapshotReverseMovementHoldsPushedRows(t *testing.T) {
 	for _, header := range [][]string{nil, {"H1", "H2"}} {
 		for _, tail := range []bool{false, true} {
@@ -234,7 +229,6 @@ func TestSnapshotReverseMovementHoldsPushedRows(t *testing.T) {
 	}
 }
 
-// Replaces TestSnapshotAmbiguousRepeatedAlignmentFreezesWholePage's whole-page fallback assertion.
 func TestSnapshotAmbiguousRepeatedAlignmentStaysHeldBelowEight(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 40)
@@ -247,7 +241,6 @@ func TestSnapshotAmbiguousRepeatedAlignmentStaysHeldBelowEight(t *testing.T) {
 	}
 }
 
-// Replaces TestSnapshotWeakScrollAnchorDoesNotBecomeStreamingRedraw's whole-page fallback assertion.
 func TestSnapshotWeakScrollAnchorHoldsMissingRows(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 40)

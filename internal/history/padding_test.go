@@ -32,15 +32,13 @@ func TestSnapshotBottomPaddingEquivalentCandidates(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := physicalContext(1, 40)
 	m.MergeSnapshot("p", snapshotPage(old...), ctx)
-	// Replaces the old blank-only displacement archival assertion: a blank-only
-	// retired prefix needs no archive under A2.
+	// A blank-only displaced prefix is not archived, so the response is the new page.
 	want := snapshotPage(next...)
 	if got := m.MergeSnapshot("p", snapshotPage(next...), ctx); got != want {
 		t.Fatalf("equivalent blank displacement copied page: got=%q want=%q", got, want)
 	}
 }
 
-// Replaces TestSnapshotOrderedDisplacementConflictFallsBack's whole-page copy.
 func TestSnapshotOrderedDisplacementConflictHoldsMissingRows(t *testing.T) {
 	old := []string{"A", "B", "A", "C", "D"}
 	next := []string{"A", "C", "D", "E", "F"}

@@ -284,9 +284,9 @@ connections can request 10,000. Responses also have an encoded-byte budget.
 The relay removes oldest response rows to fit it, without deleting retained
 history. A row that cannot fit can leave an empty successful response with the
 history-limit notice. Large unleased legacy responses use this byte guard too;
-content that fits the budget is unchanged. A single composed frame no longer
-exceeds the per-message limit; the shared transport queue and its eviction
-policy are unchanged.
+content that fits the budget is unchanged. Clipping keeps the newest rows that
+fit a budget 64 KiB below the per-message limit; the shared transport queue and
+its eviction policy are unchanged.
 
 During this relay's Resize Session lease or pending restore, eligible
 Claude/Qoder panes retain sampled fullscreen pages before the current raw

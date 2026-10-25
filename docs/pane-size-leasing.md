@@ -29,7 +29,7 @@ the relay side can fix that; a Herdr-owned resize API is the proper fix (see
 | Authorization | Both are controller-only ordered mutations with exact target validation (`validateExactPaneTarget`); release keeps the stale-target cleanup allowance. Readers are denied. |
 | Disconnect | A departing connection's leases are released immediately. |
 | Pane reads | The relay strips client-supplied `terminal_columns`/`terminal_rows`. A leasing client's response carries viewport geometry. Eligible no-scrollback Claude/Qoder panes use the pane-wide physical source described below, including reads from non-leasing clients. |
-| Settling | History admission pauses for reads inside or crossing a 3 s observed PTY-size settling interval. Eligible ANSI responses can compose retained history without admitting the incoming page. Unsafe frames carry `resize_settling`; a leasing app bounds its display wait at 4 s. |
+| Settling | History admission pauses for reads inside or crossing a 3 s observed PTY-size settling interval. Eligible ANSI responses can compose retained history without admitting the incoming page. Physical reads that fail the finished-read geometry check or meet a pending history pin, and a leasing client's reads within 3 s of a lease resize by this relay, carry `resize_settling`; a leasing app bounds its display wait at 4 s. |
 
 Compatibility matrix:
 
@@ -149,11 +149,11 @@ never write over or delete the newer lease.
 
 Lease acquisition, reconciliation, and restore work use a per-pane lock.
 History reads check geometry revisions around their samples. Bookkeeping uses
-a separate short lock. Each cleanup attempt runs with a 3 s timeout, and the
-sweep handles due panes concurrently. Shutdown stops accepting leases and makes
-one concurrent restore attempt per pane within a 5 s overall deadline; panes it
-could not restore are logged and returned as an error, never reported as
-restored.
+a separate short lock. Each cleanup attempt runs with a timeout of at most 3 s,
+and the sweep handles due panes concurrently. Shutdown stops accepting leases
+and makes one concurrent restore attempt per pane within a 5 s overall deadline;
+panes it could not restore are logged and returned as an error, never reported
+as restored.
 
 ## Restore per dimension
 
@@ -295,7 +295,8 @@ Equal slot edges remain matched before the changed middle is classified.
 
 Unexplained contraction, disputed occurrences, and reverse-pushed rows become
 held candidates before the discontinuity check. A verified return of the
-current segment's archived suffix retracts that prefix from the displayed archive.
+current segment's archived suffix retracts those rows from the end of the
+displayed archive.
 One substantive returned row can qualify under two agreed surviving anchors and
 the combined occurrence proof. A zero-displacement cleared-slot return uses one
 runtime record: it binds the archived tail to its segment, archive generation,
@@ -343,7 +344,8 @@ order. The relay sequences underlying reads at start and shares the owner's
 admission outcome with followers. An older completion cannot replace a newer
 archived read. Reads that sample content in a different order use the same
 accounting rules: unresolved rows remain held unless a discontinuity freezes
-the old body. Verified current-segment overlap can retract the archive prefix.
+the old body. Verified current-segment overlap can retract the overlapping rows
+from the end of the archive.
 
 Physical reads skip archival inside or across the three-second settling interval.
 Legacy reads skip archival when either content-read endpoint is settling. They
@@ -366,9 +368,9 @@ first, then current-page rows if needed. It keeps whole rows and reports
 `truncated`; if no row fits, it returns empty successful content with
 `truncated=true`. Response clipping does not delete stored history. This byte
 guard also applies to large unleased legacy responses; fitting legacy output
-stays unchanged. A single composed frame no longer exceeds the per-message
-limit. This does not reserve space in the shared transport queue or change its
-eviction policy; a nonempty queue can still reject a frame.
+stays unchanged. Clipping stops at the largest row suffix that fits, or at
+empty content. This does not reserve space in the shared transport queue or
+change its eviction policy; a nonempty queue can still reject a frame.
 
 The truncation notice is not a completeness check: missing samples, settling
 loss, footer/slot/tail replacement, invisible held rows, and retention limits
@@ -388,7 +390,7 @@ waiting for the scheduled save deadline. A capture that resumes after admission
 closes can preview but cannot admit. Clean loaded caches remain unchanged.
 A crash before a successful save can still lose recent samples.
 
-`snapshot_version=1` stays unchanged. Valid legacy state resumes its active
+Saved state records `snapshot_version=1`. Valid legacy state resumes its active
 segment after restart, including known-zero panes and valid v0.22.10 flat
 files, which upgrade in place. Valid physical state continues when stored and
 incoming columns are equal and positive. Missing physical width or invalid

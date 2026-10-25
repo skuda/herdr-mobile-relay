@@ -417,20 +417,14 @@ func TestPhysicalStoredClearAndGapFill(t *testing.T) {
 	}
 }
 
-// Map steps.log wall times to the first page at/after that time. Desktop page 0
-// is 06:42:14.795. The recorded zero-based windows are spinner 22->23
-// (8.486/8.748s), thinking 260->261 (83.169/83.427s), clear 265->266
-// (87.166/87.429s), prompt 344..433 (118.105..160.650s), grow 344..349,
-// shrink 349..364, submit 364, queue 433..576, and second queued prompt 448
-// (164.915s). Some driver steps fall between sampled changes, not on a page.
-// Driver time mapping (first page >= step): chunk sends 1/83/145/211,
-// clear sent 264, refill 268, grow start/append1 344, appends2..5
-// 345/346/347/349, shrink start 349, shrink done/submit 364,
-// queue first 433, queue second 448, and final marker checks 576.
+// Page times are elapsed_ms from desktop page 0. The zero-based windows are
+// spinner 22->23 (8.486/8.748s), thinking 260->261 (83.169/83.427s), clear
+// 265->266 (87.166/87.429s), prompt 344..433 (118.105..160.650s), queue
+// 433..576, and second queued prompt 448 (164.915s).
 // Record 172 (55.360s) assumes an epoch boundary for the observed rewrap,
 // 87x149 to 82x195. The capture has no PTY sample establishing a PTY change.
-// Markdown steps span 07:36:54.864..07:37:09.335; its 27 pages include the
-// table-width redraws 20->21 and 21->22, not a hook-output collapse.
+// The markdown fixture's 27 pages include the table-width redraws 20->21 and
+// 21->22.
 func TestPhysicalDesktopShapeWindows(t *testing.T) {
 	fixture := loadPhysicalReplay(t, "physical-pages-desktop-shapes")
 	for name, window := range map[string][2]int{"spinner-gap": {22, 23}, "prompt": {344, 433}, "queued": {433, 576}} {

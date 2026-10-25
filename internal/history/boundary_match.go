@@ -313,6 +313,12 @@ func boundaryBlockTokens(view boundaryView, first, last int) []boundaryToken {
 	return view.tokens[start:end]
 }
 
+func boundaryRowStartMarker(view boundaryView, index int) bool {
+	row := view.tokens[index].row
+	return (index == 0 || view.tokens[index-1].row != row) &&
+		strings.HasPrefix(strings.TrimSpace(view.rows[row-view.firstRow]), "❯")
+}
+
 func matchBoundarySuffix(history []string, floor int, incoming []string) boundaryResult {
 	result := boundaryResult{cut: len(history), refused: true, reason: boundaryNoCandidate}
 	work := &result.work
@@ -456,6 +462,12 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 				return result
 			}
 			break
+		}
+		for k := range n {
+			if boundaryRowStartMarker(next, newStart+k) != boundaryRowStartMarker(old, start+k) {
+				result.reason = boundaryIncomingPrompt
+				return result
+			}
 		}
 		incomingFirst, incomingLast, incomingPrompt := boundaryPromptBlock(next, incomingRow)
 		if incomingPrompt {

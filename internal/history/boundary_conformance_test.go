@@ -280,6 +280,46 @@ func TestBoundaryMatchStartingAtPromptMarkerKeepsEarlierProse(t *testing.T) {
 	}
 }
 
+func TestBoundaryMatchedPromptMarkersMustAlign(t *testing.T) {
+	inline := append([]string{"Context ❯ " + boundaryProse[0]}, boundaryProse[1:]...)
+	rowStart := append([]string{"Context", "❯ " + boundaryProse[0]}, boundaryProse[1:]...)
+	for _, test := range []struct {
+		name          string
+		old, incoming []string
+		reason        boundaryRefusalReason
+	}{
+		{"inline-to-row-start", inline, rowStart, boundaryIncomingPrompt},
+		// The archive marker row starts a prompt block, so the proved suffix has one prose row.
+		{"row-start-to-inline", rowStart, inline, boundaryPromptContext},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := matchBoundarySuffix(test.old, 0, test.incoming)
+			if !result.refused || result.reason != test.reason {
+				t.Errorf("unaligned marker result=%+v, want %s", result, test.reason)
+			}
+			assertBoundaryCopyRetained(t, test.old, test.incoming)
+		})
+	}
+}
+
+func TestBoundaryWholeRewrappedPromptBlockAndAnswerMatch(t *testing.T) {
+	prompt := []string{"❯ Explain how patient harbor keepers maintain bright lamps", "through long winter storms and guide the ships safely."}
+	old := append(append(slices.Clone(prompt), "", "---"), boundaryProse...)
+	incoming := append([]string{strings.Join(prompt, " "), "", "---"}, boundaryProse...)
+	result := matchBoundarySuffix(old, 0, incoming)
+	if result.refused || result.cut != 0 || result.rows != len(old) || result.seam != 0 {
+		t.Errorf("whole rewrapped prompt and answer changed: %+v", result)
+	}
+	m := NewManager(t.TempDir())
+	ctx := physicalContext(1, 150)
+	m.AdmitSnapshot("p", snapshotPage(old...), ctx, 0)
+	ctx.Columns = 62
+	got, _, d := m.AdmitSnapshot("p", snapshotPage(incoming...), ctx, 0)
+	if d.BoundaryRefused != 0 || d.BoundaryReconciledRows != len(old) || got != snapshotPage(incoming...) {
+		t.Errorf("whole prompt rewrap did not preserve exact incoming raw page: %+v", d)
+	}
+}
+
 func TestBoundaryResidualPunctuationPromptContinuationRefuses(t *testing.T) {
 	// Accepted refusal residual: this punctuation-row prompt continuation refuses and keeps the copy.
 	prompt := "❯ Explain why patient harbor keepers maintain bright lamps now"

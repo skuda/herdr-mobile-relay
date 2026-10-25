@@ -30,9 +30,30 @@ type boundaryWork struct {
 	rawBytes, normalizedBytes, tokens, candidates, comparisons int
 	normalizedRows                                             int
 }
+type boundaryRefusalReason string
+
+const (
+	boundaryShort              boundaryRefusalReason = "short"
+	boundaryUnsafeStructure    boundaryRefusalReason = "unsafe-structure"
+	boundaryPromptContext      boundaryRefusalReason = "prompt-context"
+	boundaryAmbiguousCandidate boundaryRefusalReason = "ambiguous-candidate"
+	boundaryPartialRun         boundaryRefusalReason = "partial-run"
+	boundaryIncomingPrompt     boundaryRefusalReason = "incoming-prompt"
+	boundaryBudget             boundaryRefusalReason = "budget"
+	boundaryNoCandidate        boundaryRefusalReason = "no-candidate"
+)
+
+type boundaryRun struct {
+	side                                             string
+	firstRow, lastRow, needleFirstRow, needleLastRow int
+	words                                            int
+}
+
 type boundaryResult struct {
 	cut, rows, seam, words, substantiveRows int
 	refused                                 bool
+	reason                                  boundaryRefusalReason
+	competing                               boundaryRun
 	work                                    boundaryWork
 }
 
@@ -210,11 +231,68 @@ func boundaryOccurrences(haystack, needle []boundaryToken, work *boundaryWork) (
 	return count, true
 }
 
+func boundaryCompetingRun(haystack, needle []boundaryToken, view boundaryView, work *boundaryWork) (boundaryRun, bool) {
+	prose := make([]bool, len(view.rows))
+	prompt := false
+	for i, row := range view.rows {
+		if row == "" {
+			prompt = false
+		} else if strings.HasPrefix(strings.TrimSpace(row), "❯") {
+			prompt = true
+		}
+		prose[i] = !prompt && physicalSubstantive(row)
+	}
+	starts := make(map[string][]int)
+	for start := 0; start+MinBoundaryWords <= len(needle); start++ {
+		starts[needle[start].text] = append(starts[needle[start].text], start)
+	}
+	for start := 0; start+MinBoundaryWords <= len(haystack); start++ {
+		for _, candidate := range starts[haystack[start].text] {
+			proseRows, previousRow := 0, -1
+			for j := 0; start+j < len(haystack) && candidate+j < len(needle); j++ {
+				equal, ok := work.equal(haystack[start+j].text, needle[candidate+j].text)
+				if !ok {
+					return boundaryRun{}, false
+				}
+				if !equal {
+					break
+				}
+				row := haystack[start+j].row
+				if row != previousRow && prose[row-view.firstRow] {
+					proseRows++
+				}
+				previousRow = row
+				if j+1 >= MinBoundaryWords && proseRows >= MinBoundaryRows {
+					return boundaryRun{
+						firstRow: haystack[start].row, lastRow: row,
+						needleFirstRow: needle[candidate].row, needleLastRow: needle[candidate+j].row,
+						words: j + 1,
+					}, true
+				}
+			}
+		}
+	}
+	return boundaryRun{}, true
+}
+
+func boundaryPrecedingSubstantive(view boundaryView, before int) int {
+	for row := before - 1; row >= view.firstRow; row-- {
+		if physicalSubstantive(view.rows[row-view.firstRow]) {
+			return row
+		}
+	}
+	return -1
+}
+
 func matchBoundarySuffix(history []string, floor int, incoming []string) boundaryResult {
-	result := boundaryResult{cut: len(history), refused: true}
+	result := boundaryResult{cut: len(history), refused: true, reason: boundaryNoCandidate}
 	work := &result.work
 	next, ok := boundaryIncoming(incoming, work)
-	if !ok || len(next.tokens) == 0 {
+	if !ok {
+		result.reason = boundaryBudget
+		return result
+	}
+	if len(next.tokens) == 0 {
 		return result
 	}
 	limit := 0
@@ -222,7 +300,11 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 		limit += len(row)
 	}
 	old, ok := boundaryArchive(history, floor, limit, work)
-	if !ok || len(old.tokens) == 0 || old.tokens[len(old.tokens)-1].row != len(history)-1 {
+	if !ok {
+		result.reason = boundaryBudget
+		return result
+	}
+	if len(old.tokens) == 0 || old.tokens[len(old.tokens)-1].row != len(history)-1 {
 		return result
 	}
 	matchFloor, length := len(history), 0
@@ -235,12 +317,14 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 	for end, token := range next.tokens {
 		equal, ok := work.equal(token.text, last)
 		if !ok {
+			result.reason = boundaryBudget
 			return result
 		}
 		if !equal {
 			continue
 		}
 		if work.candidates == MaxBoundaryCandidates {
+			result.reason = boundaryBudget
 			return result
 		}
 		work.candidates++
@@ -248,6 +332,7 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 		for n < len(old.tokens) && n <= end && old.tokens[len(old.tokens)-1-n].row >= matchFloor {
 			equal, ok := work.equal(old.tokens[len(old.tokens)-1-n].text, next.tokens[end-n].text)
 			if !ok {
+				result.reason = boundaryBudget
 				return result
 			}
 			if !equal {
@@ -256,6 +341,7 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 			n++
 		}
 		if n < MinBoundaryWords {
+			result.reason = boundaryShort
 			continue
 		}
 		start := len(old.tokens) - n
@@ -263,6 +349,7 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 		first := old.tokens[start].row
 		partial := start > 0 && old.tokens[start-1].row == first
 		if partial && newStart != 0 {
+			result.reason = boundaryUnsafeStructure
 			continue
 		}
 		cut := first
@@ -283,6 +370,7 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 			}
 		}
 		if !contextKnown {
+			result.reason = boundaryPromptContext
 			continue
 		}
 		unsafe := false
@@ -313,22 +401,71 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 		for i := next.tokens[newStart].row; !unsafe && i <= token.row; i++ {
 			unsafe = boundaryUnsafeRow(next.rows[i])
 		}
-		if unsafe || fullWords < MinBoundaryWords || subRows < MinBoundaryRows || proseRows < MinBoundaryRows {
+		if unsafe {
+			result.reason = boundaryUnsafeStructure
 			continue
+		}
+		if fullWords < MinBoundaryWords || subRows < MinBoundaryRows {
+			result.reason = boundaryShort
+			continue
+		}
+		if proseRows < MinBoundaryRows {
+			result.reason = boundaryPromptContext
+			continue
+		}
+		incomingAnchor := boundaryPrecedingSubstantive(next, next.tokens[newStart].row)
+		if incomingAnchor >= 0 && strings.HasPrefix(strings.TrimSpace(next.rows[incomingAnchor]), "❯") {
+			archiveAnchor := boundaryPrecedingSubstantive(old, first)
+			if archiveAnchor < 0 || !strings.HasPrefix(strings.TrimSpace(old.rows[archiveAnchor-old.firstRow]), "❯") {
+				result.reason = boundaryIncomingPrompt
+				return result
+			}
+			equal, ok := work.equal(next.rows[incomingAnchor], old.rows[archiveAnchor-old.firstRow])
+			if !ok {
+				result.reason = boundaryBudget
+				return result
+			}
+			if !equal {
+				result.reason = boundaryIncomingPrompt
+				return result
+			}
 		}
 		needle := old.tokens[start:]
 		oldCount, ok := boundaryOccurrences(old.tokens, needle, work)
 		if !ok {
+			result.reason = boundaryBudget
 			return result
 		}
 		newCount, ok := boundaryOccurrences(next.tokens, needle, work)
 		if !ok {
+			result.reason = boundaryBudget
 			return result
 		}
 		if oldCount != 1 || newCount != 1 {
-			continue
+			result.reason = boundaryAmbiguousCandidate
+			return result
+		}
+		for side, outside := range [][]boundaryToken{old.tokens[:start], next.tokens[:newStart], next.tokens[end+1:]} {
+			view := next
+			if side == 0 {
+				view = old
+			}
+			competing, ok := boundaryCompetingRun(outside, needle, view, work)
+			if !ok {
+				result.reason = boundaryBudget
+				return result
+			}
+			if competing.words > 0 {
+				competing.side = "incoming"
+				if side == 0 {
+					competing.side = "archive"
+				}
+				result.reason, result.competing = boundaryPartialRun, competing
+				return result
+			}
 		}
 		if accepted != nil {
+			result.reason = boundaryAmbiguousCandidate
 			return result
 		}
 		candidate := boundaryResult{cut: cut, rows: len(history) - cut, words: fullWords, substantiveRows: subRows}
@@ -345,7 +482,7 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 }
 
 func reconcileBoundary(state *PaneState, body []string, supported bool) boundaryResult {
-	result := boundaryResult{cut: len(state.History), refused: true}
+	result := boundaryResult{cut: len(state.History), refused: true, reason: boundaryUnsafeStructure}
 	if supported {
 		result = matchBoundarySuffix(state.History, state.SegmentStart, body)
 	}

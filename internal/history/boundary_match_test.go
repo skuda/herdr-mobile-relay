@@ -28,6 +28,157 @@ func boundaryCounter(d SnapshotAdmission, name string) int {
 	}
 }
 
+func TestBoundaryRepeatedBlocksAcrossSeparatorsRefuse(t *testing.T) {
+	for _, separator := range []string{"", "---", "·", "a distinct substantive separator"} {
+		t.Run(fmt.Sprintf("separator=%q", separator), func(t *testing.T) {
+			old := append(slices.Clone(boundaryProse), separator)
+			old = append(old, boundaryProse...)
+			result := matchBoundarySuffix(old, 0, boundaryProse)
+			if !result.refused || result.rows != 0 {
+				t.Errorf("repeated archive blocks authorized a cut across separator: cut=%d rows=%d", result.cut, result.rows)
+			}
+		})
+	}
+	old := append([]string{"an unrelated earlier transcript row", "---"}, boundaryProse...)
+	if result := matchBoundarySuffix(old, 0, boundaryProse); result.refused || result.cut != 2 {
+		t.Errorf("genuine non-repeat did not reconcile: %+v", result)
+	}
+}
+
+func TestBoundaryClippedWrappedPromptRefuses(t *testing.T) {
+	old := []string{"❯ explain this topic", "alpha bravo charlie delta echo foxtrot", "golf hotel india juliet kilo lima"}
+	if result := matchBoundarySuffix(old, 0, old[1:]); !result.refused || result.rows != 0 {
+		t.Errorf("wrapped prompt continuation counted as prose: cut=%d rows=%d", result.cut, result.rows)
+	}
+}
+
+func TestBoundaryBoundedDiscoveryRefusesExhaustion(t *testing.T) {
+	t.Run("distant-repeat-inside-window", func(t *testing.T) {
+		old := append(slices.Clone(boundaryProse), "distinct intervening prose", "---", "")
+		floor := len(old)
+		old = append(old, boundaryProse...)
+		incoming := append(slices.Clone(boundaryProse), "fresh output extends the comparison window beyond the repeated block")
+		if result := matchBoundarySuffix(old, 0, incoming); !result.refused {
+			t.Error("earlier occurrence inside the discovery window did not refuse")
+		}
+		if result := matchBoundarySuffix(old, floor, incoming); result.refused || result.cut != floor {
+			t.Errorf("earlier segment affected the suffix proof: %+v", result)
+		}
+	})
+	t.Run("comparisons", func(t *testing.T) {
+		row := strings.Repeat("amber ", 255) + "blue"
+		incoming := []string{strings.Repeat("amber ", 256), strings.Repeat("amber ", 255) + "blue"}
+		old := append(slices.Repeat([]string{row}, 3), "")
+		old = append(old, incoming...)
+		result := matchBoundarySuffix(old, 0, incoming)
+		if !result.refused || result.rows != 0 || result.work.comparisons != MaxBoundaryComparisons {
+			t.Errorf("comparison budget authorized a clipped uniqueness proof: %+v", result)
+		}
+	})
+	for _, test := range []struct {
+		name, prefix string
+	}{
+		{"raw", strings.Repeat(" ", MaxBoundaryRawBytes+1)},
+		{"normalized", strings.Repeat("x", MaxBoundaryNormalizedBytes)},
+		{"tokens", strings.Repeat("x ", MaxBoundaryTokens)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			old := append([]string{test.prefix, "unrelated substantive context", "---", ""}, boundaryProse...)
+			result := matchBoundarySuffix(old, 0, boundaryProse)
+			if !result.refused || result.rows != 0 || result.work.rawBytes > MaxBoundaryRawBytes || result.work.normalizedBytes > MaxBoundaryNormalizedBytes || result.work.tokens > MaxBoundaryTokens {
+				t.Errorf("incomplete uniqueness or prompt context authorized deletion: %+v", result)
+			}
+		})
+	}
+}
+
+func TestBoundaryPromptContextStopsAtBlankOrFloor(t *testing.T) {
+	old := append([]string{"❯ explain this topic", "wrapped prompt continuation", ""}, boundaryProse...)
+	if result := matchBoundarySuffix(old, 0, boundaryProse); result.refused || result.cut != 3 {
+		t.Errorf("blank did not end prompt context: %+v", result)
+	}
+	old = []string{"❯ explain this topic", "alpha bravo charlie delta echo foxtrot", "golf hotel india juliet kilo lima"}
+	if result := matchBoundarySuffix(old, 1, old[1:]); result.refused || result.cut != 1 {
+		t.Errorf("prompt before segment floor affected classification: %+v", result)
+	}
+}
+
+func TestBoundaryLongLegacySegmentUsesBoundedDiscovery(t *testing.T) {
+	old := make([]string, MaxLines-len(boundaryProse)-1)
+	maxRow := 0
+	for i := range old {
+		old[i] = fmt.Sprintf("Earlier row %05d records distinct prose about patient harbor keepers.", i)
+		maxRow = max(maxRow, len(old[i]))
+	}
+	old = append(old, "")
+	old = append(old, boundaryProse...)
+	limit := len(strings.Join(boundaryProse, ""))
+	result := matchBoundarySuffix(old, 0, boundaryProse)
+	archiveBytes := result.work.normalizedBytes - limit
+	if result.refused || result.cut != len(old)-len(boundaryProse) || archiveBytes < 2*limit || archiveBytes > 2*limit+2*maxRow || result.work.normalizedRows > 20 || result.work.tokens > 200 {
+		t.Fatalf("long segment did not use bounded discovery: %+v", result)
+	}
+	if result.work.rawBytes != 2*result.work.normalizedBytes {
+		t.Errorf("plain-row inspection accounting=%+v", result.work)
+	}
+	t.Logf("rows=%d L=%d archive_normalized_bytes=%d work=%+v", len(old), limit, archiveBytes, result.work)
+	m := NewManager(t.TempDir())
+	ctx := physicalContext(1, 150)
+	ctx.ReadSource = SourceLegacy
+	ctx.Columns = 0
+	m.AdmitSnapshot("p", snapshotPage(old...), ctx, 0)
+	ctx.ReadSource = SourceRecent
+	ctx.Columns = 62
+	_, _, d := m.AdmitSnapshot("p", snapshotPage(boundaryProse...), ctx, 0)
+	if d.BoundaryReconciledRows != len(boundaryProse) || d.BoundaryRefused != 0 || m.states["p"].LiveStart != len(old)-len(boundaryProse) {
+		t.Errorf("long legacy-to-physical boundary retained a copy: %+v", d)
+	}
+}
+
+func TestBoundaryRepeatBeyondWindowIsAcceptedResidual(t *testing.T) {
+	limit := len(strings.Join(boundaryProse, ""))
+	old := slices.Clone(boundaryProse)
+	context := len(old)
+	old = append(old, "Nearest preceding substantive context")
+	window := strings.Repeat("x", limit)
+	old = append(old, window, "")
+	cut := len(old)
+	old = append(old, boundaryProse...)
+	work := boundaryWork{}
+	view, ok := boundaryArchive(old, 0, limit, &work)
+	if !ok || view.firstRow != context || !slices.Equal(view.rows, old[context:]) {
+		t.Fatalf("discovery crossed the row before its bounded context: first=%d work=%+v", view.firstRow, work)
+	}
+	result := matchBoundarySuffix(old, 0, boundaryProse)
+	if result.refused || result.cut != cut || result.rows != len(boundaryProse) {
+		t.Errorf("repeat just beyond bounded discovery did not remain an accepted residual: %+v", result)
+	}
+}
+
+func TestBoundaryDiscoveryExtendsThroughLayoutToSubstantiveRow(t *testing.T) {
+	limit := len(strings.Join(boundaryProse, ""))
+	old := []string{strings.Repeat(" ", MaxBoundaryRawBytes+1), "nearest substantive context", "", "---", "·", "", strings.Repeat("x", limit)}
+	cut := len(old)
+	old = append(old, boundaryProse...)
+	work := boundaryWork{}
+	view, ok := boundaryArchive(old, 0, limit, &work)
+	if !ok || view.firstRow != 1 || !slices.Equal(view.rows, old[1:]) || work.normalizedRows != len(old)-1 {
+		t.Fatalf("bounded discovery skipped layout context or read past it: first=%d work=%+v", view.firstRow, work)
+	}
+	if result := matchBoundarySuffix(old, 0, boundaryProse); result.refused || result.cut != cut {
+		t.Errorf("bounded context read the oversized row beyond its substantive stop: %+v", result)
+	}
+}
+
+func TestBoundaryClippedPromptContextWindowRefuses(t *testing.T) {
+	old := slices.Repeat([]string{"Continuous prose without a blank leaves preceding prompt context unknown."}, 20)
+	old = append(old, boundaryProse...)
+	result := matchBoundarySuffix(old, 0, boundaryProse)
+	if !result.refused || result.rows != 0 {
+		t.Errorf("window start without a blank or segment floor authorized deletion: %+v", result)
+	}
+}
+
 func TestBoundaryWholeRowSuffixReconciliation(t *testing.T) {
 	for _, direction := range []string{"physical-width", "legacy-physical", "physical-legacy"} {
 		t.Run(direction, func(t *testing.T) {

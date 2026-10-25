@@ -39,6 +39,26 @@ func BenchmarkBoundaryMatch(b *testing.B) {
 			b.ReportMetric(float64(result.work.normalizedRows), "normalized_rows/op")
 		})
 	}
+	for _, kind := range []string{"earlier-context", "discovery-raw-over"} {
+		b.Run(kind, func(b *testing.B) {
+			archive := slices.Repeat([]string{"unrelated substantive context stays before this suffix", "---", ""}, 200)
+			if kind == "discovery-raw-over" {
+				archive = []string{strings.Repeat(" ", MaxBoundaryRawBytes+1), "---", ""}
+			}
+			archive = append(archive, boundaryProse...)
+			b.ReportAllocs()
+			b.ResetTimer()
+			var result boundaryResult
+			for range b.N {
+				result = matchBoundarySuffix(archive, 0, boundaryProse)
+			}
+			if result.refused != (kind == "discovery-raw-over") {
+				b.Fatalf("unexpected discovery result: %+v", result)
+			}
+			b.ReportMetric(float64(result.work.rawBytes), "raw_B/op")
+			b.ReportMetric(float64(result.work.normalizedRows), "normalized_rows/op")
+		})
+	}
 	for _, kind := range []string{"raw-edge", "raw-over", "normalized-edge"} {
 		b.Run(kind, func(b *testing.B) {
 			row := strings.Repeat(" ", MaxBoundaryRawBytes)

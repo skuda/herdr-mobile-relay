@@ -25,7 +25,6 @@ type boundaryView struct {
 	rows     []string
 	tokens   []boundaryToken
 	firstRow int
-	guard    []boundaryToken
 }
 type boundaryWork struct {
 	rawBytes, normalizedBytes, tokens, candidates, comparisons int
@@ -155,21 +154,16 @@ func boundaryIncoming(rows []string, work *boundaryWork) (boundaryView, bool) {
 }
 func boundaryArchive(rows []string, floor int, limit int, work *boundaryWork) (boundaryView, bool) {
 	view := boundaryView{firstRow: len(rows)}
-	length := 0
 	var reverse [][]boundaryToken
+	length, windows := 0, 0
+	// Inspect two incoming-length windows, then preceding layout through the nearest
+	// substantive row. The segment floor and work budgets also bound discovery.
 	for i := len(rows) - 1; i >= floor; i-- {
+		context := windows == 2
 		row, ok := work.row(rows[i])
 		if !ok {
 			return boundaryView{}, false
 		}
-		if length >= limit && length > 0 {
-			view.guard, ok = work.addTokens(row, i)
-			if !ok {
-				return boundaryView{}, false
-			}
-			break
-		}
-		length += len(row)
 		tokens, ok := work.addTokens(row, i)
 		if !ok {
 			return boundaryView{}, false
@@ -177,6 +171,14 @@ func boundaryArchive(rows []string, floor int, limit int, work *boundaryWork) (b
 		view.rows = append(view.rows, row)
 		reverse = append(reverse, tokens)
 		view.firstRow = i
+		length += len(row)
+		if !context && length >= limit {
+			windows++
+			length = 0
+		}
+		if context && physicalSubstantive(row) {
+			break
+		}
 	}
 	slices.Reverse(view.rows)
 	for i := len(reverse) - 1; i >= 0; i-- {
@@ -223,6 +225,11 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 	if !ok || len(old.tokens) == 0 || old.tokens[len(old.tokens)-1].row != len(history)-1 {
 		return result
 	}
+	matchFloor, length := len(history), 0
+	for i := len(old.rows) - 1; i >= 0 && (length < limit || length == 0); i-- {
+		length += len(old.rows[i])
+		matchFloor = old.firstRow + i
+	}
 	last := old.tokens[len(old.tokens)-1].text
 	var accepted *boundaryResult
 	for end, token := range next.tokens {
@@ -238,7 +245,7 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 		}
 		work.candidates++
 		n := 0
-		for n < len(old.tokens) && n <= end {
+		for n < len(old.tokens) && n <= end && old.tokens[len(old.tokens)-1-n].row >= matchFloor {
 			equal, ok := work.equal(old.tokens[len(old.tokens)-1-n].text, next.tokens[end-n].text)
 			if !ok {
 				return result
@@ -264,6 +271,20 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 		}
 		fullWords, subRows, proseRows := 0, 0, 0
 		prompt := false
+		contextKnown := old.firstRow == floor
+		for i := first - 1; i >= old.firstRow; i-- {
+			row := old.rows[i-old.firstRow]
+			if row == "" {
+				contextKnown = true
+				break
+			}
+			if strings.HasPrefix(strings.TrimSpace(row), "❯") {
+				prompt = true
+			}
+		}
+		if !contextKnown {
+			continue
+		}
 		unsafe := false
 		for i := first; i < len(history); i++ {
 			row := old.rows[i-old.firstRow]
@@ -296,22 +317,6 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 			continue
 		}
 		needle := old.tokens[start:]
-		if len(old.guard) > 0 && len(old.guard) <= len(needle) {
-			guardEqual := true
-			for j, token := range old.guard {
-				equal, ok := work.equal(token.text, needle[len(needle)-len(old.guard)+j].text)
-				if !ok {
-					return result
-				}
-				if !equal {
-					guardEqual = false
-					break
-				}
-			}
-			if guardEqual {
-				return result
-			}
-		}
 		oldCount, ok := boundaryOccurrences(old.tokens, needle, work)
 		if !ok {
 			return result
@@ -322,22 +327,6 @@ func matchBoundarySuffix(history []string, floor int, incoming []string) boundar
 		}
 		if oldCount != 1 || newCount != 1 {
 			continue
-		}
-		if old.firstRow > floor && start > 0 {
-			competing := 0
-			for competing < start && competing < len(needle) {
-				equal, ok := work.equal(old.tokens[start-1-competing].text, needle[len(needle)-1-competing].text)
-				if !ok {
-					return result
-				}
-				if !equal {
-					break
-				}
-				competing++
-			}
-			if competing > 0 && old.tokens[start-competing].row < first {
-				return result
-			}
 		}
 		if accepted != nil {
 			return result

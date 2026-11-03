@@ -5,6 +5,15 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Read Claude and Qoder session titles from the transcript lines added since
+  the previous refresh instead of decoding the transcript from its start each
+  time the one-minute title cache expires.
+  A transcript that is replaced or shortened, or whose already read first or
+  last 4 KiB change, is read again from the start. A line longer than 1 MiB no
+  longer ends the title search.
+
 ## [0.24.0] - 2026-11-02
 
 ### Added

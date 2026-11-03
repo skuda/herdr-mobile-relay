@@ -28,6 +28,10 @@ type BrowseScope struct {
 	ServerSessionID string `json:"server_session_id"`
 	TerminalID      string `json:"terminal_id"`
 	Generation      int64  `json:"generation"`
+	ProcessIdentity string `json:"process_identity,omitempty"`
+	SelectionReason string `json:"selection_reason,omitempty"`
+	InferredSession bool   `json:"inferred_session,omitempty"`
+	SelectionSource string `json:"selection_source,omitempty"`
 }
 
 type BrowseRequest struct {
@@ -76,22 +80,35 @@ type BrowseError struct {
 	Retryable bool   `json:"retryable"`
 }
 
+type SourceCapabilities struct {
+	Source       string `json:"source"`
+	ActiveBranch bool   `json:"active_branch"`
+}
+
 type BrowsePage struct {
-	Available      bool              `json:"available"`
-	ReasonCode     string            `json:"reason_code,omitempty"`
-	Reason         string            `json:"reason,omitempty"`
-	Entries        []Entry           `json:"entries"`
-	NextCursor     string            `json:"next_cursor,omitempty"`
-	HasMore        bool              `json:"has_more"`
-	State          BrowseState       `json:"state"`
-	Mode           BrowseMode        `json:"mode"`
-	SourceRevision string            `json:"source_revision,omitempty"`
-	SnapshotID     string            `json:"snapshot_id,omitempty"`
-	Total          *int              `json:"total"`
-	Progress       *BrowseProgress   `json:"progress,omitempty"`
-	Diagnostics    BrowseDiagnostics `json:"diagnostics"`
-	Error          *BrowseError      `json:"error,omitempty"`
-	OMOPlan        *OMOTodoState     `json:"omo_plan,omitempty"`
+	SubscriptionID string              `json:"subscription_id,omitempty"`
+	RecordedEdits  map[string]bool     `json:"-"`
+	Provisional    []Entry             `json:"provisional,omitempty"`
+	Sequence       uint64              `json:"sequence,omitempty"`
+	Capabilities   *SourceCapabilities `json:"capabilities,omitempty"`
+	LiveState      string              `json:"live_state,omitempty"`
+	Available      bool                `json:"available"`
+	ReasonCode     string              `json:"reason_code,omitempty"`
+	Reason         string              `json:"reason,omitempty"`
+	Entries        []Entry             `json:"entries"`
+	NextCursor     string              `json:"next_cursor,omitempty"`
+	HasMore        bool                `json:"has_more"`
+	State          BrowseState         `json:"state"`
+	Mode           BrowseMode          `json:"mode"`
+	SourceRevision string              `json:"source_revision,omitempty"`
+	SnapshotID     string              `json:"snapshot_id,omitempty"`
+	Total          *int                `json:"total"`
+	Progress       *BrowseProgress     `json:"progress,omitempty"`
+	Diagnostics    BrowseDiagnostics   `json:"diagnostics"`
+	Error          *BrowseError        `json:"error,omitempty"`
+	OMOPlan        *OMOTodoState       `json:"omo_plan,omitempty"`
+
+	recordedPending []string
 }
 
 type BrowserOptions struct {
@@ -115,7 +132,7 @@ type BrowserOptions struct {
 
 func DefaultBrowserOptions() BrowserOptions {
 	return BrowserOptions{
-		RecentBytes:          maxConversationBytes,
+		RecentBytes:          256 * 1024,
 		MaxRecordBytes:       16 * 1024 * 1024,
 		DefaultPageSize:      defaultPageSize,
 		MaxPageSize:          maxPageSize,
@@ -306,7 +323,11 @@ type Browser struct {
 	chainContextAdmissionObserver    func(claudeChain, bool)
 	chainWorkerCaptureObserver       func([]claudeRangeEvidence)
 	chainWorkerBeforeCaptureObserver func()
+	workerBeforeFinishObserver       func(*browseJob)
 	recentCache                      *recentProjectionCache
+	kimiProjection                   *kimiProjectionSnapshot
+	kimiProjectionObserver           func()
+	kimiMaterializationObserver      func(kimiMaterializationWork)
 }
 
 func NewBrowser(reader *Reader, cacheRoot string, options BrowserOptions) (*Browser, error) {
@@ -399,6 +420,7 @@ func (b *Browser) Close() error {
 		b.schedulerWG.Wait()
 		b.workerWG.Wait()
 		b.readWG.Wait()
+		b.kimiProjection = nil
 		b.validationWG.Wait()
 		b.mu.Lock()
 		jobs := make([]*browseJob, 0, len(b.jobs))
@@ -661,6 +683,9 @@ func (b *Browser) ReadPage(ctx context.Context, request BrowseRequest) (BrowsePa
 	}
 	request.Scope = normalizeBrowseScope(request.Scope)
 	request.Limit = b.limit(request.Limit)
+	if IsKimi(request.Scope.Provider) {
+		return b.readKimiPage(ctx, request)
+	}
 	if request.Scope.SessionID == "" {
 		return browseUnavailable("invalid_session", "This agent has not reported a conversation session yet."), nil
 	}
@@ -676,6 +701,9 @@ func (b *Browser) ReadPage(ctx context.Context, request BrowseRequest) (BrowsePa
 	}
 	if isHermesAgent(provider) {
 		return b.readHermesPage(ctx, request)
+	}
+	if isAgyAgent(provider) {
+		return b.readNativePage(ctx, request, "agy")
 	}
 	return b.readFilePage(ctx, request, false)
 }
@@ -774,7 +802,10 @@ func (b *Browser) sourceFor(scope BrowseScope, omo bool) (fileSource, string) {
 			return fileSource{}, "invalid_session"
 		}
 	}
-	source, err := captureFileSource(location)
+	source, err := captureFileSourceWithObserver(location, func(bytes int64) error {
+		b.observePhysicalRead(bytes)
+		return nil
+	})
 	if err != nil {
 		return fileSource{}, "source_unavailable"
 	}
@@ -1050,7 +1081,10 @@ func (b *Browser) readRecentFilePage(ctx context.Context, request BrowseRequest,
 	if start < 0 {
 		start = 0
 	}
-	digest, err := fileRangeDigest(ctx, source.file, start, source.end)
+	digest, err := fileRangeDigestObserved(ctx, source.file, start, source.end, nil, func(bytes int64) error {
+		b.observePhysicalRead(bytes)
+		return nil
+	})
 	if err != nil {
 		if ctx.Err() != nil {
 			return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
@@ -1115,7 +1149,10 @@ func (b *Browser) readRecentCursorPage(ctx context.Context, request BrowseReques
 	if source.revision != cursor.Revision || source.end < end {
 		return browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
 	}
-	digest, err := fileRangeDigest(ctx, source.file, start, end)
+	digest, err := fileRangeDigestObserved(ctx, source.file, start, end, nil, func(bytes int64) error {
+		b.observePhysicalRead(bytes)
+		return nil
+	})
 	if err != nil {
 		if ctx.Err() != nil {
 			return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
@@ -2170,8 +2207,15 @@ func (b *Browser) snapshotCursor(scope BrowseScope, job *browseJob, boundary int
 func (b *Browser) runJob(job *browseJob) {
 	defer b.workerWG.Done()
 	defer func() {
+		if b.workerBeforeFinishObserver != nil {
+			b.workerBeforeFinishObserver(job)
+		}
 		job.mu.Lock()
 		job.running = false
+		if job.err != nil {
+			job.state = BrowseFailed
+			job.phase = "failed"
+		}
 		job.mu.Unlock()
 		b.done <- job
 	}()
@@ -2450,8 +2494,6 @@ func (b *Browser) jobHasInterest(job *browseJob) bool {
 func (b *Browser) failJob(job *browseJob, code, message string, retryable bool) {
 	failure := browseErrorFor(code, message, retryable)
 	job.mu.Lock()
-	job.state = BrowseFailed
-	job.phase = "failed"
 	job.err = failure
 	index := job.index
 	job.index = nil
@@ -2467,14 +2509,14 @@ func (b *Browser) failJob(job *browseJob, code, message string, retryable bool) 
 }
 
 func (b *Browser) readOpenCodePage(ctx context.Context, request BrowseRequest) (BrowsePage, error) {
-	return b.readNativePage(ctx, request, false)
+	return b.readNativePage(ctx, request, "opencode")
 }
 
 func (b *Browser) readHermesPage(ctx context.Context, request BrowseRequest) (BrowsePage, error) {
-	return b.readNativePage(ctx, request, true)
+	return b.readNativePage(ctx, request, "hermes")
 }
 
-func (b *Browser) readNativePage(ctx context.Context, request BrowseRequest, hermes bool) (BrowsePage, error) {
+func (b *Browser) readNativePage(ctx context.Context, request BrowseRequest, provider string) (BrowsePage, error) {
 	var cursor browseCursor
 	var err error
 	if request.Cursor != "" {
@@ -2491,10 +2533,36 @@ func (b *Browser) readNativePage(ctx context.Context, request BrowseRequest, her
 	if cursor.NativeBefore != "" {
 		before = cursor.NativeBefore
 	}
-	if hermes {
+	switch provider {
+	case "hermes":
 		return b.readHermesNative(ctx, request, cursor, before)
+	case "agy":
+		return b.readAgyNative(ctx, request, cursor, before)
 	}
 	return b.readOpenCodeNative(ctx, request, cursor, before)
+}
+
+func (b *Browser) readAgyNative(ctx context.Context, request BrowseRequest, cursor browseCursor, before string) (BrowsePage, error) {
+	const unavailable = "Antigravity conversation history is unavailable."
+	if ctx.Err() != nil {
+		return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+	}
+	location, locateCode := b.reader.agy.locateContext(request.Scope.SessionID)
+	if locateCode != "" {
+		return nativeFailure(locateCode, unavailable), nil
+	}
+	entries, hasMore, corrupt, metadata, code := b.reader.agy.readFromContext(ctx, location.Path, before, request.Limit)
+	if ctx.Err() != nil {
+		return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true)), nil
+	}
+	if code != "" {
+		return nativeFailure(code, unavailable), nil
+	}
+	revision := nativeDatabaseRevision(location.Path, metadata.SchemaVersion, "agy")
+	if cursor.Revision != "" && cursor.Revision != revision {
+		return browseFailure(true, "source_changed", "The Antigravity database changed while history was being browsed.", browseErrorFor("source_changed", "The Antigravity database changed while history was being browsed.", false)), nil
+	}
+	return b.nativePage(request.Scope, entries, hasMore, corrupt, metadata.Total, fmt.Sprint(metadata.OldestIdx), revision, cursor), nil
 }
 
 func (b *Browser) readOpenCodeNative(ctx context.Context, request BrowseRequest, cursor browseCursor, before string) (BrowsePage, error) {
@@ -2510,7 +2578,9 @@ func (b *Browser) readOpenCodeNative(ctx context.Context, request BrowseRequest,
 	if cursor.Revision != "" && cursor.Revision != revision {
 		return browseFailure(true, "source_changed", "The OpenCode database changed while history was being browsed.", browseErrorFor("source_changed", "The OpenCode database changed while history was being browsed.", false)), nil
 	}
-	return b.nativePage(request.Scope, entries, hasMore, corrupt, metadata.Total, metadata.MessageID, revision, cursor), nil
+	page := b.nativePage(request.Scope, entries, hasMore, corrupt, metadata.Total, metadata.MessageID, revision, cursor)
+	page.recordedPending = metadata.pendingIDs
+	return page, nil
 }
 
 func (b *Browser) readHermesNative(ctx context.Context, request BrowseRequest, cursor browseCursor, before string) (BrowsePage, error) {
@@ -2555,21 +2625,11 @@ func nativeFailure(code, reason string) BrowsePage {
 }
 
 func nativeOpenCodeRevision(metadata openCodeRow) string {
-	return nativeSourceIdentityRevision(metadata.Database)
+	return nativeDatabaseRevision(metadata.Database, metadata.SchemaVersion, fmt.Sprint(metadata.V2))
 }
 
-func nativeHermesRevision(path string, _ hermesRow) string {
-	return nativeSourceIdentityRevision(path)
-}
-
-func nativeSourceIdentityRevision(path string) string {
-	identity := ""
-	if info, err := os.Stat(path); err == nil {
-		identity = fileIdentity(info)
-	}
-	data, _ := json.Marshal([]string{filepath.Clean(path), identity})
-	digest := sha256.Sum256(data)
-	return hex.EncodeToString(digest[:])
+func nativeHermesRevision(path string, metadata hermesRow) string {
+	return nativeDatabaseRevision(path, metadata.SchemaVersion, "hermes")
 }
 
 func (b *Browser) nativePage(scope BrowseScope, entries []Entry, hasMore bool, corrupt bool, total int, rawBefore, revision string, cursor browseCursor) BrowsePage {
@@ -2581,8 +2641,10 @@ func (b *Browser) nativePage(scope BrowseScope, entries []Entry, hasMore bool, c
 		Available: true, State: BrowseReady, Mode: BrowseNative, Entries: []Entry{},
 		HasMore: hasMore, SourceRevision: revision, Diagnostics: diagnostics,
 	}
-	baseTotal := total
-	base.Total = &baseTotal
+	if total != UnknownTotal {
+		baseTotal := total
+		base.Total = &baseTotal
+	}
 	projected := make([]projectedEntry, 0, len(entries))
 	for index, entry := range entries {
 		projected = append(projected, projectedEntry{Offset: int64(index), Entry: entry})

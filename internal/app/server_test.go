@@ -1323,7 +1323,7 @@ func fixtureConnectionTornDown(err error) bool {
 }
 
 func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "s")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -1635,22 +1635,22 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 		}
 	}
 	latest.CloseNow()
-	cancel()
-	select {
-	case <-pollDone:
-	case <-time.After(time.Second):
-		t.Fatal("production poller did not stop")
-	}
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if serveErr := <-serverDone; serveErr != nil && !fixtureConnectionTornDown(serveErr) {
 		t.Fatal(serveErr)
 	}
+	cancel()
+	select {
+	case <-pollDone:
+	case <-time.After(time.Second):
+		t.Fatal("production poller did not stop")
+	}
 }
 
 func TestProductionPollInventoryRecoveryCommitsWithoutListeners(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -3398,10 +3398,11 @@ func TestFirstInventoryReconcilesHistoryFromEarlierProcess(t *testing.T) {
 
 func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
 	response := map[string]any{
-		"type":    "pane_content",
-		"pane_id": "w1:p1",
-		"content": "unchanged output",
-		"format":  "ansi",
+		"request_id": "identified-read",
+		"type":       "pane_content",
+		"pane_id":    "w1:p1",
+		"content":    "unchanged output",
+		"format":     "ansi",
 		"target": protocol.TargetRef{
 			ServerSessionID: "primary",
 			PaneID:          "w1:p1",
@@ -3422,6 +3423,9 @@ func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
 	}
 	if unchanged["target"] != response["target"] {
 		t.Fatalf("unchanged response lost exact target: %#v", unchanged)
+	}
+	if unchanged["request_id"] != response["request_id"] {
+		t.Fatalf("unchanged response lost read identity: %#v", unchanged)
 	}
 	if _, included := unchanged["content"]; included {
 		t.Fatalf("unchanged response included terminal content: %#v", unchanged)

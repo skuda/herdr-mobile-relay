@@ -26,30 +26,31 @@ func TestLaunchDiscoveryRejectsReplacementAndRevocation(t *testing.T) {
 
 func runLaunchDiscovery(t *testing.T, mode string) {
 	dir := t.TempDir()
-	entered, release, record := filepath.Join(dir, "entered"), filepath.Join(dir, "release"), filepath.Join(dir, "calls")
-	bin := writeScript(t, dir, "herdr", fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\ncase \"$1 $2\" in\n 'agent start') touch %q; while [ ! -f %q ]; do sleep 0.01; done; printf '%%s\\n' '{\"result\":{\"pane_id\":\"pane-new\"}}' ;;\n 'agent prompt') printf '%%s\\n' '{\"result\":{}}' ;;\nesac\n", record, entered, release))
-	state := NewState(testLogger())
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
-	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0600); _ = d.Close(context.Background()) })
+	entered, release := filepath.Join(dir, "entered"), filepath.Join(dir, "release")
+	f := newLaunchFixtureWithOptions(t, launchFixtureOptions{start: fmt.Sprintf(": > %q; while [ ! -f %q ]; do /bin/sleep 0.01; done", entered, release)})
+	d, state, record := f.dispatcher, f.dispatcher.state, f.calls
+	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0600) })
 	resultCh := make(chan *CommandResult, 1)
 	var revoked atomic.Bool
-	ctx := herdr.WithDispatchCheck(context.Background(), func() error {
+	waitCtx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	ctx := herdr.WithDispatchCheck(waitCtx, func() error {
 		if revoked.Load() {
 			return errors.New("revoked")
 		}
 		return nil
 	})
-	message := map[string]any{"action": "agent_start", "request_id": "normal-discovery", "profile_id": "claude", "name": "proj", "cwd": "/tmp", "prompt": "hello"}
+	message := map[string]any{"action": "agent_start", "request_id": "normal-discovery", "profile_id": "claude", "name": "proj", "cwd": f.cwd, "prompt": "hello"}
 	go func() { resultCh <- d.Handle(ctx, message) }()
-	deadline := time.Now().Add(3 * time.Second)
 	for {
 		if _, err := os.Stat(entered); err == nil {
 			break
 		}
-		if time.Now().After(deadline) {
+		select {
+		case <-ctx.Done():
 			t.Fatal("start did not enter")
+		case <-time.After(time.Millisecond):
 		}
-		time.Sleep(time.Millisecond)
 	}
 	state.CommitInventory([]*AgentState{{PaneID: "pane-new", RawPaneID: "raw-new", TerminalID: "terminal-new", Agent: "claude", Status: "idle"}}, state.RevisionCounter())
 	terminal := "terminal-new"
@@ -79,10 +80,14 @@ func runLaunchDiscovery(t *testing.T, mode string) {
 		if mode == "replacement" || mode == "disappearance" || mode == "revocation" {
 			wantPhase, wantPrompts = "completed_with_warning", 0
 		}
-		if result.Phase != wantPhase || strings.Count(string(data), "agent prompt") != wantPrompts {
+		if !result.OK || result.PaneID != f.target.PaneID || result.Phase != wantPhase || strings.Count(string(data), "agent prompt") != wantPrompts {
 			t.Fatalf("launch identity result=%+v generation=%d calls=%s", result, state.Generation("pane-new"), data)
 		}
-		replay := d.Handle(context.Background(), message)
+		if wantPhase == "completed" {
+			f.assertLaunch(t, result)
+		}
+		f.assertCalls(t, wantPrompts)
+		replay := d.Handle(ctx, message)
 		if replay.Phase != result.Phase {
 			t.Fatalf("duplicate outcome differs: %+v", replay)
 		}
@@ -90,7 +95,7 @@ func runLaunchDiscovery(t *testing.T, mode string) {
 		if err != nil || string(after) != string(data) {
 			t.Fatal("duplicate launch dispatched again")
 		}
-	case <-time.After(3 * time.Second):
+	case <-ctx.Done():
 		t.Fatal("launch did not finish")
 	}
 }

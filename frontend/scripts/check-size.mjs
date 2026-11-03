@@ -75,8 +75,17 @@ import { constants, gzipSync } from 'node:zlib';
 // safe Conversation routing with native-transcript fallback.
 // Raised from 164 KiB for bounded history diagnostics, source-change recovery,
 // and snapshot-aware refresh handling.
-const limitKiB = 165;
-const limit = limitKiB * 1024 + 256;
+// Raised from 166 KiB for the per-server filter on the home list (about
+// 0.6 KiB gzip).
+// Raised from 167 KiB for reviewed reorder cancellation and pointer-lifetime
+// correctness, with modest margin for the release guard.
+// Raised from 168 to 169 KiB by owner authorization for eager hashing recovery;
+// this ceiling is not a claim of bundle savings or permission for future increases.
+// Raised from 169 to 170 KiB by owner authorization after merging the Svelte
+// 5.57 runtime (which already used one KiB of headroom) with the work above;
+// this ceiling is not permission for future increases.
+const limitKiB = 170;
+const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const assetNames = await readdir(join(root, 'assets'));
 const appScript = assetNames.find((name) => /^app-[a-f0-9]{64}\.js$/.test(name));

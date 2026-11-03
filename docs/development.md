@@ -12,9 +12,23 @@ cd herdr-mobile-relay
 make dev-tunnel
 ```
 
-`make dev-tunnel` builds the current Go source and frontend, uses isolated ports
-and state under `relay/.dev/`, and opens a temporary tunnel. It never uses the
-installed production relay.
+`make dev-tunnel` builds the current Go source, interactively chooses Tailscale
+Serve (when available) or a temporary Cloudflare tunnel, then builds the
+frontend. Set `HERDR_DEV_TRANSPORT=tailscale` or `cloudflare` to skip the prompt
+(required without a terminal). Tailscale serves HTTPS port 9443, proxying to the
+dev relay
+on localhost port 18375; the plugin uses UDP port 18376 by default. A conflicting
+Serve port is refused; Ctrl-C attempts to remove only this dev mapping. Set
+`HERDR_DEV_CONFIG_DIR` to move isolated state from `relay/.dev/`. The dev run
+never uses the installed production relay or its port 8375. For Tailscale
+prerequisites, see [transports.md](transports.md#tailscale-serve).
+
+If a Pi agent directory exists, it installs or updates the live-command
+integration there, including in noninteractive runs.
+This changes the shared Pi profile, not the isolated relay state; the integration
+remains after the tunnel stops. Run `/reload` in affected Pi panes after the
+tunnel starts. Set `HERDR_DEV_PI_COMMANDS_INSTALL=0` to skip profile changes.
+Other Pi profiles require their own installation via `relay/setup.sh --pi-install`.
 
 ## Common targets
 
@@ -90,14 +104,19 @@ Rerun that command to move to a newer candidate.
 
 ## Contributing
 
-Work lands on `main`; open pull requests against it and make sure `make check`
-passes first.
+Work lands on `dev`: branch from `dev`, open pull requests into `dev`, and make
+sure `make check` passes first. `main` only receives merges of `dev` at release
+time, and a pull request into `main` from any other branch fails its check. See
+`AGENTS.md` for the full branch and release flow.
 
 ## Toolchains
 
-Backend development uses Go 1.27.0; frontend development uses Bun 1.4 (`bun
-install --cwd frontend`, then the `make` targets above). Playwright runs on
-Bun. CI installs both browsers natively (`bun x playwright install
+Backend development uses Go 1.27.3; frontend development uses Node.js
+26.13.0 and Bun 1.4.4 (`bun install --cwd frontend`, then the `make` targets
+above). Bun installs the packages and runs the repository's own scripts; Vite,
+ESLint, Vitest and Playwright run on Node, because `bun run` honours their
+`#!/usr/bin/env node` line whenever Node is on `PATH` (without Node it falls
+back to Bun). CI installs both browsers natively (`bun x playwright install
 --with-deps chromium webkit`); on Fedora, `install-deps` is unsupported and
 native WebKit crashes, so `make frontend-browser` runs WebKit through
 Playwright's official container via podman (Chromium runs natively — its dnf

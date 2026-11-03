@@ -98,9 +98,10 @@ func runJournalFixture(t *testing.T, testBinary, unit, marker, format, level str
 
 	arguments := []string{
 		"--user",
-		"--wait",
 		"--collect",
 		"--unit=" + unit,
+		"--property=Type=oneshot",
+		"--property=RemainAfterExit=yes",
 		"--property=StandardOutput=journal",
 		"--property=StandardError=journal",
 		"--setenv=HERDR_JOURNAL_FIXTURE=1",
@@ -126,9 +127,17 @@ func runJournalFixture(t *testing.T, testBinary, unit, marker, format, level str
 		wantMarked = 1
 	}
 	deadline := time.Now().Add(5 * time.Second)
+	if output, err := runJournalCommand(time.Until(deadline), "systemctl", "--user", "is-active", "--quiet", unit); err != nil {
+		t.Fatalf("journal fixture unit %s is not active after startup: %v (%s)", unit, err, output)
+	}
 	for {
 		entries := journalEntries(t, unit)
-		if len(markedEntries(entries, marker)) >= wantMarked || time.Now().After(deadline) {
+		marked := markedEntries(entries, marker)
+		if len(marked) >= wantMarked || time.Now().After(deadline) {
+			if len(marked) < wantMarked {
+				t.Logf("journal fixture incomplete: unit=%s format=%s level=%s serveError=%t wantMarked=%d marked=%d systemd-run-output=%q journal-entries=%s",
+					unit, format, level, serveError, wantMarked, len(marked), boundedJournalOutput(output), journalEntriesDiagnostic(entries))
+			}
 			return entries
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -244,4 +253,20 @@ func runJournalCommand(timeout time.Duration, name string, arguments ...string) 
 		return output, ctx.Err()
 	}
 	return output, err
+}
+
+func boundedJournalOutput(output []byte) string {
+	const maxBytes = 4096
+	if len(output) > maxBytes {
+		return string(output[:maxBytes]) + "...[truncated]"
+	}
+	return string(output)
+}
+
+func journalEntriesDiagnostic(entries []journalEntry) string {
+	output, err := json.Marshal(entries)
+	if err != nil {
+		return fmt.Sprintf("unavailable: %v", err)
+	}
+	return boundedJournalOutput(output)
 }

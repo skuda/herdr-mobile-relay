@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { normalizeConversationPage } from '$lib/store';
+import unavailablePage from '../../../contracts/fixtures/conversation_unavailable.json';
 import {
   analyzeConversationBatch,
   conversationIdentity,
@@ -71,7 +73,81 @@ describe('conversation history identity and batch analysis', () => {
 });
 
 describe('ConversationHistoryController', () => {
-  it('serializes initial context loading and requests the wire maximum', async () => {
+  it.each([
+    { code: 'source_missing', wire: unavailablePage, retryable: true },
+    { code: 'history_unavailable', wire: { ...unavailablePage, reason_code: undefined }, retryable: true },
+    { code: 'access_denied', wire: { ...unavailablePage, error: { code: 'access_denied', message: 'Denied', retryable: false } }, retryable: false },
+  ])('retains older history and honors wire error $code', async ({ code, wire, retryable }) => {
+    const retained = [entry('u2', 'user'), entry('a2', 'assistant')];
+    const request = vi.fn()
+      .mockResolvedValueOnce(page({ entries: retained, hasMore: true, nextCursor: 'older' }))
+      .mockResolvedValueOnce(normalizeConversationPage(wire))
+      .mockResolvedValueOnce(page({ entries: [entry('u1', 'user'), entry('a1', 'assistant')] }));
+    const controller = new ConversationHistoryController(agent(), { request });
+    try {
+      controller.start();
+      await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+      controller.demandOlder();
+      await vi.waitFor(() => expect(controller.state.errorCode).toBe(code));
+      expect(controller.state.errorRetryable).toBe(retryable);
+      expect(controller.state.entries).toEqual(retained);
+      expect(controller.state.nextCursor).toBe('older');
+      expect(controller.state.hasMore).toBe(true);
+      controller.retry();
+      if (!retryable) {
+        expect(request).toHaveBeenCalledTimes(2);
+        expect(controller.state.error?.message).toBe('Denied');
+        return;
+      }
+      await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(3));
+      expect(request.mock.calls[2][1]).toMatchObject({ cursor: 'older', retry: true });
+      await vi.waitFor(() => expect(controller.state.entries.map(({ id }) => id)).toEqual(['u1', 'a1', 'u2', 'a2']));
+      expect(controller.state.errorCode).toBe('');
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it('keeps native cursor traversal working without a total and clears a stale head count', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(page({ mode: 'native', total: 4, sourceRevision: 'db', entries: [entry('u2', 'user'), entry('a2', 'assistant')], hasMore: true, nextCursor: 'older' }))
+      .mockResolvedValueOnce(page({ mode: 'native', total: null, sourceRevision: 'db', entries: [entry('u2', 'user'), entry('a2', 'assistant')], hasMore: true, nextCursor: 'older' }))
+      .mockResolvedValueOnce(page({ mode: 'native', total: null, sourceRevision: 'db', entries: [entry('u1', 'user'), entry('a1', 'assistant')] }));
+    const controller = new ConversationHistoryController(agent(), { request });
+    controller.start();
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(controller.state.total).toBe(4);
+    controller.refresh();
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(controller.state.total).toBeNull();
+    controller.demandOlder();
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(controller.state.entries.map(({ id }) => id)).toEqual(['u1', 'a1', 'u2', 'a2']);
+    expect(controller.state.hasMore).toBe(false);
+    expect(controller.state.total).toBeNull();
+    controller.cancel();
+  });
+
+  it.each([[1, 'live result'], [3, 'snapshot result']] as const)('orders a snapshot captured at sequence %i against a concurrent finalized delta', async (snapshotSequence, expectedOutput) => {
+    const toolEntry = (output: string) => entry('pi:answer', 'assistant', 'Tool turn', [{ id: 'tool', name: 'read', output }]);
+    const snapshot = (sequence: number, output: string) => page({ mode: 'snapshot', snapshotId: 'snapshot', sourceRevision: 'revision', sequence, entries: [entry('pi:user', 'user'), toolEntry(output)] });
+    let resolveHead: (value: ConversationPage) => void = () => {};
+    const request = vi.fn().mockResolvedValueOnce(snapshot(0, 'initial')).mockImplementationOnce(() => new Promise<ConversationPage>(resolve => { resolveHead = resolve; }));
+    const controller = new ConversationHistoryController(agent(), { request });
+    controller.start();
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    controller.refresh();
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    expect(controller.applyLiveEntries('revision', [toolEntry('live result')], 2)).toBe(true);
+    resolveHead(snapshot(snapshotSequence, 'snapshot result'));
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(controller.state.entries.find(entry => entry.id === 'pi:answer')?.tools?.[0].output).toBe(expectedOutput);
+    controller.cancel();
+  });
+
+  it('opens a bounded recent page and fetches missing prompt context only on demand', async () => {
     const calls: { cursor?: string; limit?: number }[] = [];
     const request = vi.fn(async (_target: Agent, input: { cursor?: string; limit?: number }) => {
       calls.push(input);
@@ -93,16 +169,21 @@ describe('ConversationHistoryController', () => {
       yieldToBrowser: async () => {},
     });
     controller.start();
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(HISTORY_WIRE_PAGE_SIZE).toBe(24);
+    expect(controller.state.entries.map(({ id }) => id)).toEqual(['answer-only']);
+    controller.demandOlder();
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
     expect(calls.map(({ cursor, limit }) => [cursor, limit])).toEqual([
       [undefined, HISTORY_WIRE_PAGE_SIZE],
       ['context-cursor', HISTORY_WIRE_PAGE_SIZE],
     ]);
-    expect(controller.state.entries.map(({ id }) => id)).toEqual(['question', 'answer-only']);
+    await vi.waitFor(() => expect(controller.state.entries.map(({ id }) => id)).toEqual(['question', 'answer-only']));
     expect(controller.state.beginningReached).toBe(true);
   });
 
-  it('starts each older demand from current semantic progress and crosses tool-only pages', async () => {
+  it('bounds each older demand to one ready page including tool-only pages', async () => {
     const requests: { cursor?: string }[] = [];
     const olderExchanges = Array.from({ length: 12 }, (_, index) => [
       entry(`older-user-${index}`, 'user', `older question ${index}`),
@@ -136,10 +217,14 @@ describe('ConversationHistoryController', () => {
     controller.demandOlder();
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
     controller.demandOlder();
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(controller.state.entries.map(({ id }) => id)).toContain('tool-0');
+    controller.demandOlder();
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(4));
 
     expect(requests.map(({ cursor }) => cursor)).toEqual([undefined, 'older-1', 'older-2', 'older-3']);
-    expect(controller.state.entries.map(({ id }) => id)).toContain('earlier-user');
+    await vi.waitFor(() => expect(controller.state.entries.map(({ id }) => id)).toContain('earlier-user'));
     expect(controller.state.requestPhase).toBe('idle');
     expect(controller.state.contextSearching).toBe(false);
   });
@@ -164,7 +249,7 @@ describe('ConversationHistoryController', () => {
     expect(controller.state.requestPhase).toBe('idle');
   });
 
-  it('keeps searching when the newest window contains only tools and assistant activity', async () => {
+  it('shows tools and assistant activity without searching for a deep prompt', async () => {
     let calls = 0;
     const request = vi.fn(async () => {
       calls++;
@@ -185,8 +270,10 @@ describe('ConversationHistoryController', () => {
     const controller = new ConversationHistoryController(agent(), { request, yieldToBrowser: async () => {} });
     controller.start();
     await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
-    expect(request).toHaveBeenCalledTimes(2);
-    expect(controller.state.entries.map(({ id }) => id)).toEqual(['actual-user', 'actual-answer', 'tool-only', 'assistant-activity']);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(controller.state.entries.map(({ id }) => id)).toEqual(['tool-only', 'assistant-activity']);
+    expect(controller.state.contextSearching).toBe(false);
+    expect(controller.state.hasMore).toBe(true);
   });
 
   it('promotes a warm preview when the fresh page has a leading fragment and a usable exchange', async () => {
@@ -220,7 +307,7 @@ describe('ConversationHistoryController', () => {
     expect(controller.state.entries.map(({ id }) => id)).toEqual(['fresh-orphan', 'fresh-user', 'fresh-answer']);
   });
 
-  it('keeps a warm preview separate until fresh context is usable', async () => {
+  it('keeps a warm preview separate until a fresh recent fragment is accepted', async () => {
     let resolve!: (value: ConversationPage) => void;
     const request = vi.fn(() => new Promise<ConversationPage>((complete) => { resolve = complete; }));
     const cached = [entry('cached-user', 'user', 'saved question'), entry('cached-answer', 'assistant', 'saved answer')];
@@ -247,13 +334,16 @@ describe('ConversationHistoryController', () => {
       hasMore: true,
       sourceRevision: 'new-revision',
     }));
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(controller.state.preview).toBe(false);
+    expect(controller.state.entries.map(({ id }) => id)).toEqual(['fresh-answer']);
+    controller.demandOlder();
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
-    expect(controller.state.preview).toBe(true);
-    expect(controller.state.entries.map(({ id }) => id)).toEqual(['cached-user', 'cached-answer']);
 
     resolve(page({ entries: [entry('fresh-user', 'user', 'fresh question')], sourceRevision: 'new-revision' }));
-    await vi.waitFor(() => expect(controller.state.preview).toBe(false));
-    expect(controller.state.entries.map(({ id }) => id)).toEqual(['fresh-user', 'fresh-answer']);
+    await vi.waitFor(() => expect(controller.state.entries.map(({ id }) => id)).toEqual(['fresh-user', 'fresh-answer']));
+    expect(controller.state.preview).toBe(false);
   });
 
   it('rejects a changed snapshot identity after preparation starts', async () => {
@@ -316,6 +406,49 @@ describe('ConversationHistoryController', () => {
     expect(controller.state.entries.map(({ id }) => id)).toEqual(['u1']);
     expect(request.mock.calls[1][1]).toEqual(expect.objectContaining({ retry: true, limit: HISTORY_WIRE_PAGE_SIZE }));
     expect(states.length).toBeGreaterThan(1);
+  });
+
+  it.each([
+    { code: 'memory_limit', retryable: true },
+    { code: 'stalled', retryable: true },
+    { code: 'work_limit', retryable: true },
+    { code: 'source_changed', retryable: true },
+    { code: 'access_denied', retryable: false },
+    { code: 'transport_disconnected', retryable: false },
+  ])('does not recover $code with retryable=$retryable on reconnect', async ({ code, retryable }) => {
+    const request = vi.fn().mockRejectedValue({ error: { code, message: 'History needs attention', retryable } });
+    const controller = new ConversationHistoryController(agent(), { request });
+    controller.start();
+    await vi.waitFor(() => expect(controller.state.error?.code).toBe(code));
+    expect(controller.recoverAfterReconnect(agent())).toBe(false);
+    expect(request).toHaveBeenCalledOnce();
+    controller.cancel();
+  });
+
+  it('recovers transport failures only for the active current target and without parallel requests', async () => {
+    let active = true;
+    let finish!: (value: ConversationPage) => void;
+    const pending = new Promise<ConversationPage>((resolve) => { finish = resolve; });
+    const request = vi.fn().mockRejectedValueOnce({ error: { code: 'transport_disconnected', message: 'Relay is not connected', retryable: true } }).mockReturnValue(pending);
+    const controller = new ConversationHistoryController(agent(), { request, isActive: () => active });
+    controller.start();
+    await vi.waitFor(() => expect(controller.state.error?.code).toBe('transport_disconnected'));
+    expect(controller.recoverAfterReconnect({ ...agent(), generation: 2 })).toBe(false);
+    active = false;
+    expect(controller.recoverAfterReconnect(agent())).toBe(false);
+    active = true;
+    controller.pause();
+    expect(controller.state.pausedReason).toBeTruthy();
+    expect(controller.recoverAfterReconnect(agent())).toBe(false);
+    controller.resume();
+    expect(controller.recoverAfterReconnect(agent())).toBe(true);
+    expect(controller.recoverAfterReconnect(agent())).toBe(false);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls[1][1]).toMatchObject({ retry: true, limit: HISTORY_WIRE_PAGE_SIZE });
+    expect(request.mock.calls[1][1].cursor).toBeUndefined();
+    finish(page({ entries: [entry('latest', 'assistant')], sourceRevision: 'r1' }));
+    await vi.waitFor(() => expect(controller.state.error).toBeNull());
+    controller.cancel();
   });
 
   it('clears a recovered continuation warning on a cursorless latest refresh', async () => {
@@ -547,5 +680,223 @@ describe('ConversationHistoryController', () => {
     await vi.waitFor(() => expect(controller.state.error?.code).toBe('stalled'));
     expect(controller.state.error?.message).toContain('repeated cursor');
     expect(controller.state.beginningReached).toBe(false);
+  });
+});
+
+describe('conversation clone values through history', () => {
+  type Plan = import('$lib/types').OmoTodoState;
+  type Preview = import('$lib/conversation-cache').ConversationPreview;
+  type State = import('$lib/conversation-history').ConversationHistoryControllerState;
+  type Graph = { entries: ConversationEntry[]; plan: Plan | null | undefined };
+
+  function fixture() {
+    const sentinels = {
+      entry: { label: 'entry extension' }, tool: { label: 'tool extension' },
+      plan: { label: 'plan extension' }, phase: { label: 'phase extension' }, task: { label: 'task extension' },
+    };
+    const tool = { id: 'tool', name: 'Read', input: 'file', output: 'tool result', extension: sentinels.tool };
+    const entries = [entry('u', 'user', 'question'), { ...entry('a', 'assistant', 'answer', [tool]), extension: sentinels.entry }];
+    const task = { content: 'task', status: 'pending' as Plan['phases'][number]['tasks'][number]['status'], extension: sentinels.task };
+    const phase = { name: 'phase', tasks: [task], extension: sentinels.phase };
+    const plan = { available: true, phases: [phase], truncated: false, extension: sentinels.plan };
+    return { entries, plan, sentinels };
+  }
+
+  function expectValues(graph: Graph, sentinels: ReturnType<typeof fixture>['sentinels']) {
+    expect(graph.entries.map(({ id, role, text }) => [id, role, text])).toEqual([['u', 'user', 'question'], ['a', 'assistant', 'answer']]);
+    expect(graph.entries[1].tools).toHaveLength(1);
+    expect(graph.entries[1].tools![0]).toMatchObject({ id: 'tool', name: 'Read', input: 'file', output: 'tool result' });
+    expect(graph.plan).toMatchObject({ available: true, truncated: false, phases: [{ name: 'phase', tasks: [{ content: 'task', status: 'pending' }] }] });
+    const extension = (value: object) => (value as { extension?: object }).extension;
+    expect(extension(graph.entries[1])).toBe(sentinels.entry);
+    expect(extension(graph.entries[1].tools![0])).toBe(sentinels.tool);
+    expect(extension(graph.plan!)).toBe(sentinels.plan);
+    expect(extension(graph.plan!.phases[0])).toBe(sentinels.phase);
+    expect(extension(graph.plan!.phases[0].tasks[0])).toBe(sentinels.task);
+  }
+
+  // Only the explicitly cloned entry/tool/plan targets, not arbitrary nested properties.
+  function targets(graph: Graph): object[] {
+    return [graph.entries, ...graph.entries, graph.entries[1].tools!, graph.entries[1].tools![0],
+      graph.plan!, graph.plan!.phases, graph.plan!.phases[0], graph.plan!.phases[0].tasks, graph.plan!.phases[0].tasks[0]];
+  }
+
+  function expectIndependent(graphs: Graph[]) {
+    const mapped = graphs.map(targets);
+    for (let index = 0; index < mapped[0].length; index++) {
+      expect(new Set(mapped.map((values) => values[index])).size).toBe(graphs.length);
+    }
+  }
+
+  function mutate(graph: Graph) {
+    graph.entries[0].text = 'changed question';
+    graph.entries[1].text = 'changed answer';
+    graph.entries[1].tools![0].output = 'changed output';
+    graph.plan!.available = false;
+    graph.plan!.phases[0].name = 'changed phase';
+    graph.plan!.phases[0].tasks[0].content = 'changed task';
+    graph.plan!.phases[0].tasks[0].status = 'completed';
+  }
+
+  it('isolates recorded entry and plan clone channels', async () => {
+    const source = fixture();
+    const recorded = page({ entries: source.entries, omoPlan: source.plan, sourceRevision: 'r' });
+    const before = JSON.stringify(recorded);
+    const states: State[] = [];
+    const saved: Preview[] = [];
+    const controller = new ConversationHistoryController(agent(), {
+      request: async () => recorded,
+      onState: (state) => states.push(state),
+      putPreview: (value) => saved.push(value),
+    });
+    try {
+      controller.start();
+      await vi.waitFor(() => {
+        expect(controller.state.authoritative).toBe(true);
+        expect(controller.state.requestPhase).toBe('idle');
+      });
+      const first = controller.state;
+      const second = controller.state;
+      const callback = states.at(-1)!;
+      expect(saved).toHaveLength(1);
+      expect(callback.authoritative).toBe(true);
+      expect(callback.requestPhase).toBe('idle');
+      expect(first.state).toBe('ready');
+      expect(first.sourceRevision).toBe('r');
+      expect(first.error).toBeNull();
+      const graphs: Graph[] = [
+        { entries: source.entries, plan: source.plan },
+        { entries: first.entries, plan: first.omoPlan },
+        { entries: first.lastPage!.entries, plan: first.lastPage!.omoPlan },
+        { entries: second.entries, plan: second.omoPlan },
+        { entries: second.lastPage!.entries, plan: second.lastPage!.omoPlan },
+        { entries: callback.entries, plan: callback.omoPlan },
+        { entries: callback.lastPage!.entries, plan: callback.lastPage!.omoPlan },
+        { entries: saved[0].entries, plan: saved[0].plan },
+      ];
+      for (const graph of graphs) expectValues(graph, source.sentinels);
+      expectIndependent(graphs);
+      expect(first.lastPage).not.toBe(recorded);
+      expect(first.lastPage).not.toBe(second.lastPage);
+      expect(callback.lastPage).not.toBe(first.lastPage);
+      expect(JSON.stringify(recorded)).toBe(before);
+      for (const graph of graphs) mutate(graph);
+      const fresh = controller.state;
+      expectValues({ entries: fresh.entries, plan: fresh.omoPlan }, source.sentinels);
+      expectValues({ entries: fresh.lastPage!.entries, plan: fresh.lastPage!.omoPlan }, source.sentinels);
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it('isolates hydrated preview entries and plan', async () => {
+    const source = fixture();
+    const warm: Preview = {
+      identity: conversationIdentity(agent())!, relayId: 'relay-1', savedAt: 100,
+      sourceRevision: 'warm', historical: false, entries: source.entries, plan: source.plan,
+    };
+    const before = JSON.stringify(warm);
+    let settle!: (value: ConversationPage) => void;
+    const pending = new Promise<ConversationPage>((resolve) => { settle = resolve; });
+    const request = vi.fn(() => pending);
+    const controller = new ConversationHistoryController(agent(), { request, getPreview: () => warm });
+    try {
+      controller.start();
+      expect(request).toHaveBeenCalledTimes(1);
+      const first = controller.state;
+      const second = controller.state;
+      expect(first.preview).toBe(true);
+      expect(first.authoritative).toBe(false);
+      expect(first.requestPhase).toBe('initial');
+      expect(first.sourceRevision).toBe('warm');
+      const graphs: Graph[] = [source, { entries: first.entries, plan: first.omoPlan }, { entries: second.entries, plan: second.omoPlan }];
+      for (const graph of graphs) expectValues(graph, source.sentinels);
+      expectIndependent(graphs);
+      expect(JSON.stringify(warm)).toBe(before);
+      mutate(graphs[0]);
+      mutate(graphs[1]);
+      expectValues(graphs[2], source.sentinels);
+      const fresh = controller.state;
+      expect(fresh.preview).toBe(true);
+      expect(fresh.authoritative).toBe(false);
+      expectValues({ entries: fresh.entries, plan: fresh.omoPlan }, source.sentinels);
+    } finally {
+      controller.cancel();
+      settle(page());
+      await pending;
+      await Promise.resolve();
+    }
+  });
+
+  it('preserves live tool property presence', async () => {
+    const empty: NonNullable<ConversationEntry['tools']> = [];
+    const live: ConversationEntry[] = [
+      entry('absent', 'user'),
+      { ...entry('undefined', 'user'), tools: undefined },
+      { ...entry('null', 'user'), tools: null as unknown as ConversationEntry['tools'] },
+      { ...entry('empty', 'user'), tools: empty },
+    ];
+    const controller = new ConversationHistoryController(agent(), { request: async () => page({ sourceRevision: 'r' }) });
+    try {
+      controller.start();
+      await vi.waitFor(() => {
+        expect(controller.state.authoritative).toBe(true);
+        expect(controller.state.requestPhase).toBe('idle');
+      });
+      expect(controller.applyLiveEntries('r', live, 1)).toBe(true);
+      const first = controller.state;
+      expect(first.entries.map(({ id }) => id)).toEqual(['absent', 'undefined', 'null', 'empty']);
+      expect(first.omoPlan).toBeNull();
+      for (const values of [live, first.entries]) {
+        expect(values.map((value) => Object.hasOwn(value, 'tools'))).toEqual([false, true, true, true]);
+        expect(values[0].tools).toBeUndefined();
+        expect(values[1].tools).toBeUndefined();
+        expect(values[2].tools).toBeNull();
+        expect(values[3].tools).toEqual([]);
+        expect(values.map(({ text }) => text)).toEqual(['absent', 'undefined', 'null', 'empty']);
+      }
+      for (let index = 0; index < live.length; index++) expect(first.entries[index]).not.toBe(live[index]);
+      expect(first.entries).not.toBe(live);
+      expect(first.entries[3].tools).not.toBe(empty);
+      live[0].text = 'changed input';
+      empty.push({ name: 'changed input tool' });
+      first.entries[1].text = 'changed outward';
+      first.entries[3].tools!.push({ name: 'changed outward tool' });
+      const fresh = controller.state;
+      expect(fresh.entries.map(({ text }) => text)).toEqual(['absent', 'undefined', 'null', 'empty']);
+      expect(fresh.entries.map((value) => Object.hasOwn(value, 'tools'))).toEqual([false, true, true, true]);
+      expect(fresh.entries[1].tools).toBeUndefined();
+      expect(fresh.entries[2].tools).toBeNull();
+      expect(fresh.entries[3].tools).toEqual([]);
+      expect(fresh.entries[3].tools).not.toBe(first.entries[3].tools);
+      expect(fresh.omoPlan).toBeNull();
+    } finally {
+      controller.cancel();
+    }
+  });
+
+  it('preserves batch entry getter evaluation order', () => {
+    const trace: string[] = [];
+    const tool = { name: 'Read', get output() { trace.push('tool.output'); return 'tool result'; } };
+    const tools = [tool];
+    const source = {
+      ...entry('getter', 'user', 'question'),
+      get tools() { trace.push('entry.tools'); return tools; },
+      get after() { trace.push('entry.after'); return 'after'; },
+    };
+    const entries = [source];
+    const result = analyzeConversationBatch(entries);
+    expect(trace).toEqual(['entry.tools', 'entry.after', 'entry.tools', 'entry.tools', 'tool.output']);
+    expect(result.displayableEntries).not.toBe(entries);
+    const copied = result.displayableEntries[0];
+    expect(copied).not.toBe(source);
+    expect(copied.id).toBe('getter');
+    expect(copied.text).toBe('question');
+    expect((copied as ConversationEntry & { after: string }).after).toBe('after');
+    expect(copied.tools).not.toBe(tools);
+    expect(copied.tools).toHaveLength(1);
+    expect(copied.tools![0]).not.toBe(tool);
+    expect(copied.tools![0].name).toBe('Read');
+    expect(copied.tools![0].output).toBe('tool result');
   });
 });

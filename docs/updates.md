@@ -15,6 +15,28 @@ verification fails.
 Phone-driven upgrades run `herdr plugin install` in a transient worker pinned
 to the release commit.
 
+## Upgrading to v0.23.0
+
+Conversation / Full history is the default when an agent has native history;
+saved view preferences and the Terminal fallback remain available. Pi's optional
+integration streams live text and tool progress without a launch flag. Codex,
+Claude Code, Cursor, Qoder and Oh My Pi deliver updates after native records are
+written; OpenCode and Hermes still refresh recorded history periodically.
+
+Restart the relay after upgrading; the verified updater does this as part of
+activation. Enable Pi's optional integration with **Settings → Pi Integration**
+on its computer (controller access required). It defaults to off. Startup
+refreshes only existing marker-owned installations in the relay's known Pi
+profiles; it never adopts an unowned directory. The setting reports per-profile
+results and also recognizes manual CLI installations.
+
+Run `/reload` in each affected Pi pane, or restart Pi, to load refreshed files;
+this is never sent automatically. The CLI remains available as
+`bash relay/setup.sh --pi-install /absolute/profile/agent` (or `--pi-remove`).
+Turning the setting off removes only owned integration files. Live partials are
+visible to authorized paired readers as well as controllers while Full history is open; completion-time redactions cannot
+retract earlier updates. See the [Pi privacy policy](conversation-activity.md#pi-privacy-policy).
+
 ## Upgrading to v0.21.0
 
 Version 0.21.0 adds live Herdr compatibility reporting, JSON-backed workspace
@@ -69,14 +91,15 @@ If your phones load the app from a separately hosted origin — every gateway
 setup, and any tunnel setup that chose an installed app — that app is still
 0.19.1 and cannot talk to the new relay. The phone-driven updater would have
 published it first; a manual upgrade has to: on the deployment-owner computer
-choose **8. Configure App Deployment** and answer **Y** to "Deploy app version
-0.20.0 now?". The menu's status line says so as long as the hosted app is
-behind ("serves 0.19.1, this relay ships 0.20.0 — deploy with 8"). Relays
+choose **Cloudflare → Configure App Deployment** and answer
+**Y** to "Deploy app version 0.20.0 now?". The menu's status line says so as
+long as the hosted app is behind ("serves 0.19.1, this relay ships 0.20.0 —
+Cloudflare → Configure App Deployment"). Relays
 that serve the app themselves through a tunnel need nothing more.
 
 Then choose your connection option to print a fresh bootstrap QR. It pairs one
-phone; print it again (**Choose Phone App and Show QR** in the setup menu) for each
-additional phone, or use **Settings → Devices → Invite Device** on a paired
+phone; print it again (**Choose Phone App and Show QR** in the selected path's
+submenu) for each additional phone, or use **Settings → Devices → Invite Device** on a paired
 controller to create a reader or controller invitation from the phone.
 Previously paired phones cannot reuse their v0.19.1 key: pair them again with a
 freshly printed link.

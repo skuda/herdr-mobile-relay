@@ -59,6 +59,210 @@ project follows [Semantic Versioning](https://semver.org/).
   anchors for short or blank rows. These frontend corrections require the new
   app build.
 
+## [0.24.0] - 2026-11-02
+
+### Added
+
+- Connect through Tailscale Serve on your own tailnet, with an isolated dev
+  tunnel or a persistent background service and setup QR. Always on Tailscale
+  replaces a selected WebRTC gateway after confirmation.
+
+### Changed
+
+- Group setup actions under Cloudflare, WebRTC and Tailscale so each connection
+  path shows only its own choices, and explain the phone app choice: the hosted
+  app versus the app served by this computer. Each menu screen replaces the
+  previous one, and Ctrl-D after an action closes the menu.
+- Read Oh My Pi settings with a standard YAML parser. A settings file that is
+  not valid YAML is now ignored as a whole instead of being partly salvaged, so
+  skill commands follow the defaults until the file is fixed.
+
+### Fixed
+
+- Refresh an open Conversation and resume live updates after a relay reconnect
+  interrupts its history request.
+- Keep terminal styling correct after extended-color codes with a zero channel
+  and after trailing resets such as `31;0`.
+- Focus Cancel when a destructive workspace confirmation opens and when it
+  escalates to force removal, so a stray Enter cannot confirm it.
+- Expand `~` in Pi profile skill paths exactly once, so a bare `~` or
+  `~/skills` resolves to the home directory instead of a `~` folder inside it.
+- Carry the conversation error reason code to the app so it can show the right
+  message.
+- Keep the phase, code and retry safety of workspace move refusals.
+- Stop delayed terminal reads from running after their relay connection was
+  replaced, closed or disconnected.
+- Stop UPnP port mapping from following redirects away from the router that
+  answered discovery.
+- Reject operation requests whose type and action disagree, consistently for
+  authorization, audit and dispatch.
+- Cancel tab and workspace reordering cleanly and release its pointer when the
+  gesture is interrupted.
+
+## [0.23.5] - 2026-10-29
+
+### Added
+
+- Protect self-hosted gateway registrations with an optional shared registration
+  token and relay-id allow-list. Relays prove knowledge of the token without
+  sending it over the wire; both restrictions must pass when configured.
+- Support Antigravity CLI (`agy`) panes: its own logo and name, clean
+  **Conversation** and **Full history** from the native conversation database
+  with live updates, slash command suggestions for builtins and
+  `~/.gemini/skills`, and approval cards for its permission dialog. Approval
+  cards appear only once Herdr marks the dialog as blocked; Herdr's agy manifest
+  does not yet detect the Antigravity CLI 1.4.7 dialog.
+
+### Fixed
+
+- Use the rightmost non-empty `X-Forwarded-For` entry across all header fields
+  behind a trusted reverse proxy, preventing forged earlier fields or entries
+  from bypassing per-IP rate limits.
+- Forward the optional registration token and relay-id allow-list from generated
+  deployment bundles into the gateway container.
+- Preserve existing gateway `.env` settings when regenerating or uploading a
+  deployment bundle, so normal upgrades cannot clear registration protection.
+- Detect Antigravity conversation commits even when the relay polls between
+  WAL writes and commit publication.
+- Recognize ANSI-styled Antigravity approval menus and keep pending approvals
+  valid when focus or the quota countdown changes, while still rejecting
+  responses to a changed command.
+
+## [0.23.4] - 2026-10-27
+
+### Fixed
+
+- `/reload` in Pi now picks up an updated relay command integration. Pi kept
+  running the previous version until it was restarted, so after a relay update
+  the phone could miss new slash-command or activity behaviour.
+- A Home Screen app that restarts on an outdated build address after an update
+  now opens the deployed build instead of reopening the old one from the
+  browser cache.
+
+## [0.23.3] - 2026-10-26
+
+### Fixed
+
+- Queue terminal key taps instead of dropping them while the previous key waits
+  for its relay acknowledgement. On a high-latency link such as a Cloudflare
+  tunnel, a quick second **Esc** was ignored because the key row disabled itself
+  until the first send was confirmed, so agents that stop on a double Esc could
+  not be stopped from the phone. Taps queued before or after the question view
+  closes are still sent once that acknowledgement arrives. (#82)
+
+### Changed
+
+- Replace **Type in terminal** with a **Keyboard** button in the terminal key
+  row, shown only when the composer cannot send: the agent awaits an approval
+  or question answer, its pane needs inspection, or an earlier terminal send is
+  unconfirmed. It no longer takes a row of its own, which leaves more room for
+  terminal output. Delivery warnings show its icon instead of naming it, and
+  the panel's long back button is now **Close**.
+
+## [0.23.2] - 2026-10-25
+
+### Added
+
+- Show questions that Claude Code asks (AskUserQuestion) in **Conversation**
+  and **Full history**, with their options and the chosen answer. While the
+  agent waits for a reply, the question is marked as waiting. (#63)
+
+## [0.23.1] - 2026-10-25
+
+### Added
+
+- With two or more computers paired, toggle each one above the agent list to
+  show or hide its sessions and workspaces. A hidden computer shows a count of
+  sessions that need attention. Visibility is remembered on this device without
+  changing connections, notifications, or the selected home layout. (#76)
+
+### Fixed
+
+- Keep **Settings** steady while the relay sends updates. The Pi Integration
+  card no longer reloads on every update, so the page stops shifting and taps,
+  such as Back, are no longer lost.
+- Treat terminal input state as stale as soon as its 3-second limit passes, so
+  a draft typed afterwards is never saved on the phone and the waiting notice
+  appears.
+
+## [0.23.0] - 2026-10-24
+
+### Added
+
+- Open supported native histories in clean **Conversation** by default, with
+  **Full history** for intermediate messages and tool details. Terminal remains
+  one tap away and is the fallback when history is unavailable; saved view
+  preferences still win.
+- Enable the optional, computer-side **Settings → Pi Integration** to discover
+  live Pi commands and stream text, tool progress and extension notices.
+  Controllers can enable it for known profiles and inspect per-profile results;
+  readers cannot change it. It starts off, refreshes relay-owned copies after
+  updates, and requires `/reload` or a Pi restart after changes.
+- Show Pi extension notices in Conversation and Full history. A controller can
+  reply to a **Needs inspection** Pi pane through its live exact-session bridge
+  when fresh terminal evidence permits it. Sends are explicitly unconfirmed;
+  uncertainty survives reloads, fences duplicate sends across tabs, and never
+  falls back to terminal input. Earlier streamed content cannot be retracted by
+  completion-time redaction; see the [Pi privacy policy](docs/conversation-activity.md#pi-privacy-policy).
+- Refresh recorded conversation messages and tool activity for Codex, Claude
+  Code, Cursor, Qoder, Oh My Pi, OpenCode, Hermes and Oh My OpenCode through a
+  bounded 250 ms observation feed. These are updates after records reach disk,
+  not token streaming from the running terminal.
+- Read supported native Kimi Code journals, including validated undo branches.
+  Imports, human-engine-only histories and unsupported structures use Terminal
+  fallback. Hidden reasoning, media and injected origins are excluded.
+- Open the read-only workspace file and Git inspector from Conversation's
+  workspace button. Discover OpenCode custom Markdown slash commands from its
+  supported project, user and XDG directories.
+
+### Changed
+
+- Open history recent-first and mount at most 24 messages at a time. Load older
+  turns on upward demand or explicit action, preserving the reading anchor.
+  Kimi, Hermes and older/unindexed OpenCode histories can still require
+  full-session work on a cold open; small pages do not make that cost bounded.
+- Keep following new output while streaming until the reader scrolls away or
+  selects text; scrolling to the actual end resumes following. Remove Jump to
+  latest, Show newer loaded messages, Pi scroll controls and retained terminal
+  snapshots instead of cluttering Conversation with terminal controls.
+- Share prompt drafts, slash commands and attachments across both views.
+  Literal input and terminal keys remain explicit Terminal-only controls;
+  drafts stay editable while structured input or uncertain delivery blocks sends.
+- Turn **Resize Session** on by default; explicitly saved off choices stay off.
+  Terminal height leasing remains off by default. Conversation never resizes panes.
+
+### Fixed
+
+- Revalidate connections after wake, focus and network changes, preserve visible
+  output during recovery, and stop retrying a rejected paired device. Remote
+  tokenless relays cannot silently reconnect through plaintext development mode.
+- Keep updates, provisional messages, attachments and input delivery tied to the
+  exact target. Never persist text typed while terminal echo evidence is stale,
+  missing, hidden or belongs to another target.
+- Preserve Terminal's reading position and following state across structured
+  questions, layout changes and small scroll-up gestures.
+- Bound slash-catalog reads, honor Pi trust-directory decisions, retain Oh My Pi
+  registry order, and recover cached phone stylesheets without clearing storage.
+- Nest list items indented to their parent item's text in Conversation and
+  keep code blocks indented under an item inside it. Keep lists together across
+  blank lines, and keep a numbered list's numbering after a code block
+  interrupts it.
+- After a deploy, reload an already open app into the deployed build when
+  Conversation, the launch form, question controls or Type in terminal fail to
+  load. Without a newer build, an automatic Conversation opening falls back to
+  Terminal instead of an error. Automatic reloads wait while a terminal send is
+  unconfirmed or a draft is not saved on this phone, and **Load Update** names
+  what it would discard.
+- Deliver every OpenCode and Hermes conversation update. An update written
+  while the relay was reading could be missed until the next change.
+
+### Upgrade
+
+Restart the relay after upgrading. Enable or inspect **Settings → Pi Integration**
+for each computer that uses it, then `/reload` or restart its affected Pi panes.
+Existing relay-owned integrations are refreshed automatically; Herdr's own
+integration and settings are left untouched.
+
 ## [0.22.13] - 2026-10-23
 
 ### Changed
@@ -1828,7 +2032,14 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.13...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.5...v0.24.0
+[0.23.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.4...v0.23.5
+[0.23.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.3...v0.23.4
+[0.23.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.2...v0.23.3
+[0.23.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.1...v0.23.2
+[0.23.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.0...v0.23.1
+[0.23.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.13...v0.23.0
 [0.22.13]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.12...v0.22.13
 [0.22.12]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.11...v0.22.12
 [0.22.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.10...v0.22.11

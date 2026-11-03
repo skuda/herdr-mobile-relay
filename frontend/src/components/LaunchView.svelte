@@ -1,12 +1,9 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
-  import { get } from 'svelte/store';
+  import { onDestroy, untrack } from 'svelte';
+  import DirectoryPicker from '$components/DirectoryPicker.svelte';
   import Button from '$components/ui/Button.svelte';
-  import { agentOpeningView } from '$lib/agent-view';
   import Card from '$components/ui/Card.svelte';
   import { suggestedLaunchName } from '$lib/launch';
-  import { defaultAgentView, paneAgentViewOverrides } from '$lib/preferences';
-  import { targetRefForAgent } from '$lib/resource-id';
   import { replaceView } from '$lib/router';
   import { relayStore } from '$lib/store';
 
@@ -35,6 +32,7 @@
   let status = $state('');
   let error = $state(false);
   let submitting = $state(false);
+  let activeLaunch = $state.raw<{ relayId: string; controller: AbortController } | null>(null);
   let loadedRelay = '';
   // A deep link's target relay may connect after a faster sibling. Until the
   // reader picks a relay by hand, the requested one may still claim the form
@@ -146,53 +144,68 @@
     if (event.target instanceof Node && !directoryBrowser.contains(event.target)) directoryOpen = false;
   }
 
+  function abandonLaunch() {
+    const launch = activeLaunch;
+    activeLaunch = null;
+    submitting = false;
+    launch?.controller.abort();
+  }
+
+  function viewAgents() {
+    abandonLaunch();
+    replaceView({ view: 'agents' });
+  }
+
+  $effect(() => {
+    const launch = activeLaunch;
+    if (!launch || (launch.relayId === relayId && connection?.status === 'connected' && !readOnly)) return;
+    abandonLaunch();
+    status = 'Launch confirmation stopped. Check Agents before starting again; the desktop launch may still finish.';
+    error = true;
+  });
+
+  onDestroy(() => {
+    ++directoryLoadGeneration;
+    abandonLaunch();
+  });
+
   async function submit(event: SubmitEvent) {
     event.preventDefault();
-    if (!relayId || readOnly || atHome || connection?.directoryLoading || directoryRelayId !== relayId || !profileId || !cwd || !name) return;
+    if (submitting || !relayId || readOnly || atHome || connection?.directoryLoading || directoryRelayId !== relayId || !profileId || !cwd || !name) return;
+    const launch = { relayId, controller: new AbortController() };
+    activeLaunch = launch;
     submitting = true;
     error = false;
     status = 'Starting agent…';
     try {
-      const launchName = name.trim();
-      const launchCwd = cwd.trim();
-      const result = await relayStore.sendCommand(relayId, {
+      const result = await relayStore.sendCommand(launch.relayId, {
         type: 'agent_start',
         profile_id: profileId,
-        name: launchName,
-        cwd: launchCwd,
+        name: name.trim(),
+        cwd: cwd.trim(),
         prompt,
         workspace_id: targetWorkspace?.workspace_id || '',
-        // Only sent when the user explicitly chose a profile.
-        // Empty selection = omit the field = let Hermes follow its sticky active_profile.
         ...(isHermes && hermesProfile !== '' ? { hermes_profile: hermesProfile } : {}),
-      });
+      }, undefined, false, launch.controller.signal);
+      if (activeLaunch !== launch) return;
       const warning = String(result.data?.warning || '');
-      status = warning || 'Agent started.';
+      status = warning || 'Start confirmed. Refreshing agent list.';
       error = Boolean(warning);
       prompt = '';
       name = '';
       relayStore.showToast(status, error);
-      const rawPaneId = String(result.data?.pane_id || '');
-      const launchedAgent = await relayStore.waitForAgent(relayId, {
-        rawPaneId,
-        name: launchName,
-        cwd: launchCwd,
-      });
-      const target = launchedAgent ? targetRefForAgent(launchedAgent) : null;
-      replaceView(launchedAgent && target
-        ? agentOpeningView(
-          launchedAgent,
-          get(connections).get(launchedAgent.relay_id),
-          get(defaultAgentView),
-          get(paneAgentViewOverrides),
-        )
-        : { view: 'agents' });
+      relayStore.requestAgents();
+      replaceView({ view: 'agents' });
     } catch (caught) {
-      status = (caught as Error).message;
+      if (activeLaunch !== launch) return;
+      status = `${(caught as Error).message}. Check Agents before starting again; a tab may already exist.`;
       error = true;
       relayStore.showToast(status, true);
     } finally {
-      submitting = false;
+      if (activeLaunch === launch) {
+        activeLaunch = null;
+        submitting = false;
+      }
     }
   }
 </script>
@@ -232,46 +245,15 @@
 
       <span id="launch-cwd-label" class="field-label">Working Directory</span>
       <div bind:this={directoryBrowser} class:open={directoryOpen} class="directory-browser" aria-labelledby="launch-cwd-label">
-        <div class="directory-toolbar">
-          <Button
-            size="icon"
-            variant="secondary"
-            aria-label="Open parent directory"
-            disabled={!connection?.directoryBrowser?.parent}
-            onclick={() => connection?.directoryBrowser?.parent && loadDirectory(connection.directoryBrowser.parent)}
-          >↑</Button>
-          <button
-            class="directory-current"
-            type="button"
-            aria-expanded={directoryOpen}
-            aria-controls="launch-directory-list"
-            onclick={() => { directoryOpen = !directoryOpen; }}
-          >
-            <span>{connection?.directoryBrowser?.current.label || cwd || (connection?.directoryLoading ? 'Loading…' : 'Unavailable')}</span>
-            <span aria-hidden="true">⌄</span>
-          </button>
-        </div>
-        {#if directoryOpen}
-          <div id="launch-directory-list" class="directory-list" aria-label="Subdirectories">
-            {#if !connection?.capabilities.includes('directory_browser')}
-              <p>Update and restart this computer’s relay to browse directories.</p>
-            {:else if connection.directoryLoading}
-              <p>Loading folders…</p>
-            {:else if connection.directoryError}
-              <p role="alert">{connection.directoryError}</p>
-            {:else}
-              {#if connection?.directoryBrowser?.parent}
-                <button type="button" onclick={() => loadDirectory(connection.directoryBrowser?.parent || '')}>↰ Parent folder</button>
-              {/if}
-              {#each connection?.directoryBrowser?.directories || [] as directory (directory.path)}
-                <button type="button" onclick={() => loadDirectory(directory.path)}>📁 {directory.name}</button>
-              {/each}
-              {#if connection?.directoryBrowser && !connection.directoryBrowser.directories.length}
-                <p>This folder has no subdirectories. It remains selected.</p>
-              {/if}
-            {/if}
-          </div>
-        {/if}
+        <DirectoryPicker
+          {connection}
+          {cwd}
+          listId="launch-directory-list"
+          bind:open={directoryOpen}
+          onselect={loadDirectory}
+          notice={!connection?.capabilities.includes('directory_browser') ? 'Update and restart this computer’s relay to browse directories.' : ''}
+          emptyNotice="This folder has no subdirectories. It remains selected."
+        />
       </div>
       {#if atHome}
         <p id="launch-cwd-hint" class="hint" role="status">Agents cannot start in the home folder itself. Tap the folder above to pick a project folder.</p>
@@ -286,7 +268,10 @@
       <textarea id="launch-prompt" bind:value={prompt} maxlength="100000" placeholder="Describe the task to start…"></textarea>
       <p class="hint">Sent to the agent as its first prompt after it starts.</p>
       <Button type="submit" aria-describedby={atHome ? 'launch-cwd-hint' : undefined} disabled={submitting || readOnly || atHome || connection?.directoryLoading || directoryRelayId !== relayId || !relayId || !profileId || !cwd || !name}>Start Agent</Button>
-      {#if status}<p class:error class="form-status" role="status">{status}</p>{/if}
+      {#if status}
+        <p class:error class="form-status" role="status">{status}</p>
+        <Button type="button" variant="secondary" onclick={viewAgents}>View agents</Button>
+      {/if}
     </form>
   </Card>
 </main>

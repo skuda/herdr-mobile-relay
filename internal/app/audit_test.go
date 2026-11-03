@@ -50,24 +50,63 @@ func TestAuditWriteDetailsKeepAttributionWithoutPayloadContent(t *testing.T) {
 // A secret answering a noecho prompt is short and low entropy: a payload digest
 // would be crackable offline, and the per-rune keys spell it out verbatim.
 func TestAuditWriteDetailsRedactsSecretInput(t *testing.T) {
-	details := auditWriteDetails(map[string]any{
-		"type":       "send_secret",
-		"request_id": "req-secret",
-		"pane_id":    "pane-1",
-		"text":       "hunter2",
-		"keys":       []any{"h", "u", "n", "t", "e", "r", "2", "Enter"},
-	})
+	for _, action := range []string{"send_secret", "send_terminal_text"} {
+		details := auditWriteDetails(map[string]any{
+			"type":       action,
+			"request_id": "req-secret",
+			"pane_id":    "pane-1",
+			"text":       "hunter2",
+			"keys":       []any{"h", "u", "n", "t", "e", "r", "2", "Enter"},
+		})
 
-	if details["text_bytes"] != len("hunter2") {
-		t.Fatalf("text_bytes = %#v", details["text_bytes"])
-	}
-	for _, key := range []string{"payload_sha256", "payload_bytes", "keys", "text"} {
-		if _, exists := details[key]; exists {
-			t.Fatalf("secret audit details retained %q: %#v", key, details[key])
+		if details["text_bytes"] != len("hunter2") {
+			t.Fatalf("text_bytes = %#v", details["text_bytes"])
+		}
+		for _, key := range []string{"payload_sha256", "payload_bytes", "keys", "text"} {
+			if _, exists := details[key]; exists {
+				t.Fatalf("secret audit details retained %q: %#v", key, details[key])
+			}
+		}
+		if len(details) != 1 {
+			t.Fatalf("secret audit details = %#v, want text_bytes only", details)
 		}
 	}
-	if len(details) != 1 {
-		t.Fatalf("secret audit details = %#v, want text_bytes only", details)
+}
+
+func TestCanonicalOperationAuditPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		typ, action, want string
+		write             bool
+	}{
+		{"send_secret", "", "send_secret", true},
+		{"send_secret", "send_secret", "send_secret", true},
+		{"command", "send_secret", "send_secret", true},
+		{"", "send_secret", "send_secret", true},
+		{"refresh_agents", "", "refresh_agents", false},
+		{"refresh_agents", "send_secret", "", false},
+		{"send_secret", "refresh_agents", "", false},
+		{"submit_prompt", "send_secret", "", false},
+	} {
+		message := map[string]any{"type": tc.typ, "action": tc.action, "text": "fixture", "keys": []any{"f", "Enter"}}
+		operation := auditAction(message)
+		if operation != tc.want || isAuditedWrite(operation) != tc.write {
+			t.Fatalf("%q/%q: operation=%q, audited=%v", tc.typ, tc.action, operation, isAuditedWrite(operation))
+		}
+		details := auditWriteDetails(message)
+		if tc.want == "refresh_agents" {
+			continue
+		}
+		for _, key := range []string{"payload_sha256", "payload_bytes", "keys", "text"} {
+			if _, exists := details[key]; exists {
+				t.Fatalf("%q/%q retained %s", tc.typ, tc.action, key)
+			}
+		}
+		if tc.want == "" && len(details) != 0 {
+			t.Fatalf("ambiguous input retained details: %#v", details)
+		}
+		if tc.want == "send_secret" && details["text_bytes"] != len("fixture") {
+			t.Fatalf("legacy/canonical secret shape missing: %#v", details)
+		}
 	}
 }
 
@@ -78,7 +117,7 @@ func TestAuditedWriteSetCoversRemoteAgentMutations(t *testing.T) {
 		"tab_reorder", "agent_start", "agent_clear", "agent_restart", "workspace_create",
 		"workspace_rename", "workspace_reorder", "workspace_close", "worktree_create",
 		"worktree_open", "worktree_remove", "upload_begin", "upload_chunk",
-		"upload_finish", "upload_cancel", "send_secret",
+		"upload_finish", "upload_cancel", "send_secret", "send_terminal_text",
 	} {
 		if !isAuditedWrite(action) {
 			t.Fatalf("%s is not audited", action)

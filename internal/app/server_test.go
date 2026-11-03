@@ -2033,7 +2033,7 @@ func TestPaneWatchUpdateSendsResizeSettledDelta(t *testing.T) {
 	}
 }
 
-func TestPreparePaneResponsePreservesHistoryForViewportOnlyRead(t *testing.T) {
+func TestReadPaneResponsePreservesHistoryForUnknownViewportOnlyRead(t *testing.T) {
 	s := testServerWithCacheDir(t.TempDir())
 	s.state.CommitInventory([]*coordinator.AgentState{{
 		PaneID: "pane-1", Agent: "claude", Status: "idle",
@@ -2046,10 +2046,10 @@ func TestPreparePaneResponsePreservesHistoryForViewportOnlyRead(t *testing.T) {
 		"content": "current 1\ncurrent 2", "format": "ansi",
 		"truncated": false, "viewport_only": true,
 	}
-	s.preparePaneResponse(
-		map[string]any{"pane_id": "pane-1", "lines": 100, "terminal_columns": 59},
-		response,
-	)
+	s.syncHistoryPanes()
+	raw := response["content"].(string)
+	installPaneReadFixture(t, s, func(context.Context) (string, error) { return raw, nil })
+	response = s.readPaneResponse(context.Background(), map[string]any{"pane_id": "pane-1", "lines": 100, "format": "ansi", "terminal_columns": 59})
 
 	if response["content"] != "current 1\ncurrent 2" {
 		t.Fatalf("resized content = %q, want clean current viewport", response["content"])
@@ -3325,7 +3325,7 @@ func TestBackgroundClaudeHistoryCaptureDoesNotRequirePhoneRead(t *testing.T) {
 	s.state.CommitInventory([]*coordinator.AgentState{{
 		PaneID: "pane-1", Agent: "Claude Code", Status: "working",
 	}}, s.state.RevisionCounter())
-	s.syncHistoryPanes(s.state.Snapshot())
+	s.syncHistoryPanes()
 
 	s.scheduleHistoryCapture(context.Background(), "pane-1")
 	deadline := time.Now().Add(5 * time.Second)
@@ -3346,11 +3346,12 @@ func TestRemovedPaneHistoryIsDiscarded(t *testing.T) {
 	s := New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s.historyM.Merge("pane-1", "one\ntwo\nthree\nfour\nfive\nsix\nseven")
 	s.historyCaptureMu.Lock()
-	s.historyActive["pane-1"] = true
+	s.historyActive["pane-1"] = historyIdentity{}
 	s.historyLast["pane-1"] = time.Now()
 	s.historyCaptureMu.Unlock()
 
-	s.syncHistoryPanes(nil)
+	s.state.CommitInventory(nil, s.state.RevisionCounter())
+	s.syncHistoryPanes()
 
 	s.historyCaptureMu.Lock()
 	_, active := s.historyActive["pane-1"]
@@ -3379,11 +3380,12 @@ func TestFirstInventoryReconcilesHistoryFromEarlierProcess(t *testing.T) {
 	earlier.historyM.SaveAll()
 
 	restarted := New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
-	restarted.syncHistoryPanes([]*coordinator.AgentState{{
+	restarted.state.CommitInventory([]*coordinator.AgentState{{
 		PaneID: "active-pane",
 		Agent:  "Claude Code",
 		Status: "working",
-	}})
+	}}, restarted.state.RevisionCounter())
+	restarted.syncHistoryPanes()
 
 	files, err := filepath.Glob(filepath.Join(cfg.CacheDir, "claude-history", "*.json"))
 	if err != nil {

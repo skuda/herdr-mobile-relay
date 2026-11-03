@@ -127,14 +127,23 @@ type Lease struct {
 	ExpiresAt time.Time
 }
 
-// terminalIdentity is captured at acquisition and re-validated before every
-// write. shellPID is zero only when Herdr reported no shell and the TTY was
-// found through the foreground process group leader instead.
+// terminalIdentity is captured at acquisition and re-validated before writes.
+// A zero shellPID uses the process selected by foregroundPID for TTY evidence.
 type terminalIdentity struct {
-	terminalID string
-	shellPID   int
-	ttyPath    string
-	rdev       uint64
+	terminalID   string
+	shellPID     int
+	ttyPath      string
+	rdev         uint64
+	processPID   int
+	processStart uint64
+}
+
+func sameHistoryTerminal(a, b terminalIdentity) bool {
+	if a.shellPID == 0 && b.shellPID == 0 {
+		a.processPID, a.processStart = 0, 0
+		b.processPID, b.processStart = 0, 0
+	}
+	return a == b
 }
 
 type size struct {
@@ -154,9 +163,9 @@ type cleanupState struct {
 }
 
 type paneState struct {
-	// lock serializes terminal I/O for this pane (open, validate, ioctl) and
-	// the decision that precedes it. It is a channel so waiting is bounded by
-	// a context. Field access is guarded by Manager.mu, never by lock.
+	// lock serializes lease acquisition, reconciliation, and restore work.
+	// History reads use geometry revision checks instead of this lock.
+	// Channel waits are context-bound; Manager.mu guards field access.
 	lock      chan struct{}
 	resolved  bool
 	identity  terminalIdentity
@@ -192,25 +201,33 @@ func (s *paneState) tryAcquire() bool {
 func (s *paneState) release() { <-s.lock }
 
 type Manager struct {
-	mu        sync.Mutex
-	provider  Provider
-	resolver  TTYResolver
-	ops       TerminalOps
-	available bool
-	opTimeout time.Duration
-	ttl       time.Duration
-	grace     time.Duration
-	now       func() time.Time
-	logger    *slog.Logger
-	panes     map[string]*paneState
-	closed    bool
+	mu                sync.Mutex
+	provider          Provider
+	resolver          TTYResolver
+	ops               TerminalOps
+	available         bool
+	opTimeout         time.Duration
+	ttl               time.Duration
+	grace             time.Duration
+	now               func() time.Time
+	logger            *slog.Logger
+	panes             map[string]*paneState
+	historyGeometry   map[string]*historyGeometryState
+	historyRevision   uint64
+	disableHistoryPin bool
+	historyPins       map[*historyPin]bool
+	historyClosing    []*historyPin
+	historyChanged    chan struct{}
+	historyReads      map[*HistoryRead]context.CancelFunc
+	historyResolving  map[chan struct{}]context.CancelFunc
+	closed            bool
 }
 
 // NewManager returns the production manager: fresh Herdr lookups through
-// provider, `ps` for the shell's TTY, and direct winsize ioctls. It is
+// provider, platform TTY resolution, and direct winsize ioctls. It is
 // available only on darwin and linux.
 func NewManager(provider Provider, logger *slog.Logger) *Manager {
-	m := newManager(provider, psTTYResolver{}, ioctlTerminalOps{}, LeaseTTL, ReleaseGrace, time.Now, logger)
+	m := newManager(provider, platformTTYResolver(), ioctlTerminalOps{}, LeaseTTL, ReleaseGrace, time.Now, logger)
 	m.available = platformSupported && provider != nil
 	return m
 }
@@ -240,16 +257,21 @@ func newManager(
 		logger = slog.Default()
 	}
 	return &Manager{
-		provider:  provider,
-		resolver:  resolver,
-		ops:       ops,
-		available: true,
-		opTimeout: operationTimeout,
-		ttl:       ttl,
-		grace:     grace,
-		now:       now,
-		logger:    logger,
-		panes:     make(map[string]*paneState),
+		provider:         provider,
+		resolver:         resolver,
+		ops:              ops,
+		available:        true,
+		opTimeout:        operationTimeout,
+		ttl:              ttl,
+		grace:            grace,
+		now:              now,
+		logger:           logger,
+		panes:            make(map[string]*paneState),
+		historyGeometry:  make(map[string]*historyGeometryState),
+		historyPins:      make(map[*historyPin]bool),
+		historyChanged:   make(chan struct{}),
+		historyReads:     make(map[*HistoryRead]context.CancelFunc),
+		historyResolving: make(map[chan struct{}]context.CancelFunc),
 	}
 }
 
@@ -307,6 +329,12 @@ func (m *Manager) Acquire(
 	if created {
 		identity, err = m.lookupIdentity(opCtx, paneID)
 		if err != nil {
+			m.mu.Lock()
+			if history := m.historyGeometry[paneID]; history != nil {
+				m.historyUnknownLocked(paneID, history.identity.terminalID)
+			}
+			m.mu.Unlock()
+			m.closeRetiredHistoryPins()
 			forget()
 			return 0, 0, err
 		}
@@ -327,6 +355,7 @@ func (m *Manager) Acquire(
 	defer terminal.Close()
 	current, err := terminal.Size()
 	if err != nil {
+		m.historyUnknown(paneID, identity.terminalID)
 		if created {
 			forget()
 		}
@@ -365,28 +394,31 @@ func (m *Manager) Acquire(
 		state.observeLocked(current)
 	}
 	previous, hadPrevious := state.leases[clientID]
+	if created || state.cleanup != nil && len(state.leases) == 0 {
+		m.historyLeaseChangedLocked(paneID, identity)
+	} else {
+		m.historyStateLocked(paneID, identity)
+	}
 	state.leases[clientID] = lease
 	want := state.leaseTargetLocked(current)
 	m.mu.Unlock()
 
-	if next, changed := resized(current, want); changed {
-		if err := terminal.SetSize(next); err != nil {
-			m.mu.Lock()
-			// Undo only this request's lease: a concurrent disconnect may
-			// already have removed it, and must not see it come back.
-			if state.leases[clientID] == lease {
-				if hadPrevious {
-					state.leases[clientID] = previous
-				} else {
-					delete(state.leases, clientID)
-				}
+	if err := m.setHistorySize(paneID, identity, terminal, current, want); err != nil {
+		m.mu.Lock()
+		// Undo only this request's lease: a concurrent disconnect may
+		// already have removed it, and must not see it come back.
+		if state.leases[clientID] == lease {
+			if hadPrevious {
+				state.leases[clientID] = previous
+			} else {
+				delete(state.leases, clientID)
 			}
-			if created {
-				m.dropLocked(paneID, state)
-			}
-			m.mu.Unlock()
-			return 0, 0, fmt.Errorf("%w: %v", ErrResizeFailed, err)
 		}
+		if created {
+			m.dropLocked(paneID, state)
+		}
+		m.mu.Unlock()
+		return 0, 0, fmt.Errorf("%w: %v", ErrResizeFailed, err)
 	}
 
 	m.mu.Lock()
@@ -493,6 +525,7 @@ func (m *Manager) ReleaseClient(ctx context.Context, clientID string) error {
 // goroutine with its own timeout; a pane busy with another operation is left
 // for the next sweep.
 func (m *Manager) SweepExpired(ctx context.Context) {
+	defer m.closeRetiredHistoryPins()
 	type work struct {
 		paneID     string
 		state      *paneState
@@ -506,6 +539,15 @@ func (m *Manager) SweepExpired(ctx context.Context) {
 		return
 	}
 	now := m.now()
+	for paneID, state := range m.historyGeometry {
+		leased, _ := m.leaseHistoryStateLocked(paneID, state.identity.terminalID)
+		if !leased && !historyIntervalUnsafe(state.geometry, now) {
+			m.retireHistoryPinLocked(state)
+		}
+		if state.forgotten && !leased && !historyIntervalUnsafe(state.geometry, now) {
+			delete(m.historyGeometry, paneID)
+		}
+	}
 	for paneID, state := range m.panes {
 		if !state.resolved {
 			continue
@@ -570,6 +612,15 @@ func (m *Manager) Run(ctx context.Context) {
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
 	m.closed = true
+	for _, state := range m.historyGeometry {
+		m.retireHistoryPinLocked(state)
+	}
+	for _, cancel := range m.historyReads {
+		cancel()
+	}
+	for _, cancel := range m.historyResolving {
+		cancel()
+	}
 	panes := make(map[string]*paneState, len(m.panes))
 	for paneID, state := range m.panes {
 		panes[paneID] = state
@@ -593,13 +644,32 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		}()
 	}
 	wg.Wait()
+	m.closeRetiredHistoryPins()
+	var historyErr error
+historyDrain:
+	for {
+		m.mu.Lock()
+		pending := len(m.historyPins) + len(m.historyReads) + len(m.historyResolving)
+		changed := m.historyChanged
+		m.mu.Unlock()
+		if pending == 0 {
+			break
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			historyErr = fmt.Errorf("unresolved history descriptors at shutdown: %w", ctx.Err())
+			m.logger.Warn("history descriptors did not drain at shutdown", "error", historyErr)
+			break historyDrain
+		}
+	}
 	if len(unresolved) == 0 {
-		return nil
+		return historyErr
 	}
 	slices.Sort(unresolved)
 	m.logger.Warn("pane sizes were not restored at shutdown; resize these panes locally",
 		"panes", strings.Join(unresolved, "; "))
-	return fmt.Errorf("pane sizes not restored: %s", strings.Join(unresolved, "; "))
+	return errors.Join(fmt.Errorf("pane sizes not restored: %s", strings.Join(unresolved, "; ")), historyErr)
 }
 
 func (m *Manager) shutdownPane(ctx context.Context, paneID string, state *paneState) error {
@@ -614,7 +684,7 @@ func (m *Manager) shutdownPane(ctx context.Context, paneID string, state *paneSt
 		return nil
 	}
 	clear(state.leases)
-	state.cleanup = nil
+	m.beginCleanupLocked(state, m.now())
 	m.mu.Unlock()
 	opCtx, cancel := context.WithTimeout(ctx, m.opTimeout)
 	defer cancel()
@@ -630,9 +700,8 @@ func (m *Manager) shutdownPane(ctx context.Context, paneID string, state *paneSt
 	return err
 }
 
-// ReadGeometry reports the leased geometry a pane read should use, but only
-// for a client that itself holds an active lease on that pane: everyone else
-// reads the pane at Herdr's own size.
+// ReadGeometry supplies leased columns and rows for a client with an active
+// lease on the pane.
 func (m *Manager) ReadGeometry(clientID, paneID string) (int, int, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -682,7 +751,7 @@ func (m *Manager) ResizedWithin(paneID string, window time.Duration) bool {
 	return m.now().Sub(state.resizedAt) < window
 }
 
-// lockPane returns the pane's current state with its I/O lock held. A missing
+// lockPane returns the pane's current state with its lease lock held. A missing
 // pane gets an unresolved placeholder, so concurrent first acquisitions of
 // one pane serialize on a single state.
 func (m *Manager) lockPane(ctx context.Context, paneID string) (*paneState, bool, error) {
@@ -717,7 +786,7 @@ func (m *Manager) lockPane(ctx context.Context, paneID string) (*paneState, bool
 // lookupIdentity finds the terminal an acquisition binds to: Herdr's
 // terminal_id from a fresh pane.get (the inventory does not cover plain shell
 // panes), the shell's pid from a fresh pane.process_info, and that process's
-// TTY. The device number is added by openValidated once the TTY is open.
+// TTY.
 func (m *Manager) lookupIdentity(ctx context.Context, paneID string) (terminalIdentity, error) {
 	if m.provider == nil || m.resolver == nil || m.ops == nil {
 		return terminalIdentity{}, ErrUnavailable
@@ -751,20 +820,30 @@ func (m *Manager) lookupIdentity(ctx context.Context, paneID string) (terminalId
 			return terminalIdentity{}, identityUnavailable("Herdr reported no shell or foreground process", nil)
 		}
 	}
+	identity := terminalIdentity{terminalID: pane.TerminalID, shellPID: shellPID}
+	if resolver, ok := m.resolver.(processTTYResolver); ok {
+		tty, start, rdev, err := resolver.ttyIdentity(ctx, pid)
+		if err != nil || start == 0 {
+			return terminalIdentity{}, identityUnavailable("shell TTY", err)
+		}
+		identity.ttyPath, identity.processPID, identity.processStart, identity.rdev = tty, pid, start, rdev
+		return identity, nil
+	}
 	tty, err := m.resolver.TTYPath(ctx, pid)
 	if err != nil {
 		return terminalIdentity{}, identityUnavailable("shell TTY", err)
 	}
-	return terminalIdentity{terminalID: pane.TerminalID, shellPID: shellPID, ttyPath: tty}, nil
+	identity.ttyPath = tty
+	return identity, nil
 }
 
 // openValidated is the mutation boundary. It (a) opens the cached TTY path
 // read-only without becoming its controlling process, (b) checks with fstat
-// that the held descriptor is a character device with the recorded device
-// number, and only then (c) re-validates the pane with fresh lookups: the same
-// Herdr terminal_id, the same shell pid, and that pid's TTY is still the
-// cached path. The caller performs its ioctls on the returned descriptor and
-// closes it; a successful check is never reused for a later write.
+// that the held descriptor is a character device, and only then (c)
+// re-validates the pane with fresh lookups: the same Herdr terminal_id, the
+// same shell pid (or still no shell, using foregroundPID), and that process's
+// TTY is still the cached path. Mutation callers close the descriptor after
+// their ioctls; history reads can retain it in a manager-owned pin.
 //
 // The order is the point. A pseudo-terminal is not returned to the allocator
 // while any descriptor on it is open: Linux frees a devpts index only when the
@@ -775,10 +854,19 @@ func (m *Manager) lookupIdentity(ctx context.Context, paneID string) (terminalId
 // held descriptor is that shell's terminal and cannot be a reused PTY that now
 // belongs to another pane. Checking first and opening second would leave
 // exactly that window open.
-//
-// With capture (acquisition), the device number is recorded instead of
-// compared.
-func (m *Manager) openValidated(ctx context.Context, paneID string, identity *terminalIdentity, capture bool) (Terminal, error) {
+func (m *Manager) openValidated(ctx context.Context, paneID string, identity *terminalIdentity, capture bool) (result Terminal, resultErr error) {
+	defer func() {
+		m.mu.Lock()
+		if state := m.historyGeometry[paneID]; state != nil && state.identity.terminalID == identity.terminalID {
+			if resultErr != nil || capture && state.pin != nil && !sameHistoryTerminal(state.identity, *identity) {
+				m.historyUnknownLocked(paneID, identity.terminalID)
+			} else if capture && sameHistoryTerminal(state.identity, *identity) {
+				state.identity = *identity
+			}
+		}
+		m.mu.Unlock()
+		m.closeRetiredHistoryPins()
+	}()
 	terminal, err := m.ops.Open(identity.ttyPath)
 	if err != nil {
 		if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENXIO) {
@@ -794,6 +882,9 @@ func (m *Manager) openValidated(ctx context.Context, paneID string, identity *te
 	case !character:
 		_ = terminal.Close()
 		return nil, gone("terminal path is not a character device")
+	case identity.processStart != 0 && rdev != identity.rdev:
+		_ = terminal.Close()
+		return nil, gone("controlling terminal device number changed")
 	case capture:
 		identity.rdev = rdev
 	case rdev != identity.rdev:
@@ -848,6 +939,19 @@ func (m *Manager) validateIdentity(ctx context.Context, paneID string, identity 
 		if pid, ok = foregroundPID(info); !ok {
 			return unverified("Herdr reported no foreground process", nil)
 		}
+	}
+	if resolver, ok := m.resolver.(processTTYResolver); ok {
+		tty, start, rdev, err := resolver.ttyIdentity(ctx, pid)
+		if err != nil {
+			return unverified("shell TTY", err)
+		}
+		if identity.processStart == 0 || identity.rdev != rdev || identity.ttyPath != tty {
+			return gone("pane controlling terminal changed")
+		}
+		if identity.shellPID > 0 && identity.processStart != start {
+			return gone("pane shell process changed")
+		}
+		return nil
 	}
 	tty, err := m.resolver.TTYPath(ctx, pid)
 	if err != nil {
@@ -910,6 +1014,7 @@ func (m *Manager) reconcileActive(ctx context.Context, paneID string, state *pan
 	defer terminal.Close()
 	current, err := terminal.Size()
 	if err != nil {
+		m.historyUnknown(paneID, identity.terminalID)
 		return fmt.Errorf("%w: %v", ErrSizeUnavailable, err)
 	}
 	now := m.now()
@@ -921,10 +1026,8 @@ func (m *Manager) reconcileActive(ctx context.Context, paneID string, state *pan
 	state.observeLocked(current)
 	want := state.leaseTargetLocked(current)
 	m.mu.Unlock()
-	if next, changed := resized(current, want); changed {
-		if err := terminal.SetSize(next); err != nil {
-			return fmt.Errorf("%w: %v", ErrResizeFailed, err)
-		}
+	if err := m.setHistorySize(paneID, identity, terminal, current, want); err != nil {
+		return fmt.Errorf("%w: %v", ErrResizeFailed, err)
 	}
 	m.mu.Lock()
 	if m.panes[paneID] == state {
@@ -1019,6 +1122,7 @@ func (m *Manager) restoreOnce(ctx context.Context, paneID string, state *paneSta
 	defer terminal.Close()
 	current, err := terminal.Size()
 	if err != nil {
+		m.historyUnknown(paneID, identity.terminalID)
 		return unverified("read terminal size", err)
 	}
 	want := sizeOf(current)
@@ -1028,10 +1132,8 @@ func (m *Manager) restoreOnce(ctx context.Context, paneID string, state *paneSta
 	if int(current.Rows) == applied.rows {
 		want.rows = baseline.rows
 	}
-	if next, changed := resized(current, want); changed {
-		if err := terminal.SetSize(next); err != nil {
-			return unverified("write terminal size", err)
-		}
+	if err := m.setHistorySize(paneID, identity, terminal, current, want); err != nil {
+		return unverified("write terminal size", err)
 	}
 	return nil
 }
@@ -1058,6 +1160,9 @@ func (m *Manager) dropGone(paneID string, state *paneState, err error) {
 
 func (m *Manager) dropLocked(paneID string, state *paneState) {
 	if m.panes[paneID] == state {
+		if history := m.historyGeometry[paneID]; state.resolved && history != nil && history.identity.terminalID == state.identity.terminalID {
+			history.geometry.LeaseRevision = m.nextHistoryRevisionLocked()
+		}
 		delete(m.panes, paneID)
 	}
 	state.cleanup = nil

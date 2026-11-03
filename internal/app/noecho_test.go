@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -10,7 +11,7 @@ import (
 // The phone locks its generic composer on a pane the attention classifier
 // cannot read, so the masked secret input is unlocked by this flag alone. It
 // must therefore ride on the frame the phone renders — the history-merged one.
-func TestPreparePaneResponseFlagsNoEchoPromptOnMergedContent(t *testing.T) {
+func TestReadPaneResponseFlagsNoEchoPromptOnMergedContent(t *testing.T) {
 	s := testServerWithCacheDir(t.TempDir())
 	s.state.CommitInventory([]*coordinator.AgentState{{
 		PaneID: "pane-1", Agent: "claude", Status: "idle",
@@ -24,7 +25,10 @@ func TestPreparePaneResponseFlagsNoEchoPromptOnMergedContent(t *testing.T) {
 		"type": "pane_content", "pane_id": "pane-1", "format": "ansi",
 		"content": "$ sudo dnf upgrade\n[sudo] password for cv: ",
 	}
-	s.preparePaneResponse(map[string]any{"pane_id": "pane-1", "lines": 100}, response)
+	s.syncHistoryPanes()
+	raw := response["content"].(string)
+	installPaneReadFixture(t, s, func(context.Context) (string, error) { return raw, nil })
+	response = fitPaneContentResponse(s.readPaneResponse(context.Background(), map[string]any{"pane_id": "pane-1", "lines": 100, "format": "ansi"}))
 
 	merged, ok := response["content"].(string)
 	if !ok || !strings.HasSuffix(strings.TrimSpace(merged), "[sudo] password for cv:") {
@@ -38,7 +42,7 @@ func TestPreparePaneResponseFlagsNoEchoPromptOnMergedContent(t *testing.T) {
 	}
 }
 
-func TestPreparePaneResponseMarksOrdinaryFramesAsEchoing(t *testing.T) {
+func TestReadPaneResponseMarksOrdinaryFramesAsEchoing(t *testing.T) {
 	s := testServerWithCacheDir(t.TempDir())
 	s.state.CommitInventory([]*coordinator.AgentState{{
 		PaneID: "pane-2", Agent: "omp", Status: "idle",
@@ -48,7 +52,9 @@ func TestPreparePaneResponseMarksOrdinaryFramesAsEchoing(t *testing.T) {
 		"type": "pane_content", "pane_id": "pane-2", "format": "ansi",
 		"content": "Reset the stored password y/n\n❯ ",
 	}
-	s.preparePaneResponse(map[string]any{"pane_id": "pane-2", "lines": 100}, response)
+	raw := response["content"].(string)
+	installPaneReadFixture(t, s, func(context.Context) (string, error) { return raw, nil })
+	response = fitPaneContentResponse(s.readPaneResponse(context.Background(), map[string]any{"pane_id": "pane-2", "lines": 100, "format": "ansi"}))
 
 	if response["no_echo"] != false {
 		t.Fatalf("no_echo = %#v, want false", response["no_echo"])

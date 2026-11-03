@@ -11,6 +11,231 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
+func TestEventTopologyNewOrReplacedTerminalHasUnknownScroll(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		existingTerminal string
+		incomingTerminal string
+		newPane          bool
+	}{
+		{name: "new pane", incomingTerminal: "term-1", newPane: true},
+		{name: "replaced terminal", existingTerminal: "term-old", incomingTerminal: "term-1"},
+		{name: "missing old identity", incomingTerminal: "term-1"},
+		{name: "missing new identity", existingTerminal: "term-1"},
+		{name: "missing both identities"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state := testState()
+			if !tt.newPane {
+				state.CommitInventory([]*AgentState{{
+					PaneID: "pane-1", TerminalID: tt.existingTerminal, Agent: "claude", Status: "idle",
+					ScrollMetricsKnown: true, ScrollMaxOffset: 0,
+				}}, 0)
+			}
+			cached := scrollMetricEventCache(t).Snapshot()
+			poller := NewPoller(nil, state, time.Second, testLogger())
+			incoming := poller.agentsFromTopology(cached.Panes, nil)
+			if len(incoming) != 1 {
+				t.Fatalf("cached agents = %+v", incoming)
+			}
+			incoming[0].TerminalID = tt.incomingTerminal
+			state.CommitTopology(incoming, nil, state.RevisionCounter())
+			agent, ok := state.Agent("pane-1")
+			if !ok || agent.ScrollMetricsKnown || agent.ScrollMaxOffset != 0 || agent.UsesNoScrollbackHistory() {
+				t.Fatalf("event agent = %+v, want unknown metrics", agent)
+			}
+		})
+	}
+}
+
+func TestNoScrollbackHistoryEligibility(t *testing.T) {
+	for _, agentName := range []string{"claude", "Claude Code", "custom-CLAUDE", "qoder", "Qoder CLI", "codex", "opencode", ""} {
+		for _, metric := range []struct {
+			name   string
+			known  bool
+			offset int
+		}{
+			{name: "known zero", known: true},
+			{name: "known positive", known: true, offset: 12},
+			{name: "unknown zero"},
+			{name: "unknown positive", offset: 12},
+		} {
+			t.Run(agentName+"/"+metric.name, func(t *testing.T) {
+				agent := AgentState{Agent: agentName, ScrollMetricsKnown: metric.known, ScrollMaxOffset: metric.offset}
+				claudeLike := agentName == "claude" || agentName == "Claude Code" || agentName == "custom-CLAUDE" || agentName == "qoder" || agentName == "Qoder CLI"
+				want := claudeLike && metric.known && metric.offset == 0
+				if got := agent.UsesNoScrollbackHistory(); got != want {
+					t.Fatalf("eligibility = %v, want %v for %+v", got, want, agent)
+				}
+			})
+		}
+	}
+	t.Run("metric transitions", func(t *testing.T) {
+		state := testState()
+		for _, metric := range []struct {
+			known  bool
+			offset int
+			want   bool
+		}{
+			{known: true, want: true},
+			{known: true, offset: 12},
+			{},
+		} {
+			_, committed := state.CommitPoll([]*AgentState{{
+				PaneID: "pane-1", TerminalID: "term-1", Agent: "claude", Status: "idle",
+				ScrollMetricsKnown: metric.known, ScrollMaxOffset: metric.offset,
+			}}, nil, state.BeginPoll())
+			if !committed {
+				t.Fatal("metric transition poll did not commit")
+			}
+			agent, ok := state.Agent("pane-1")
+			if !ok || agent.ScrollMetricsKnown != metric.known || agent.ScrollMaxOffset != metric.offset || agent.UsesNoScrollbackHistory() != metric.want {
+				t.Fatalf("metric transition agent = %+v, want eligibility %v", agent, metric.want)
+			}
+		}
+	})
+	t.Run("presence updates metadata timestamp", func(t *testing.T) {
+		state := testState()
+		initial := &AgentState{PaneID: "pane-1", Agent: "claude", Status: "idle"}
+		state.CommitInventory([]*AgentState{initial}, 0)
+		known := *initial
+		known.ScrollMetricsKnown = true
+		state.CommitInventory([]*AgentState{&known}, state.RevisionCounter())
+		agent, _ := state.Agent("pane-1")
+		if agent.UpdatedAt == 0 || agent.LastActiveAt != 0 {
+			t.Fatalf("presence update agent = %+v, want metadata timestamp without activity", agent)
+		}
+		state.mu.Lock()
+		state.agents["pane-1"].UpdatedAt = 1
+		state.mu.Unlock()
+		state.CommitInventory([]*AgentState{initial}, state.RevisionCounter())
+		agent, _ = state.Agent("pane-1")
+		if agent.UpdatedAt <= 1 || agent.LastActiveAt != 0 {
+			t.Fatalf("absence update agent = %+v, want new metadata timestamp without activity", agent)
+		}
+	})
+}
+
+func TestScrollMetricsRevisionTracksCommittedChanges(t *testing.T) {
+	for _, path := range []string{"inventory", "poll", "topology same terminal", "topology missing terminal", "topology replacement"} {
+		t.Run(path, func(t *testing.T) {
+			state := testState()
+			initial := &AgentState{PaneID: "p", TerminalID: "terminal", Agent: "claude", Status: "idle", ScrollMetricsKnown: true}
+			state.CommitInventory([]*AgentState{initial}, 0)
+			first := state.ScrollMetricsRevision("p")
+			if first == 0 {
+				t.Fatal("initial metrics have no revision")
+			}
+			incoming := *initial
+			incoming.ScrollMaxOffset = 10
+			switch path {
+			case "inventory":
+				state.CommitInventory([]*AgentState{&incoming}, state.RevisionCounter())
+			case "poll":
+				if _, committed := state.CommitPoll([]*AgentState{&incoming}, nil, state.BeginPoll()); !committed {
+					t.Fatal("poll was not committed")
+				}
+			default:
+				if path == "topology missing terminal" {
+					incoming.TerminalID = ""
+				} else if path == "topology replacement" {
+					incoming.TerminalID = "replacement"
+				}
+				state.CommitTopology([]*AgentState{&incoming}, nil, state.RevisionCounter())
+			}
+			changed := state.ScrollMetricsRevision("p")
+			if path == "topology same terminal" {
+				if changed != first {
+					t.Fatalf("carried metrics advanced revision: got=%d want=%d", changed, first)
+				}
+			} else if changed <= first {
+				t.Fatalf("metric change did not advance revision: got=%d previous=%d", changed, first)
+			}
+			agent, _ := state.Agent("p")
+			state.CommitInventory([]*AgentState{agent}, state.RevisionCounter())
+			state.CommitEvent("p", "working", 1)
+			if got := state.ScrollMetricsRevision("p"); got != changed {
+				t.Fatalf("unchanged metrics advanced revision: got=%d want=%d", got, changed)
+			}
+			state.CommitInventory(nil, state.RevisionCounter())
+			if got := state.ScrollMetricsRevision("p"); got != 0 {
+				t.Fatalf("removed pane retained metric revision: %d", got)
+			}
+			state.CommitInventory([]*AgentState{initial}, state.RevisionCounter())
+			if got := state.ScrollMetricsRevision("p"); got <= changed {
+				t.Fatalf("reappearing pane reused metric revision: got=%d previous=%d", got, changed)
+			}
+		})
+	}
+}
+
+func TestAcceptedStatusObserverRunsOutsideLockWithCapturedIdentity(t *testing.T) {
+	for _, path := range []string{"inventory", "poll", "topology", "event"} {
+		t.Run(path, func(t *testing.T) {
+			state := testState()
+			state.CommitInventory([]*AgentState{{PaneID: "p", TerminalID: "terminal", Agent: "claude", Status: "working"}}, 0)
+			var events []StatusTransition
+			state.SetOnStatusTransition(func(event StatusTransition) {
+				if _, ok := state.Agent(event.PaneID); !ok {
+					t.Error("observer could not read committed state")
+				}
+				events = append(events, event)
+			})
+			agent, _ := state.Agent("p")
+			agent.Status = "idle"
+			switch path {
+			case "inventory":
+				state.CommitInventory([]*AgentState{agent}, state.RevisionCounter())
+			case "poll":
+				state.CommitPoll([]*AgentState{agent}, nil, state.BeginPoll())
+			case "topology":
+				state.CommitTopology([]*AgentState{{PaneID: "new", TerminalID: "new-terminal", Agent: "claude", Status: "idle"}}, nil, state.RevisionCounter())
+			case "event":
+				state.CommitEvent("p", "idle", 1)
+			}
+			if len(events) != 1 {
+				t.Fatalf("status events = %+v", events)
+			}
+			event := events[0]
+			if event.NewStatus != "idle" || event.Revision <= 0 || event.TerminalID == "" {
+				t.Fatalf("captured status event = %+v", event)
+			}
+			if path != "topology" && (event.PaneID != "p" || event.OldStatus != "working" || event.TerminalID != "terminal") {
+				t.Fatalf("captured identity = %+v", event)
+			}
+		})
+	}
+}
+
+func TestAcceptedStatusObserverIgnoresRejectedPollAndIdentityMismatch(t *testing.T) {
+	state := testState()
+	state.CommitInventory([]*AgentState{{PaneID: "p", TerminalID: "terminal", TabID: "tab", Agent: "claude", Status: "working"}}, 0)
+	calls := 0
+	state.SetOnStatusTransition(func(StatusTransition) { calls++ })
+	token := state.BeginPoll()
+	state.MarkTopologyChanged()
+	_, committed := state.CommitPoll([]*AgentState{{PaneID: "p", Status: "idle"}}, nil, token)
+	if committed || state.CommitEventForSession("p", "other-tab", "", "idle", 1) || calls != 0 {
+		t.Fatal("rejected update emitted accepted status")
+	}
+}
+
+func TestAcceptedStatusObserverIncludesBlockedChatDeparture(t *testing.T) {
+	state := testState()
+	state.CommitInventory([]*AgentState{{PaneID: "p", TerminalID: "terminal", Agent: "claude", Status: "blocked", AttentionKind: question.AttentionChat}}, 0)
+	var notificationCalls, statusCalls int
+	state.SetOnTransition(func(string, string, string, string, int64) { notificationCalls++ })
+	state.SetOnStatusTransition(func(event StatusTransition) {
+		if event.OldStatus == "blocked" && event.NewStatus == "idle" {
+			statusCalls++
+		}
+	})
+	state.CommitEvent("p", "idle", 1)
+	if statusCalls != 1 || notificationCalls != 0 {
+		t.Fatalf("status calls=%d notification calls=%d", statusCalls, notificationCalls)
+	}
+}
+
 func TestInventoryFailureClearsReadinessAndPreservesStaleSnapshot(t *testing.T) {
 	state := NewState(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "idle"}}, 0)

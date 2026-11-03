@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -146,6 +147,28 @@ func TestRealPTYDeviceMismatchIsRefused(t *testing.T) {
 	m.mu.Unlock()
 	if tracked != 0 || logs.count(slog.LevelInfo, "dropped") != 1 {
 		t.Fatalf("tracked=%d info=%d", tracked, logs.count(slog.LevelInfo, "dropped"))
+	}
+}
+
+func TestHeldSlaveSizeAfterMasterClose(t *testing.T) {
+	master, slavePath := openPTY(t)
+	t.Cleanup(func() { _ = master.Close() })
+	held, err := ioctlTerminalOps{}.Open(slavePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	setMasterSize(t, master, Winsize{Rows: 24, Columns: 80})
+	if size, err := held.Size(); err != nil || size.Columns != 80 || size.Rows != 24 {
+		t.Fatalf("held slave baseline Size=%+v error=%v", size, err)
+	}
+	if err := master.Close(); err != nil {
+		t.Fatal(err)
+	}
+	size, err := held.Size()
+	t.Logf("native hangup GOOS=%s held-slave Size=%+v errno=%v", runtime.GOOS, size, err)
+	if runtime.GOOS == "linux" && err == nil {
+		t.Fatal("Linux held slave Size succeeded after master close")
 	}
 }
 

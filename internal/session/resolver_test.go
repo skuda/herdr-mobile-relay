@@ -741,3 +741,93 @@ func writeCodexRollout(t *testing.T, codexDir, sessionID string) {
 		t.Fatal(err)
 	}
 }
+
+func appendTranscript(t *testing.T, path string, text string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(text); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func claudeTranscriptPath(home string) string {
+	return filepath.Join(home, ".claude", "projects", "-work", "s1.jsonl")
+}
+
+func claudeTitleAfterExpiry(r *Resolver) string {
+	expireTitleCache(r, "claude|/work|s1")
+	return r.SessionName("claude", "/work", "s1")
+}
+
+func TestClaudeTitleAppendedAfterEarlierRead(t *testing.T) {
+	home := t.TempDir()
+	path := claudeTranscriptPath(home)
+	appendTranscript(t, path, `{"type":"user","message":{"role":"user","content":"hello"}}`+"\n"+
+		`{"type":"summary","summary":"First summary"}`+"\n")
+
+	r := NewResolver(home)
+	if got := r.SessionName("claude", "/work", "s1"); got != "First summary" {
+		t.Fatalf("first call = %q, want %q", got, "First summary")
+	}
+	appendTranscript(t, path, `{"type":"assistant","message":{"role":"assistant","content":"a summary of it"}}`+"\n"+
+		`{"type":"ai-title","aiTitle":"Generated title"}`+"\n")
+	if got := claudeTitleAfterExpiry(r); got != "Generated title" {
+		t.Fatalf("after append = %q, want %q", got, "Generated title")
+	}
+	appendTranscript(t, path, `{"type":"custom-title","customTitle":"Renamed"}`+"\n"+
+		`{"type":"ai-title","aiTitle":"Later generated title"}`+"\n")
+	if got := claudeTitleAfterExpiry(r); got != "Renamed" {
+		t.Fatalf("after rename = %q, want the custom title %q", got, "Renamed")
+	}
+}
+
+func TestClaudeTitleRescansShrunkTranscript(t *testing.T) {
+	home := t.TempDir()
+	path := claudeTranscriptPath(home)
+	appendTranscript(t, path, `{"type":"user","message":{"role":"user","content":"`+strings.Repeat("x", 512)+`"}}`+"\n"+
+		`{"type":"custom-title","customTitle":"Old title"}`+"\n")
+
+	r := NewResolver(home)
+	if got := r.SessionName("claude", "/work", "s1"); got != "Old title" {
+		t.Fatalf("first call = %q, want %q", got, "Old title")
+	}
+	if err := os.WriteFile(path, []byte(`{"type":"summary","summary":"New file"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := claudeTitleAfterExpiry(r); got != "New file" {
+		t.Fatalf("after shrink = %q, want %q from a fresh scan", got, "New file")
+	}
+}
+
+func TestClaudeTitleAfterOversizedLine(t *testing.T) {
+	home := t.TempDir()
+	path := claudeTranscriptPath(home)
+	huge := `{"type":"summary","summary":"` + strings.Repeat("y", maxTitleLineBytes) + `"}` + "\n"
+	appendTranscript(t, path, huge+`{"type":"custom-title","customTitle":"After long line"}`+"\n")
+
+	if got := NewResolver(home).SessionName("claude", "/work", "s1"); got != "After long line" {
+		t.Fatalf("session name = %q, want %q", got, "After long line")
+	}
+}
+
+func TestClaudeTitleOnFinalLineWithoutNewline(t *testing.T) {
+	home := t.TempDir()
+	path := claudeTranscriptPath(home)
+	appendTranscript(t, path, `{"type":"custom-title","customTitle":"Unterminated"}`)
+
+	r := NewResolver(home)
+	if got := r.SessionName("claude", "/work", "s1"); got != "Unterminated" {
+		t.Fatalf("first call = %q, want %q", got, "Unterminated")
+	}
+	appendTranscript(t, path, "\n"+`{"type":"custom-title","customTitle":"Next"}`+"\n")
+	if got := claudeTitleAfterExpiry(r); got != "Next" {
+		t.Fatalf("after newline = %q, want %q", got, "Next")
+	}
+}
